@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -31,7 +32,7 @@ class RobustnessScenario:
     throat_factor: float = 1.0
     isp_factor: float = 1.0
     density_factor: float = 1.0
-    ambient_pressure_pa: float | None = None
+    ambient_pressure_pa: Optional[float] = None
     initial_temperature_k: float = BURN_RATE_TEMP_REFERENCE_K
     nozzle_ablation_scale_factor: float = 1.0
     igniter_energy_factor: float = 1.0

@@ -56,3 +56,16 @@ from .Robustness import (
     run_robustness_analysis,
     summarize_robustness,
 )
+from .Multiphysics import (
+    CasingMaterial,
+    MotorGeometry,
+    NozzleMaterial,
+    geometry_from_components,
+    simulate_advanced_components,
+    simulate_advanced_physics,
+    simulate_cfd_proxies,
+    simulate_flight_1d,
+    simulate_ignition_proxy,
+    simulate_structural_response,
+    simulate_thermal_ablation,
+)
