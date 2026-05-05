@@ -54,14 +54,39 @@ class Burn:
             float: nozzle mass flow for the specified chamber pressure
         """
         T_0, R, _, k, A_t = self.parameters
+        if chamber_pressure <= self.environment_pressure:
+            return 0.0
+
+        pressure_ratio = self.environment_pressure / chamber_pressure
+        critical_pressure_ratio = math.pow(2 / (k + 1), k / (k - 1))
+
+        if pressure_ratio <= critical_pressure_ratio:
+            return (
+                chamber_pressure
+                * A_t
+                * np.sqrt(k / (R * T_0))
+                * math.pow((2 / (k + 1)), ((k + 1) / (2 * (k - 1))))
+            )
+
+        unchoked_term = (
+            math.pow(pressure_ratio, 2 / k)
+            - math.pow(pressure_ratio, (k + 1) / k)
+        )
         return (
-            chamber_pressure
-            * A_t
-            * np.sqrt(k / (R * T_0))
-            * math.pow((2 / (k + 1)), ((k + 1) / (2 * (k - 1))))
+            A_t
+            * chamber_pressure
+            * math.sqrt((2 * k / ((k - 1) * R * T_0)) * max(unchoked_term, 0.0))
         )
 
-    def evaluate_exit_mach(self):
+    def is_nozzle_choked(self, chamber_pressure):
+        """Return whether chamber-to-ambient pressure ratio chokes the throat."""
+        _, _, _, k, _ = self.parameters
+        if chamber_pressure <= self.environment_pressure:
+            return False
+        critical_pressure_ratio = math.pow(2 / (k + 1), k / (k - 1))
+        return self.environment_pressure / chamber_pressure <= critical_pressure_ratio
+
+    def evaluate_exit_mach(self, chamber_pressure=None):
         """Calculation of mach number at nozzle exit
         (ratio of flow speed to the local sound speed).
 
@@ -72,6 +97,22 @@ class Burn:
             float: mach number
         """
         _, _, _, k, _ = self.parameters
+        if chamber_pressure is not None and not self.is_nozzle_choked(
+            chamber_pressure
+        ):
+            if chamber_pressure <= self.environment_pressure:
+                self.exit_mach = 0.0
+                return self.exit_mach
+            pressure_ratio = self.environment_pressure / chamber_pressure
+            self.exit_mach = math.sqrt(
+                max(
+                    (2 / (k - 1))
+                    * (math.pow(1 / pressure_ratio, (k - 1) / k) - 1),
+                    0.0,
+                )
+            )
+            return min(self.exit_mach, 1.0)
+
         func = (
             lambda mach_number: math.pow((k + 1) / 2, -(k + 1) / (2 * (k - 1)))
             * math.pow((1 + (k - 1) / 2 * mach_number**2), (k + 1) / (2 * (k - 1)))
@@ -94,12 +135,17 @@ class Burn:
             float: exit pressure for the specified chamber pressure
         """
         _, _, _, k, _ = self.parameters
+        if not self.is_nozzle_choked(chamber_pressure):
+            self.exit_pressure = self.environment_pressure
+            return self.exit_pressure
+
         self.exit_pressure = chamber_pressure * math.pow(
-            (1 + (k - 1) / 2 * self.evaluate_exit_mach() ** 2), -k / (k - 1)
+            (1 + (k - 1) / 2 * self.evaluate_exit_mach(chamber_pressure) ** 2),
+            -k / (k - 1),
         )
         return self.exit_pressure
 
-    def evaluate_exit_temperature(self):
+    def evaluate_exit_temperature(self, chamber_pressure=None):
         """Calculation of fluid temperature at nozzle exit.
 
         Source:
@@ -109,10 +155,23 @@ class Burn:
             float: exit temperature
         """
         T_0, _, _, k, _ = self.parameters
-        self.exit_temperature = T_0 / (1 + (k - 1) / 2 * self.exit_mach**2)
+        if chamber_pressure is not None and not self.is_nozzle_choked(
+            chamber_pressure
+        ):
+            if chamber_pressure <= self.environment_pressure:
+                self.exit_temperature = T_0
+                return self.exit_temperature
+            self.exit_temperature = T_0 * math.pow(
+                self.environment_pressure / chamber_pressure, (k - 1) / k
+            )
+            return self.exit_temperature
+
+        self.exit_temperature = T_0 / (
+            1 + (k - 1) / 2 * self.evaluate_exit_mach(chamber_pressure) ** 2
+        )
         return self.exit_temperature
 
-    def evaluate_exit_velocity(self):
+    def evaluate_exit_velocity(self, chamber_pressure=None):
         """Calculation of fluid velocity at nozzle exit.
 
         Source:
@@ -122,8 +181,31 @@ class Burn:
             float: exit velocity
         """
         _, R, _, k, _ = self.parameters
-        self.exit_velocity = self.evaluate_exit_mach() * math.sqrt(
-            k * R * self.evaluate_exit_temperature()
+        if chamber_pressure is not None and not self.is_nozzle_choked(
+            chamber_pressure
+        ):
+            if chamber_pressure <= self.environment_pressure:
+                self.exit_velocity = 0.0
+                return self.exit_velocity
+            self.exit_velocity = math.sqrt(
+                max(
+                    (2 * k / (k - 1))
+                    * R
+                    * self.propellant.combustion_temperature
+                    * (
+                        1
+                        - math.pow(
+                            self.environment_pressure / chamber_pressure,
+                            (k - 1) / k,
+                        )
+                    ),
+                    0.0,
+                )
+            )
+            return self.exit_velocity
+
+        self.exit_velocity = self.evaluate_exit_mach(chamber_pressure) * math.sqrt(
+            k * R * self.evaluate_exit_temperature(chamber_pressure)
         )
         return self.exit_velocity
 
@@ -143,6 +225,16 @@ class Burn:
             a given chamber pressure
         """
         _, _, _, k, _ = self.parameters
+        if chamber_pressure <= self.environment_pressure:
+            self.Cf = 0.0
+            return self.Cf
+        if not self.is_nozzle_choked(chamber_pressure):
+            thrust = self.evaluate_nozzle_mass_flow(
+                chamber_pressure
+            ) * self.evaluate_exit_velocity(chamber_pressure)
+            self.Cf = thrust / (chamber_pressure * self.motor.nozzle_throat_area)
+            return self.Cf
+
         self.Cf = (
             math.sqrt(
                 (2 * k**2 / (k - 1))
@@ -528,7 +620,7 @@ class BurnSimulation(Burn):
 
         for chamber_pressure in chamber_pressure_list:
             thrust_list.append(self.evaluate_thrust(chamber_pressure))
-            exit_velocity_list.append(self.evaluate_exit_velocity())
+            exit_velocity_list.append(self.evaluate_exit_velocity(chamber_pressure))
             exit_pressure_list.append(self.evaluate_exit_pressure(chamber_pressure))
 
         return thrust_list, exit_pressure_list, exit_velocity_list
