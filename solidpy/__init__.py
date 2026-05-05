@@ -49,3 +49,10 @@ from .DetailedBallistics import (
     evaluate_nozzle_ablation_rate,
     run_detailed_ballistics,
 )
+from .Robustness import (
+    RobustnessScenario,
+    build_latin_hypercube_scenarios,
+    default_robustness_scenarios,
+    run_robustness_analysis,
+    summarize_robustness,
+)

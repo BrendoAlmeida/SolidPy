@@ -281,6 +281,9 @@ def run_detailed_ballistics(
     resample_step=None,
     max_time_points=None,
     tail_off_evaluation=True,
+    nozzle_ablation_scale=1.0,
+    ablation_pressure_exponent=0.42,
+    ablation_mass_flow_exponent=0.32,
     **simulation_kwargs,
 ):
     """Run a fresh high-resolution burn and return detailed internal series."""
@@ -303,6 +306,9 @@ def run_detailed_ballistics(
         simulation,
         resample_step=resample_step if resample_step is not None else max_step_size,
         max_time_points=max_time_points,
+        nozzle_ablation_scale=nozzle_ablation_scale,
+        ablation_pressure_exponent=ablation_pressure_exponent,
+        ablation_mass_flow_exponent=ablation_mass_flow_exponent,
     )
     detailed["simulation"] = simulation
     return detailed
