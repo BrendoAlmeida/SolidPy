@@ -98,7 +98,9 @@ class BurnEmpirical(Burn):
         regressed_length = 0.0
         burn_area = (
             self.motor.grain_number
-            * self.motor.grain.evaluate_tubular_burn_area(regressed_length)
+            * self.motor.grain.evaluate_tubular_burn_area(
+                regressed_length, update_state=False
+            )
         )
 
         # Loop iteration - calculate burn_rate at each step
@@ -132,7 +134,9 @@ class BurnEmpirical(Burn):
                 break
             burn_area = (
                 self.motor.grain_number
-                * self.motor.grain.evaluate_tubular_burn_area(regressed_length)
+                * self.motor.grain.evaluate_tubular_burn_area(
+                    regressed_length, update_state=False
+                )
             )
             free_volume += burn_area * burn_rate * delta_time
 

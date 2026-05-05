@@ -42,20 +42,42 @@ class Grain:
 
     def evaluate_grain_geometry(self):
         if self.geometry == "tubular":
-            self.evaluate_tubular_burn_area(0)
+            self.evaluate_tubular_burn_area(0, update_state=True)
         elif self.geometry == "star":
             pass
         else:
             print("Not a valid geometry type")
 
-    def evaluate_tubular_burn_area(self, regressed_length):
-        self.height = self.initial_height - 2 * regressed_length
-        self.inner_radius = self.initial_inner_radius + regressed_length
-        transversal_area = 2 * np.pi * (self.outer_radius**2 - self.inner_radius**2)
-        longitudinal_area = 2 * np.pi * self.inner_radius * self.height
-        self.burn_area = transversal_area + longitudinal_area
+    def calculate_tubular_geometry(self, regressed_length):
+        regressed_length = max(float(regressed_length), 0.0)
+        web_thickness = self.outer_radius - self.initial_inner_radius
+        burned_through = (
+            regressed_length >= web_thickness
+            or regressed_length >= self.initial_height / 2
+        )
 
-        return self.burn_area
+        inner_radius = min(
+            self.initial_inner_radius + regressed_length, self.outer_radius
+        )
+        height = max(self.initial_height - 2 * regressed_length, 0.0)
+        if burned_through:
+            return height, inner_radius, 0.0
+
+        transversal_area = 2 * np.pi * (self.outer_radius**2 - inner_radius**2)
+        longitudinal_area = 2 * np.pi * inner_radius * height
+        burn_area = transversal_area + longitudinal_area
+        return height, inner_radius, burn_area
+
+    def evaluate_tubular_burn_area(self, regressed_length, update_state=False):
+        height, inner_radius, burn_area = self.calculate_tubular_geometry(
+            regressed_length
+        )
+        if update_state:
+            self.height = height
+            self.inner_radius = inner_radius
+            self.burn_area = burn_area
+
+        return burn_area
 
     def evaluate_grain_volume(self):
         self.volume = (

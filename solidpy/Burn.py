@@ -470,7 +470,9 @@ class BurnSimulation(Burn):
         igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
         geometric_burn_area = (
             self.motor.grain_number
-            * self.motor.grain.evaluate_tubular_burn_area(regressed_length)
+            * self.motor.grain.evaluate_tubular_burn_area(
+                regressed_length, update_state=False
+            )
         )
         burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
             time, regressed_length
@@ -521,8 +523,12 @@ class BurnSimulation(Burn):
                 integer: boolean integer as termination parameter
             """
             chamber_pressure, free_volume, regressed_length = state_variables
+            max_regression = min(
+                self.grain.outer_radius - self.grain.initial_inner_radius,
+                self.grain.initial_height / 2,
+            )
             if (self.motor.chamber_volume - free_volume < 1e-6) or (
-                self.grain.inner_radius >= self.grain.outer_radius
+                regressed_length >= max_regression
             ):
                 return 0
             return 1
