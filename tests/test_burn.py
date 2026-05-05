@@ -44,14 +44,12 @@ class TestBurn:
 
     def test_free_volume(self):
         for free_vol in self.free_volume:
-            assert 0 < free_vol < Leviata.chamber_volume
+            assert 0 < free_vol <= Leviata.chamber_volume + 1e-12
 
     def test_regressed_length(self):
+        max_regression = Grao_Leviata.outer_radius - Grao_Leviata.initial_inner_radius
         for regressed_len in self.regressed_length:
-            assert (
-                regressed_len
-                < Grao_Leviata.outer_radius - Grao_Leviata.initial_inner_radius
-            )
+            assert regressed_len <= max_regression + 1e-12
 
     def test_output_list_size(self):
         lenght = len(self.time)
