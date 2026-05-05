@@ -11,12 +11,20 @@ import matplotlib.pyplot as plt
 
 from matplotlib.font_manager import FontProperties
 
-from Grain import Grain
-from Motor import Motor
-from Environment import Environment
-from Propellant import Propellant
-from Burn import Burn
-from Export import Export
+try:
+    from .Grain import Grain
+    from .Motor import Motor
+    from .Environment import Environment
+    from .Propellant import Propellant
+    from .Burn import Burn
+    from .Export import Export
+except ImportError:
+    from Grain import Grain
+    from Motor import Motor
+    from Environment import Environment
+    from Propellant import Propellant
+    from Burn import Burn
+    from Export import Export
 
 
 class BurnEmpirical(Burn):

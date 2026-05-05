@@ -9,14 +9,25 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.optimize import fsolve
-from scipy.integrate import solve_ivp, cumtrapz
+from scipy.integrate import solve_ivp
+try:
+    from scipy.integrate import cumulative_trapezoid
+except ImportError:
+    from scipy.integrate import cumtrapz as cumulative_trapezoid
 from matplotlib.font_manager import FontProperties
 
-from Grain import Grain
-from Propellant import Propellant
-from Motor import Motor
-from Environment import Environment
-from Export import Export
+try:
+    from .Grain import Grain
+    from .Propellant import Propellant
+    from .Motor import Motor
+    from .Environment import Environment
+    from .Export import Export
+except ImportError:
+    from Grain import Grain
+    from Propellant import Propellant
+    from Motor import Motor
+    from Environment import Environment
+    from Export import Export
 
 
 class Burn:
@@ -297,7 +308,7 @@ class Burn:
             float: the total impulse correspondent to the integral of
             the given values
         """
-        total_impulse = cumtrapz(thrust_list, time_list)[-1]
+        total_impulse = cumulative_trapezoid(thrust_list, time_list)[-1]
         return total_impulse
 
     def evaluate_specific_impulse(self, thrust_list, time_list):

@@ -11,8 +11,12 @@ from scipy import interpolate
 from scipy.integrate import solve_ivp
 from matplotlib.font_manager import FontProperties
 
-from Environment import Environment
-from Export import Export
+try:
+    from .Environment import Environment
+    from .Export import Export
+except ImportError:
+    from Environment import Environment
+    from Export import Export
 
 
 class Rail:
