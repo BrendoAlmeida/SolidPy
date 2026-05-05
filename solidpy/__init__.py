@@ -44,3 +44,8 @@ from .BurnEmpirical import BurnEmpirical
 from .Environment import Environment
 from .Rail import Rail
 from .Export import Export
+from .DetailedBallistics import (
+    build_detailed_ballistics,
+    evaluate_nozzle_ablation_rate,
+    run_detailed_ballistics,
+)
