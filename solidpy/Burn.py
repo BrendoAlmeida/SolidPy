@@ -20,7 +20,9 @@ from Export import Export
 
 
 class Burn:
-    def __init__(self, grain, motor, propellant, environment=Environment()):
+    def __init__(self, grain, motor, propellant, environment=None):
+        if environment is None:
+            environment = Environment()
         self.motor = motor
         self.grain = grain
         self.propellant = propellant
@@ -348,7 +350,7 @@ class BurnSimulation(Burn):
         grain,
         motor,
         propellant,
-        environment=Environment(),
+        environment=None,
         max_step_size=0.01,
         tail_off_evaluation=True,
         igniter_mass_flow=None,

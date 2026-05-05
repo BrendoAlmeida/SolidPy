@@ -25,7 +25,7 @@ class BurnEmpirical(Burn):
         grain,
         motor,
         propellant,
-        environment=Environment(),
+        environment=None,
         empirical_data=None,
     ):
         Burn.__init__(self, grain, motor, propellant, environment)
