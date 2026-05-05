@@ -578,11 +578,19 @@ class BurnSimulation(Burn):
         total_burn_solution = []
 
         if tail_off_solution:
+            tail_off_start = 0
+            if (
+                len(grain_solution[0]) > 0
+                and len(tail_off_solution[0]) > 0
+                and tail_off_solution[0][0] <= grain_solution[0][-1]
+            ):
+                tail_off_start = 1
+
             for grain_parameter, tail_off_parameter in zip(
                 grain_solution, tail_off_solution
             ):
                 total_burn_solution.append(
-                    np.append(grain_parameter, tail_off_parameter)
+                    np.append(grain_parameter, tail_off_parameter[tail_off_start:])
                 )
         else:
             for grain_parameter in grain_solution:
