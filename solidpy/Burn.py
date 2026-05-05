@@ -358,6 +358,7 @@ class BurnSimulation(Burn):
         igniter_temperature=None,
         burn_area_activation=None,
         ignition_ramp_time=0.0,
+        tail_off_method="numerical",
     ):
         Burn.__init__(self, grain, motor, propellant, environment)
         self.max_step_size = max_step_size
@@ -370,6 +371,7 @@ class BurnSimulation(Burn):
         )
         self.burn_area_activation = burn_area_activation
         self.ignition_ramp_time = max(float(ignition_ramp_time), 0.0)
+        self.tail_off_method = str(tail_off_method).lower()
 
         self.grain_burn_solution = self.evaluate_grain_burn_solution()
         self.tail_off_solution = (
@@ -551,13 +553,20 @@ class BurnSimulation(Burn):
         return solution
 
     def solve_tail_off_regime(self):
-        """Evaluates an analytical equation that describes the remaining
-        chamber gases behavior after total grain burn.
+        """Evaluate the chamber gas depressurization after total grain burn.
 
         Returns:
             list: solution of the tail off regime, grouping time steps
             and chamber pressure
         """
+        if self.tail_off_method == "analytical":
+            return self.solve_analytical_tail_off_regime()
+        if self.tail_off_method != "numerical":
+            raise ValueError("tail_off_method must be 'numerical' or 'analytical'")
+        return self.solve_numerical_tail_off_regime()
+
+    def solve_analytical_tail_off_regime(self):
+        """Evaluate the original choked-flow analytical tail-off model."""
 
         T_0, R, _, _, A_t = self.parameters
 
@@ -607,6 +616,65 @@ class BurnSimulation(Burn):
                 )
             else:
                 break
+
+        self.tail_off_solution = [
+            tail_off_time,
+            tail_off_chamber_pressure,
+            tail_off_free_volume,
+            tail_off_regressed_length,
+        ]
+
+        return self.tail_off_solution
+
+    def solve_numerical_tail_off_regime(self):
+        """Numerically integrate post-burn chamber blowdown."""
+        T_0, R, _, _, _ = self.parameters
+
+        initial_time = self.grain_burn_solution[0][-1]
+        initial_chamber_pressure = self.grain_burn_solution[1][-1]
+        free_volume = self.motor.chamber_volume
+        regressed_length = min(
+            self.grain.outer_radius - self.grain.initial_inner_radius,
+            self.grain.initial_height / 2,
+        )
+
+        if initial_chamber_pressure <= self.environment_pressure * 1.0001:
+            self.tail_off_solution = [
+                [initial_time],
+                [initial_chamber_pressure],
+                [free_volume],
+                [regressed_length],
+            ]
+            return self.tail_off_solution
+
+        def tail_off_vector(time, state_variables):
+            chamber_pressure = max(float(state_variables[0]), self.environment_pressure)
+            nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
+            return [-nozzle_mass_flow * R * T_0 / free_volume]
+
+        def end_tail_off(time, state_variables):
+            return state_variables[0] - self.environment_pressure * 1.0001
+
+        end_tail_off.terminal = True
+        end_tail_off.direction = -1
+
+        solution = solve_ivp(
+            tail_off_vector,
+            (initial_time, 100.0),
+            [initial_chamber_pressure],
+            method="DOP853",
+            events=end_tail_off,
+            max_step=max(float(self.max_step_size), 1e-6),
+            atol=1e-8,
+            rtol=1e-10,
+        )
+
+        tail_off_time = solution.t
+        tail_off_chamber_pressure = solution.y[0]
+        tail_off_free_volume = np.full_like(tail_off_time, free_volume, dtype=float)
+        tail_off_regressed_length = np.full_like(
+            tail_off_time, regressed_length, dtype=float
+        )
 
         self.tail_off_solution = [
             tail_off_time,
