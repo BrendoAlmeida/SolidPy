@@ -345,7 +345,7 @@ class BurnSimulation(Burn):
             state_variables,
             method="DOP853",
             events=end_burn_propellant,
-            max_step=0.01,
+            max_step=max(float(self.max_step_size), 1e-6),
             atol=1e-8,
             rtol=1e-10,
         )
