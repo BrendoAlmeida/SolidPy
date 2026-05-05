@@ -30,6 +30,7 @@ class Burn:
         self.environment_pressure = environment.atmospheric_pressure
 
         self.parameters = self.set_parameters()
+        self._exit_mach_cache = {}
 
     def set_parameters(self):
         parameters = (
@@ -113,6 +114,11 @@ class Burn:
             )
             return min(self.exit_mach, 1.0)
 
+        cache_key = (k, self.motor.expansion_ratio)
+        if cache_key in self._exit_mach_cache:
+            self.exit_mach = self._exit_mach_cache[cache_key]
+            return self.exit_mach
+
         func = (
             lambda mach_number: math.pow((k + 1) / 2, -(k + 1) / (2 * (k - 1)))
             * math.pow((1 + (k - 1) / 2 * mach_number**2), (k + 1) / (2 * (k - 1)))
@@ -120,6 +126,7 @@ class Burn:
             - self.motor.expansion_ratio
         )
         self.exit_mach = fsolve(func, np.array(2))[0]
+        self._exit_mach_cache[cache_key] = self.exit_mach
         return self.exit_mach
 
     def evaluate_exit_pressure(self, chamber_pressure):
