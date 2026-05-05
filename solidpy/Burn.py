@@ -132,12 +132,18 @@ class Burn:
             self.exit_mach = self._exit_mach_cache[cache_key]
             return self.exit_mach
 
-        func = (
-            lambda mach_number: math.pow((k + 1) / 2, -(k + 1) / (2 * (k - 1)))
-            * math.pow((1 + (k - 1) / 2 * mach_number**2), (k + 1) / (2 * (k - 1)))
-            / mach_number
-            - self.motor.expansion_ratio
-        )
+        def func(mach_number):
+            mach_number = float(np.asarray(mach_number).reshape(-1)[0])
+            return (
+                math.pow((k + 1) / 2, -(k + 1) / (2 * (k - 1)))
+                * math.pow(
+                    (1 + (k - 1) / 2 * mach_number**2),
+                    (k + 1) / (2 * (k - 1)),
+                )
+                / mach_number
+                - self.motor.expansion_ratio
+            )
+
         self.exit_mach = fsolve(func, np.array(2))[0]
         self._exit_mach_cache[cache_key] = self.exit_mach
         return self.exit_mach
