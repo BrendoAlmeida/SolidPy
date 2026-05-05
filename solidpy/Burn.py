@@ -255,6 +255,8 @@ class BurnSimulation(Burn):
         igniter_mass_flow=None,
         igniter_burn_time=0.0,
         igniter_temperature=None,
+        burn_area_activation=None,
+        ignition_ramp_time=0.0,
     ):
         Burn.__init__(self, grain, motor, propellant, environment)
         self.max_step_size = max_step_size
@@ -265,6 +267,8 @@ class BurnSimulation(Burn):
             if igniter_temperature is None
             else float(igniter_temperature)
         )
+        self.burn_area_activation = burn_area_activation
+        self.ignition_ramp_time = max(float(ignition_ramp_time), 0.0)
 
         self.grain_burn_solution = self.evaluate_grain_burn_solution()
         self.tail_off_solution = (
@@ -304,6 +308,45 @@ class BurnSimulation(Burn):
             return 0.0
         return max(float(np.interp(time, profile_time, profile_mass_flow)), 0.0)
 
+    def evaluate_burn_area_activation(self, time, regressed_length):
+        """Evaluate the ignited fraction of the available burn area.
+
+        The activation factor represents flame spreading over the exposed
+        grain surface. It is dimensionless and clipped to the physical range
+        [0, 1]. It can be a callable, a constant, a two-column time table, or
+        the built-in smooth ramp controlled by ``ignition_ramp_time``.
+        """
+        source = self.burn_area_activation
+
+        if source is None:
+            if self.ignition_ramp_time <= 0.0:
+                return 1.0
+            progress = min(max(time / self.ignition_ramp_time, 0.0), 1.0)
+            return progress * progress * (3.0 - 2.0 * progress)
+        if callable(source):
+            try:
+                activation = source(time, regressed_length)
+            except TypeError:
+                activation = source(time)
+            return min(max(float(activation), 0.0), 1.0)
+        if np.isscalar(source):
+            return min(max(float(source), 0.0), 1.0)
+
+        profile = np.asarray(source, dtype=float)
+        if profile.ndim != 2 or profile.shape[1] != 2:
+            raise ValueError(
+                "burn_area_activation must be None, a callable, a scalar, or a two-column time/activation table"
+            )
+
+        profile_time = profile[:, 0]
+        profile_activation = profile[:, 1]
+        if time < profile_time[0]:
+            return min(max(float(profile_activation[0]), 0.0), 1.0)
+        if time > profile_time[-1]:
+            return min(max(float(profile_activation[-1]), 0.0), 1.0)
+        activation = np.interp(time, profile_time, profile_activation)
+        return min(max(float(activation), 0.0), 1.0)
+
     def vector_field(self, time, state_variables):
         """Generates the vector field of the corresponding simulations
         state variables (chamber pressure, free combustion chamber volume,
@@ -326,9 +369,12 @@ class BurnSimulation(Burn):
         rho_0 = chamber_pressure / (R * T_0)  # product_gas_density
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
         igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
-        burn_area = (
+        geometric_burn_area = (
             self.motor.grain_number
             * self.motor.grain.evaluate_tubular_burn_area(regressed_length)
+        )
+        burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
+            time, regressed_length
         )
         burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure)
 
