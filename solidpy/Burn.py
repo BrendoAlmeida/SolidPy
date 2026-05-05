@@ -252,9 +252,19 @@ class BurnSimulation(Burn):
         environment=Environment(),
         max_step_size=0.01,
         tail_off_evaluation=True,
+        igniter_mass_flow=None,
+        igniter_burn_time=0.0,
+        igniter_temperature=None,
     ):
         Burn.__init__(self, grain, motor, propellant, environment)
         self.max_step_size = max_step_size
+        self.igniter_mass_flow = igniter_mass_flow
+        self.igniter_burn_time = max(float(igniter_burn_time), 0.0)
+        self.igniter_temperature = (
+            propellant.combustion_temperature
+            if igniter_temperature is None
+            else float(igniter_temperature)
+        )
 
         self.grain_burn_solution = self.evaluate_grain_burn_solution()
         self.tail_off_solution = (
@@ -263,6 +273,36 @@ class BurnSimulation(Burn):
         self.total_burn_solution = self.evaluate_complete_solution()
 
     """Solver required functions"""
+
+    def evaluate_igniter_mass_flow(self, time):
+        """Evaluate optional igniter gas mass flow at the current time.
+
+        The value can be supplied as a callable ``m_dot(t)``, as a scalar
+        paired with ``igniter_burn_time``, or as a two-column ``(time, m_dot)``
+        table. Returned units are kg/s.
+        """
+        source = self.igniter_mass_flow
+
+        if source is None:
+            return 0.0
+        if callable(source):
+            return max(float(source(time)), 0.0)
+        if np.isscalar(source):
+            if self.igniter_burn_time <= 0.0 or time > self.igniter_burn_time:
+                return 0.0
+            return max(float(source), 0.0)
+
+        profile = np.asarray(source, dtype=float)
+        if profile.ndim != 2 or profile.shape[1] != 2:
+            raise ValueError(
+                "igniter_mass_flow must be None, a callable, a scalar, or a two-column time/mass-flow table"
+            )
+
+        profile_time = profile[:, 0]
+        profile_mass_flow = profile[:, 1]
+        if time < profile_time[0] or time > profile_time[-1]:
+            return 0.0
+        return max(float(np.interp(time, profile_time, profile_mass_flow)), 0.0)
 
     def vector_field(self, time, state_variables):
         """Generates the vector field of the corresponding simulations
@@ -285,6 +325,7 @@ class BurnSimulation(Burn):
 
         rho_0 = chamber_pressure / (R * T_0)  # product_gas_density
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
+        igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
         burn_area = (
             self.motor.grain_number
             * self.motor.grain.evaluate_tubular_burn_area(regressed_length)
@@ -292,7 +333,11 @@ class BurnSimulation(Burn):
         burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure)
 
         vector_state = [
-            (burn_area * burn_rate * (rho_g - rho_0) - nozzle_mass_flow)
+            (
+                burn_area * burn_rate * (rho_g - rho_0)
+                + igniter_mass_flow * self.igniter_temperature / T_0
+                - nozzle_mass_flow
+            )
             * R
             * T_0
             / free_volume,
