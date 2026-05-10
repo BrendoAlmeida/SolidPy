@@ -816,6 +816,144 @@ def evaluate_cd_by_components(
     }
 
 
+def evaluate_barrowman_stability(
+    nose_length_m,
+    body_diameter_m,
+    n_fins=4,
+    fin_root_chord_m=0.08,
+    fin_tip_chord_m=0.04,
+    fin_span_m=0.06,
+    fin_sweep_angle_rad=0.52,
+    cg_from_nose_m=None,
+    body_length_m=None,
+    propellant_mass_kg=0.0,
+    empty_mass_kg=1.0,
+    nose_shape="conical",
+):
+    """Estimate centre-of-pressure using the Barrowman equations (1966).
+
+    Implements the classic subsonic Barrowman method as used in OpenRocket and
+    described in Niskanen (2009) §3.  Computes the normal-force coefficient
+    slope (CNα) and CP location for a nose cone + cylindrical body + trapezoidal
+    fins configuration.
+
+    Barrowman is valid for M < 0.6 and small angle of attack (α < 10°).  For
+    quick transonic/supersonic estimates the CP is held at the subsonic value
+    (conservative for stability analysis).
+
+    Args:
+        nose_length_m        — axial length of the nose cone [m].
+        body_diameter_m      — reference body diameter [m].
+        n_fins               — number of identical fins (default 4).
+        fin_root_chord_m     — fin chord at the root [m] (default 0.08).
+        fin_tip_chord_m      — fin chord at the tip [m] (default 0.04).
+        fin_span_m           — fin half-span from body (normal to axis) [m].
+        fin_sweep_angle_rad  — leading-edge sweep angle measured from body axis
+                               [rad] (0 = unswept, ~0.5 rad = 30° sweep).
+        cg_from_nose_m       — distance of CG from nose tip [m]; if None the
+                               CG is estimated from body geometry.
+        body_length_m        — total body length from nose tip to base [m];
+                               if None, body_length = nose_length + 3*diameter.
+        propellant_mass_kg   — current propellant mass for CG shift estimate [kg].
+        empty_mass_kg        — empty vehicle mass [kg].
+        nose_shape           — "conical" (default) or "ogive"; ogive CP at 0.467*L_nose.
+
+    Returns:
+        dict with keys:
+            cp_from_nose_m          — CP distance from nose tip [m].
+            cg_from_nose_m          — CG distance from nose tip [m].
+            static_margin_cal       — (CP − CG) / d_ref in calibres (>1 = stable).
+            cn_alpha_nose           — nose normal-force slope.
+            cn_alpha_fins           — fin normal-force slope (total, all fins).
+            cn_alpha_total          — total CNα of the rocket.
+            is_stable               — True when static margin ≥ 1 calibre.
+    """
+    d = max(float(body_diameter_m), 1e-3)
+    R = d / 2.0
+    A_ref = math.pi * R ** 2
+    L_nose = max(float(nose_length_m), d * 0.5)
+
+    if body_length_m is not None:
+        L_body = max(float(body_length_m), L_nose)
+    else:
+        L_body = L_nose + 3.0 * d
+
+    # ── Nose cone contribution ────────────────────────────────────────────────
+    # CNα_nose = 2  (slender-body theory, any axisymmetric nose)
+    cn_alpha_nose = 2.0
+    # CP location:
+    if nose_shape == "ogive":
+        xcp_nose = 0.467 * L_nose   # OpenRocket: tangent ogive CP at 0.467*L_nose
+    else:
+        xcp_nose = L_nose / 3.0     # conical: 1/3 from base = 2/3 from tip
+
+    # Wait: Barrowman measures from nose TIP, cone CP = L_nose / 3 from tip? No.
+    # For a CONE: cp_from_tip = (2/3)*L_nose  (at 2/3 of the way from tip to base)
+    # Actually Barrowman: for conical nose, XCP = 0.666*L_nose from nose tip.
+    # For ogive: XCP ≈ 0.466*L_nose from nose tip.
+    if nose_shape == "ogive":
+        xcp_nose = 0.466 * L_nose
+    else:
+        xcp_nose = 0.666 * L_nose   # Barrowman (1966) eq.(6)
+
+    # ── Fin contribution (Barrowman trapezoidal fin equations) ───────────────
+    N = max(int(n_fins), 3)
+    Cr = max(float(fin_root_chord_m), 1e-4)    # root chord
+    Ct = max(float(fin_tip_chord_m), 0.0)       # tip chord  (0 = triangular)
+    s = max(float(fin_span_m), 1e-4)            # fin span (one side, from body)
+    Lambda = float(fin_sweep_angle_rad)          # leading-edge sweep from axis
+
+    # Mid-chord sweep angle
+    Lambda_mid = math.atan(math.tan(Lambda) - (Cr - Ct) / (2.0 * s))
+
+    # Fin aspect ratio (for one fin panel, both sides)
+    A_fin = (Cr + Ct) / 2.0 * s         # planform area of one fin
+    AR = 2.0 * s ** 2 / max(A_fin, 1e-9)  # full-span aspect ratio
+
+    # CNα per fin panel (Barrowman eq. 7)
+    # CNα_fin = 4*N*s²/d² / (1 + √(1 + (2*s/(Cr+Ct))²)) (Barrowman simplified)
+    fin_ratio = 1.0 + s / max(s + R, 1e-9)  # interference factor K_fin
+    cn_alpha_1fin = (4.0 * s ** 2 / max(d ** 2, 1e-9)) / (
+        1.0 + math.sqrt(1.0 + (2.0 * s / max(Cr + Ct, 1e-9)) ** 2)
+    )
+    cn_alpha_fins = N * fin_ratio * cn_alpha_1fin   # all fins
+
+    # CP of fins from nose tip = x_fin_le + (Cr/3)*(Cr+2*Ct)/(Cr+Ct) + Ym*tan(Lambda_mid)
+    # x_fin_le (leading edge of root at body): take at base of rocket
+    x_fin_le = L_body - Cr       # root LE at body base minus root chord
+    Ym = s / 3.0 * (Cr + 2 * Ct) / max(Cr + Ct, 1e-9)   # centroid span location
+    xcp_fins = x_fin_le + Cr / 3.0 * (Cr + 2 * Ct) / max(Cr + Ct, 1e-9) + Ym * math.tan(Lambda_mid)
+
+    # ── Total CP (area-weighted Barrowman) ────────────────────────────────────
+    cn_alpha_total = cn_alpha_nose + cn_alpha_fins
+    cp_from_nose = (cn_alpha_nose * xcp_nose + cn_alpha_fins * xcp_fins) / max(cn_alpha_total, 1e-9)
+
+    # ── CG estimate ──────────────────────────────────────────────────────────
+    if cg_from_nose_m is not None:
+        cg = float(cg_from_nose_m)
+    else:
+        # Simple CG estimate: assume uniform mass distribution along body length
+        # shifted forward by propellant loading fraction
+        total_mass = max(empty_mass_kg + propellant_mass_kg, 1e-9)
+        cg_empty = 0.45 * L_body        # typical empty CG at 45% from nose
+        cg_prop = 0.60 * L_body         # propellant CG near aft (60% from nose)
+        cg = (empty_mass_kg * cg_empty + propellant_mass_kg * cg_prop) / total_mass
+
+    # ── Static margin ─────────────────────────────────────────────────────────
+    static_margin_cal = (cp_from_nose - cg) / max(d, 1e-9)   # in calibres
+    is_stable = static_margin_cal >= 1.0
+
+    return {
+        "cp_from_nose_m": float(cp_from_nose),
+        "cg_from_nose_m": float(cg),
+        "static_margin_cal": float(static_margin_cal),
+        "cn_alpha_nose": float(cn_alpha_nose),
+        "cn_alpha_fins": float(cn_alpha_fins),
+        "cn_alpha_total": float(cn_alpha_total),
+        "is_stable": bool(is_stable),
+    }
+
+
 def _resolve_gamma(curve, gamma_arg):
     """Return the specific heat ratio to use across advanced models.
 
