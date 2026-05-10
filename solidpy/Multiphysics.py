@@ -954,6 +954,319 @@ def evaluate_barrowman_stability(
     }
 
 
+def simulate_flight_3dof(
+    geometry,
+    curve,
+    launch_angle_deg=90.0,
+    launch_azimuth_deg=0.0,
+    wind_speed_m_s=0.0,
+    wind_direction_deg=0.0,
+    rail_length_m=5.0,
+    airframe_to_motor_mass_ratio=2.4,
+    drag_coefficient_factor=1.0,
+    nose_half_angle_rad=None,
+    body_fineness_ratio=10.0,
+    static_margin_cal=2.0,
+    barrowman_result=None,
+    max_time_s=300.0,
+):
+    """3-DOF point-mass trajectory simulation with wind, varying atmosphere, and stability.
+
+    Integrates the equations of motion in an inertial XYZ frame where:
+      X — horizontal downrange (launch azimuth direction)
+      Y — horizontal crossrange (perpendicular to azimuth)
+      Z — vertical (up positive)
+
+    During powered flight the rocket is assumed to maintain its launch angle
+    (rail guidance approximation during motor burn + a simple weathercocking
+    correction for wind).  After burnout the trajectory is ballistic with full
+    3-DOF dynamics.  Stability assessment uses the Barrowman static margin
+    (from barrowman_result or the static_margin_cal parameter).
+
+    Wind model — constant horizontal wind vector at all altitudes (simple model;
+    no Dryden turbulence).
+
+    State vector: [x, y, z, vx, vy, vz]  (positions [m], velocities [m/s])
+
+    Args:
+        geometry              — MotorGeometry instance.
+        curve                 — Burn simulation output dict (needs time_s, thrust_n,
+                                propellant_mass_kg).
+        launch_angle_deg      — elevation angle from horizontal [deg] (default 90 = vertical).
+        launch_azimuth_deg    — azimuth of launch direction from North [deg].
+        wind_speed_m_s        — constant horizontal wind speed [m/s] (default 0).
+        wind_direction_deg    — direction wind is BLOWING FROM [deg from North].
+        rail_length_m         — launch rail length; vehicle follows rail during this phase.
+        airframe_to_motor_mass_ratio — airframe dry mass / motor final mass (default 2.4).
+        drag_coefficient_factor      — scale factor applied to Cd (robustness).
+        nose_half_angle_rad   — if given, use component Cd model; else piecewise.
+        body_fineness_ratio   — L/D for friction drag (used with component model).
+        static_margin_cal     — assumed static margin in calibres (used when
+                                barrowman_result is None) for weathercocking estimate.
+        barrowman_result      — output of evaluate_barrowman_stability(), used to
+                                compute the weathercocking correction angle.
+        max_time_s            — maximum integration time [s] (default 300).
+
+    Returns:
+        dict with simulation summary and trajectory arrays.
+    """
+    import math
+    # ── Parse inputs ──────────────────────────────────────────────────────────
+    theta0 = math.radians(max(0.0, min(float(launch_angle_deg), 90.0)))  # elevation
+    azimuth = math.radians(float(launch_azimuth_deg))
+
+    # Launch direction unit vector (X downrange, Z up)
+    # X = sin(90-theta)*cos(azimuth), Y = sin(90-theta)*sin(azimuth), Z = sin(theta)
+    # But we'll treat X as the primary downrange horizontal.
+    sin_theta = math.sin(theta0)
+    cos_theta = math.cos(theta0)
+    # Downrange = projected horizontal of launch direction
+    launch_dir = np.array([cos_theta * math.cos(azimuth),
+                           cos_theta * math.sin(azimuth),
+                           sin_theta])   # unit vector
+
+    # Wind velocity vector in NEU frame (X=North, Y=East, Z=Up).
+    # "wind_direction_deg" is the compass bearing FROM WHICH the wind blows.
+    # Wind blows TOWARD (bearing + 180) mod 360.
+    # At compass bearing B: North component = cos(B_rad), East component = sin(B_rad).
+    w_speed = max(float(wind_speed_m_s), 0.0)
+    wind_to_bearing_rad = math.radians((float(wind_direction_deg) + 180.0) % 360.0)
+    wind_vec = np.array([w_speed * math.cos(wind_to_bearing_rad),
+                         w_speed * math.sin(wind_to_bearing_rad),
+                         0.0])
+
+    # Static margin for weathercocking
+    if barrowman_result is not None:
+        sm = float(barrowman_result.get("static_margin_cal", static_margin_cal))
+    else:
+        sm = max(float(static_margin_cal), 0.0)
+
+    time_s = np.asarray(curve["time_s"], dtype=float)
+    thrust_n = np.asarray(curve["thrust_n"], dtype=float)
+    propellant_mass = _series(
+        curve,
+        "propellant_mass_kg",
+        np.linspace(geometry.propellant_mass_kg, 0.0, len(time_s)),
+    )
+
+    dry_airframe_mass = geometry.motor_final_mass_kg * max(float(airframe_to_motor_mass_ratio), 0.0)
+    body_diameter = max(
+        geometry.motor_inner_diameter_m + 2.0 * geometry.casing_wall_thickness_m,
+        1e-3,
+    )
+    reference_area = math.pi * (0.5 * body_diameter) ** 2
+    use_component_cd = nose_half_angle_rad is not None
+
+    def get_cd(mach, burning, alt):
+        if use_component_cd:
+            r = evaluate_cd_by_components(
+                mach=mach,
+                nose_half_angle_rad=nose_half_angle_rad,
+                body_fineness_ratio=body_fineness_ratio,
+                is_burning=burning,
+                altitude_m=alt,
+                body_length_m=body_fineness_ratio * body_diameter,
+            )
+            cd = r["cd_total"]
+        else:
+            if mach < 0.75:
+                cd = 0.48
+            elif mach < 1.2:
+                cd = 0.48 + 0.35 * (mach - 0.75) / 0.45
+            elif mach < 2.0:
+                cd = 0.83 - 0.18 * (mach - 1.2) / 0.8
+            else:
+                cd = 0.65
+        return max(0.05, cd * max(float(drag_coefficient_factor), 0.01))
+
+    # ── Powered-phase integration (Euler, same time steps as burn curve) ──────
+    pos = np.zeros(3)    # [x, y, z]
+    vel = np.zeros(3)    # [vx, vy, vz]
+    distance_along_rail = 0.0
+    rail_exited = False
+
+    metrics = {
+        "max_altitude_m": 0.0,
+        "max_speed_m_s": 0.0,
+        "max_mach": 0.0,
+        "downrange_at_apogee_m": 0.0,
+        "crossrange_at_apogee_m": 0.0,
+        "burnout_altitude_m": 0.0,
+        "burnout_speed_m_s": 0.0,
+        "rail_exit_velocity_m_s": 0.0,
+        "rail_exit_twr": 0.0,
+        "time_to_apogee_s": 0.0,
+    }
+    traj_t = [0.0]
+    traj_pos = [pos.copy()]
+    traj_vel = [vel.copy()]
+
+    for idx in range(1, len(time_s)):
+        dt = max(float(time_s[idx] - time_s[idx - 1]), 1e-5)
+        alt = max(float(pos[2]), 0.0)
+        prop_mass = max(float(propellant_mass[idx]), 0.0)
+        motor_mass = geometry.motor_final_mass_kg + prop_mass
+        rocket_mass = dry_airframe_mass + motor_mass
+        thrust_mag = max(float(thrust_n[idx]), 0.0)
+        burning = thrust_mag > 0.0
+
+        # Apparent velocity (relative to air = vel - wind)
+        vel_apparent = vel - wind_vec
+        speed_app = float(np.linalg.norm(vel_apparent))
+        a_local = _isa_speed_of_sound(alt)
+        mach = speed_app / max(a_local, 1.0)
+
+        rho = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-alt / 8500.0)
+        cd = get_cd(mach, burning, alt)
+        drag_mag = 0.5 * rho * speed_app ** 2 * cd * reference_area
+
+        # Weathercocking: small restoring moment from crosswind rotates trajectory
+        # toward wind. Simple linear approximation: angle correction proportional
+        # to wind angle of attack divided by static margin.
+        if not rail_exited and sm > 0.0 and speed_app > 1.0:
+            crosswind = wind_vec - np.dot(wind_vec, launch_dir) * launch_dir
+            cross_speed = float(np.linalg.norm(crosswind))
+            aoa_rad = math.atan2(cross_speed, max(speed_app, 1.0))
+            # Weathercocking correction to velocity direction (proportional to AoA / SM)
+            # This is a simplified linear model, not full moment integration.
+            correction_rate = min(aoa_rad / max(sm, 0.1), 0.02)   # rad per step, capped
+        else:
+            correction_rate = 0.0
+
+        # Force vector
+        if speed_app > 1e-6:
+            drag_vec = -drag_mag * vel_apparent / speed_app
+        else:
+            drag_vec = np.zeros(3)
+
+        if rail_exited:
+            # Free flight: thrust follows current velocity direction
+            if speed_app > 1e-6:
+                thrust_dir = vel_apparent / speed_app
+            else:
+                thrust_dir = launch_dir.copy()
+        else:
+            # On rail: constrained to launch direction
+            thrust_dir = launch_dir.copy()
+
+        gravity = np.array([0.0, 0.0, -G0_M_S2 * rocket_mass])
+        thrust_vec = thrust_mag * thrust_dir
+        accel = (thrust_vec + drag_vec + gravity) / max(rocket_mass, 1e-9)
+
+        vel = vel + accel * dt
+        pos = pos + vel * dt
+        pos[2] = max(pos[2], 0.0)
+
+        # Rail exit check
+        if not rail_exited:
+            distance_along_rail += float(np.linalg.norm(vel)) * dt
+            if distance_along_rail >= rail_length_m:
+                rail_exited = True
+                metrics["rail_exit_velocity_m_s"] = float(np.linalg.norm(vel))
+                metrics["rail_exit_twr"] = thrust_mag / max(rocket_mass * G0_M_S2, 1.0)
+
+        speed = float(np.linalg.norm(vel))
+        metrics["max_altitude_m"] = max(metrics["max_altitude_m"], float(pos[2]))
+        metrics["max_speed_m_s"] = max(metrics["max_speed_m_s"], speed)
+        metrics["max_mach"] = max(metrics["max_mach"], mach)
+
+        if burning:
+            metrics["burnout_altitude_m"] = float(pos[2])
+            metrics["burnout_speed_m_s"] = speed
+
+        traj_t.append(float(time_s[idx]))
+        traj_pos.append(pos.copy())
+        traj_vel.append(vel.copy())
+
+    # ── Ballistic coast (DOP853 ODE) ─────────────────────────────────────────
+    coast_mass = dry_airframe_mass + geometry.motor_final_mass_kg
+
+    def coast_ode_3dof(t, state):
+        x, y, z, vx, vy, vz = state
+        alt = max(z, 0.0)
+        vel_3 = np.array([vx, vy, vz])
+        vel_app = vel_3 - wind_vec
+        speed_app = float(np.linalg.norm(vel_app))
+        a_c = _isa_speed_of_sound(alt)
+        mach_c = speed_app / max(a_c, 1.0)
+        rho_c = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-alt / 8500.0)
+        cd_c = get_cd(mach_c, False, alt)
+        drag_c = 0.5 * rho_c * speed_app ** 2 * cd_c * reference_area
+        if speed_app > 1e-6:
+            drag_vec_c = -drag_c * vel_app / speed_app
+        else:
+            drag_vec_c = np.zeros(3)
+        accel_c = (drag_vec_c + np.array([0.0, 0.0, -G0_M_S2 * coast_mass])) / max(coast_mass, 1e-9)
+        return [vx, vy, vz, float(accel_c[0]), float(accel_c[1]), float(accel_c[2])]
+
+    def ground_event(t, state):
+        return state[2]
+
+    ground_event.terminal = True
+    ground_event.direction = -1
+
+    t0_coast = float(traj_t[-1])
+    y0_coast = list(traj_pos[-1]) + list(traj_vel[-1])
+    coast_sol = solve_ivp(
+        coast_ode_3dof,
+        (t0_coast, t0_coast + max_time_s),
+        y0_coast,
+        method="DOP853",
+        events=ground_event,
+        max_step=2.0,
+        atol=1.0,
+        rtol=1e-4,
+    )
+
+    # Extract coast trajectory
+    if coast_sol.y.shape[1] > 0:
+        coast_z = coast_sol.y[2]
+        coast_x = coast_sol.y[0]
+        coast_y = coast_sol.y[1]
+        metrics["max_altitude_m"] = max(metrics["max_altitude_m"], float(np.max(coast_z)))
+
+        # Apogee time and position
+        if len(coast_z) > 1:
+            apogee_idx = int(np.argmax(coast_z))
+            metrics["time_to_apogee_s"] = float(coast_sol.t[apogee_idx])
+            metrics["downrange_at_apogee_m"] = float(coast_x[apogee_idx])
+            metrics["crossrange_at_apogee_m"] = float(coast_y[apogee_idx])
+
+        # Landing position (last coast point)
+        landing_x = float(coast_x[-1])
+        landing_y = float(coast_y[-1])
+        landing_t = float(coast_sol.t[-1])
+    else:
+        landing_x = float(traj_pos[-1][0])
+        landing_y = float(traj_pos[-1][1])
+        landing_t = t0_coast
+
+    return {
+        "simulation.3dof.max_altitude_m": metrics["max_altitude_m"],
+        "simulation.3dof.max_speed_m_s": metrics["max_speed_m_s"],
+        "simulation.3dof.max_mach": metrics["max_mach"],
+        "simulation.3dof.time_to_apogee_s": metrics["time_to_apogee_s"],
+        "simulation.3dof.downrange_at_apogee_m": metrics["downrange_at_apogee_m"],
+        "simulation.3dof.crossrange_at_apogee_m": metrics["crossrange_at_apogee_m"],
+        "simulation.3dof.burnout_altitude_m": metrics["burnout_altitude_m"],
+        "simulation.3dof.burnout_speed_m_s": metrics["burnout_speed_m_s"],
+        "simulation.3dof.landing_downrange_m": landing_x,
+        "simulation.3dof.landing_crossrange_m": landing_y,
+        "simulation.3dof.flight_time_s": landing_t,
+        "simulation.3dof.rail_exit_velocity_m_s": metrics["rail_exit_velocity_m_s"],
+        "simulation.3dof.rail_exit_twr": metrics["rail_exit_twr"],
+        "simulation.3dof.wind_speed_m_s": float(w_speed),
+        "simulation.3dof.launch_angle_deg": float(launch_angle_deg),
+        "simulation.3dof.drag_model": "component" if use_component_cd else "piecewise",
+        "trajectory": {
+            "time_s": np.array(traj_t),
+            "x_m": np.array([p[0] for p in traj_pos]),
+            "y_m": np.array([p[1] for p in traj_pos]),
+            "z_m": np.array([p[2] for p in traj_pos]),
+        },
+    }
+
+
 def _resolve_gamma(curve, gamma_arg):
     """Return the specific heat ratio to use across advanced models.
 

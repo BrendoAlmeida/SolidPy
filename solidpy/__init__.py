@@ -68,6 +68,7 @@ from .Multiphysics import (
     simulate_advanced_physics,
     simulate_cfd_proxies,
     simulate_flight_1d,
+    simulate_flight_3dof,
     simulate_ignition_proxy,
     simulate_structural_response,
     simulate_thermal_ablation,
