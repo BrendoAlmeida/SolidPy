@@ -347,11 +347,23 @@ class Burn:
         )
         return specific_impulse
 
-    def compute_total_burn_area(self, regressed_length):
-        """Sum burn area over all active grains at the given regression distance."""
+    def compute_total_burn_area(self, regressed_lengths):
+        """Sum burn area over all active grains.
+
+        Args:
+            regressed_lengths: scalar (shared regression for all grains) or a
+                sequence of per-grain regression values.
+        """
+        grains = self.motor.grains
+        try:
+            lengths = list(regressed_lengths)
+        except TypeError:
+            lengths = [float(regressed_lengths)] * len(grains)
+        if len(lengths) != len(grains):
+            lengths = [lengths[0]] * len(grains)
         total = 0.0
-        for grain in self.motor.grains:
-            total += grain.evaluate_tubular_burn_area(regressed_length, update_state=False)
+        for grain, r in zip(grains, lengths):
+            total += grain.evaluate_tubular_burn_area(r, update_state=False)
         return total
 
     def evaluate_burn_rate(
@@ -487,34 +499,39 @@ class BurnSimulation(Burn):
         return min(max(float(activation), 0.0), 1.0)
 
     def vector_field(self, time, state_variables):
-        """Generates the vector field of the corresponding simulations
-        state variables (chamber pressure, free combustion chamber volume,
-        length of grain regression), as required for solve_ivp differential
-        equation solver. The grain regression length is measured with the
-        zero at initial inner radius.
+        """Vector field for the ODE state [P, V, r_0, r_1, ..., r_{n-1}].
+
+        Each grain carries its own regression distance r_i so grains with
+        different geometries can burn out independently. All grains share
+        the same pressure-dependent burn rate (same propellant).
 
         Args:
-            time (float): independent current time variable
-            state_variables (list): simulation state variables
-            to be solved
+            time (float): current time
+            state_variables (sequence): [chamber_pressure, free_volume,
+                r_grain_0, r_grain_1, ..., r_grain_{n-1}]
 
         Returns:
-            list: vector field of the state variables
+            list: time-derivatives of each state variable
         """
+        n_grains = len(self.motor.grains)
+        chamber_pressure = state_variables[0]
+        free_volume = state_variables[1]
+        per_grain_regression = list(state_variables[2:2 + n_grains])
 
-        chamber_pressure, free_volume, regressed_length = state_variables
         T_0, R, rho_g, _, _ = self.parameters
-
-        rho_0 = chamber_pressure / (R * T_0)  # product_gas_density
+        rho_0 = chamber_pressure / (R * T_0)
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
         igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
-        geometric_burn_area = self.compute_total_burn_area(regressed_length)
+
+        # Representative regression for activation/area calls that expect scalar.
+        mean_regression = sum(per_grain_regression) / max(n_grains, 1)
+        geometric_burn_area = self.compute_total_burn_area(per_grain_regression)
         burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
-            time, regressed_length
+            time, mean_regression
         )
         burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure)
 
-        vector_state = [
+        dp_dt = (
             (
                 burn_area * burn_rate * (rho_g - rho_0)
                 + igniter_mass_flow * self.igniter_temperature / T_0
@@ -522,44 +539,34 @@ class BurnSimulation(Burn):
             )
             * R
             * T_0
-            / free_volume,
-            burn_area * burn_rate,
-            burn_rate,
-        ]
+            / free_volume
+        )
+        dv_dt = burn_area * burn_rate
+        # Each grain regresses at the same burn rate (same propellant, same P).
+        dr_dt = [burn_rate] * n_grains
 
-        return vector_state
+        return [dp_dt, dv_dt] + dr_dt
 
     def solve_burn(self):
         """Initial conditions setting and solver instantiation.
 
+        State vector: [chamber_pressure, free_volume, r_0, r_1, ..., r_{n-1}]
+        where r_i is the regression distance for each grain.
+
         Returns:
-            object: solution object containing the solution
-            for the differential equation state variables
+            object: solution object from solve_ivp
         """
-        regressed_length = 0
-        state_variables = [
-            self.environment_pressure,
-            self.motor.free_volume,
-            regressed_length,
-        ]
+        n_grains = len(self.motor.grains)
+        state_variables = (
+            [self.environment_pressure, self.motor.free_volume]
+            + [0.0] * n_grains
+        )
 
         def end_burn_propellant(time, state_variables):
-            """Establishment of solver terminal conditions. The simulation
-            ends if the grain is totally regressed (burnt) emptying the
-            combustion chamber.
-
-            Args:
-                time (float): independent current time variable
-                state_variables
-                (list): simulation state variables
-                to be solved
-
-            Returns:
-                integer: boolean integer as termination parameter
-            """
-            chamber_pressure, free_volume, regressed_length = state_variables
+            free_volume = state_variables[1]
+            per_grain_regression = list(state_variables[2:2 + n_grains])
             if (self.motor.chamber_volume - free_volume < 1e-6) or (
-                self.compute_total_burn_area(regressed_length) <= 0.0
+                self.compute_total_burn_area(per_grain_regression) <= 0.0
             ):
                 return 0
             return 1
@@ -736,17 +743,33 @@ class BurnSimulation(Burn):
         """Adapts solve_ivp results to a simple matrix containing each
         burn characteristic.
 
+        The returned list layout is:
+          [time, chamber_pressure, free_volume, regressed_length,
+           thrust, exit_pressure, exit_velocity]
+
+        regressed_length is the mean across all grains for backward
+        compatibility. Per-grain regressions are stored in
+        self.per_grain_regression_burn.
+
         Returns:
             list: list containing the solution and added burn computations
         """
-        grain_burn_solution = self.solve_burn()
+        n_grains = len(self.motor.grains)
+        raw = self.solve_burn()
+
+        # Per-grain regressions: rows 2..2+n_grains of ODE solution.
+        per_grain = [raw.y[2 + i] for i in range(n_grains)]
+        self.per_grain_regression_burn = per_grain
+
+        # Mean regression for downstream backward-compatible output.
+        mean_regression = np.mean(np.vstack(per_grain), axis=0)
 
         grain_burn_solution = [
-            grain_burn_solution.t,
-            grain_burn_solution.y[0],
-            grain_burn_solution.y[1],
-            grain_burn_solution.y[2],
-            *self.process_solution(grain_burn_solution.y[0]),
+            raw.t,
+            raw.y[0],
+            raw.y[1],
+            mean_regression,
+            *self.process_solution(raw.y[0]),
         ]
 
         return grain_burn_solution
