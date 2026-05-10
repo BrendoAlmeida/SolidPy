@@ -363,7 +363,7 @@ class Burn:
             lengths = [lengths[0]] * len(grains)
         total = 0.0
         for grain, r in zip(grains, lengths):
-            total += grain.evaluate_tubular_burn_area(r, update_state=False)
+            total += grain.evaluate_burn_area(r, update_state=False)
         return total
 
     def evaluate_burn_rate(
@@ -531,12 +531,12 @@ class BurnSimulation(Burn):
         )
 
         # Port mass flux G = ṁ_nozzle / A_port for Lenoir-Robillard erosive model.
-        # Use the mean port area from current inner radii across all grains.
-        mean_inner_radius = sum(
-            g.initial_inner_radius + r
+        # Use the mean port area across all grains; star grains include slot area.
+        total_port_area = sum(
+            g.evaluate_port_area(r)
             for g, r in zip(self.motor.grains, per_grain_regression)
-        ) / max(n_grains, 1)
-        port_area = math.pi * mean_inner_radius ** 2
+        )
+        port_area = total_port_area / max(n_grains, 1)
         port_mass_flux = nozzle_mass_flow / max(port_area, 1e-9)
 
         burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure, port_mass_flux)
