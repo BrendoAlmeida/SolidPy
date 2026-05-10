@@ -14,7 +14,25 @@ from scipy.integrate import solve_ivp
 
 G0_M_S2 = 9.80665
 SEA_LEVEL_DENSITY_KG_M3 = 1.225
-SPEED_OF_SOUND_M_S = 343.0
+SPEED_OF_SOUND_M_S = 343.0  # sea-level reference; use _isa_speed_of_sound() for altitude
+
+
+def _isa_speed_of_sound(altitude_m):
+    """ISA speed of sound as a function of altitude.
+
+    Troposphere (0–11 km): T = 288.15 - 0.0065*h, a = sqrt(1.4*287.05*T).
+    Stratosphere (11–20 km): T = 216.65 K, a = 295.07 m/s.
+    Above 20 km: constant stratosphere value (conservative).
+    Ref: ISO 2533:1975 (ISA standard atmosphere).
+    """
+    alt = max(float(altitude_m), 0.0)
+    if alt <= 11000.0:
+        temp_k = 288.15 - 0.0065 * alt
+    elif alt <= 20000.0:
+        temp_k = 216.65
+    else:
+        temp_k = 216.65
+    return math.sqrt(1.4 * 287.05 * temp_k)
 
 
 @dataclass(frozen=True)
@@ -537,8 +555,8 @@ def simulate_flight_1d(
     )
     reference_area = math.pi * (0.5 * body_diameter) ** 2
 
-    def cd_for_velocity(velocity):
-        mach = abs(velocity) / SPEED_OF_SOUND_M_S
+    def cd_for_mach(mach):
+        """Piecewise Cd vs Mach for a generic sounding rocket body."""
         if mach < 0.75:
             cd = 0.48
         elif mach < 1.2:
@@ -554,6 +572,7 @@ def simulate_flight_1d(
     distance = 0.0
     max_altitude = 0.0
     max_velocity = 0.0
+    max_mach = 0.0
     burnout_altitude = 0.0
     burnout_velocity = 0.0
     rail_exit_velocity = 0.0
@@ -565,7 +584,9 @@ def simulate_flight_1d(
         motor_mass = geometry.motor_final_mass_kg + max(float(propellant_mass[idx]), 0.0)
         rocket_mass = dry_airframe_mass + motor_mass
         density = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-altitude / 8500.0)
-        drag = 0.5 * density * velocity**2 * cd_for_velocity(velocity) * reference_area
+        a_local = _isa_speed_of_sound(altitude)
+        mach_local = abs(velocity) / max(a_local, 1.0)
+        drag = 0.5 * density * velocity**2 * cd_for_mach(mach_local) * reference_area
         drag *= -1.0 if velocity < 0.0 else 1.0
         thrust = max(float(thrust_n[idx]), 0.0)
         acceleration = (thrust - drag - rocket_mass * G0_M_S2) / max(rocket_mass, 1e-9)
@@ -574,6 +595,7 @@ def simulate_flight_1d(
         distance += max(velocity, 0.0) * dt
         max_altitude = max(max_altitude, altitude)
         max_velocity = max(max_velocity, abs(velocity))
+        max_mach = max(max_mach, mach_local)
         if thrust > 0.0:
             burnout_altitude = altitude
             burnout_velocity = velocity
@@ -597,7 +619,9 @@ def simulate_flight_1d(
         alt, vel = y
         alt = max(alt, 0.0)
         dens = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-alt / 8500.0)
-        drag_mag = 0.5 * dens * vel**2 * cd_for_velocity(vel) * reference_area
+        a_c = _isa_speed_of_sound(alt)
+        mach_c = abs(vel) / max(a_c, 1.0)
+        drag_mag = 0.5 * dens * vel**2 * cd_for_mach(mach_c) * reference_area
         drag_force = math.copysign(drag_mag, -vel)
         dvdt = (drag_force - coast_mass * G0_M_S2) / max(coast_mass, 1e-9)
         return [vel, dvdt]
@@ -622,11 +646,11 @@ def simulate_flight_1d(
         max_altitude = max(max_altitude, float(np.max(coast_sol.y[0])))
 
     ballistic_coefficient = (dry_airframe_mass + geometry.motor_initial_mass_kg) / max(
-        cd_for_velocity(max_velocity) * reference_area, 1e-9
+        cd_for_mach(max_mach) * reference_area, 1e-9
     )
     return {
         "simulation.advanced.flight.max_altitude_m": max_altitude,
-        "simulation.advanced.flight.max_velocity_mach": max_velocity / SPEED_OF_SOUND_M_S,
+        "simulation.advanced.flight.max_velocity_mach": max_mach,
         "simulation.advanced.flight.delta_v_m_s": delta_v,
         "simulation.advanced.flight.rail_exit_twr": rail_exit_twr,
         "simulation.advanced.flight.burnout_altitude_m": burnout_altitude,
