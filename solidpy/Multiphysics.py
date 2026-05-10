@@ -575,6 +575,8 @@ def simulate_flight_1d(
     drag_coefficient_factor=1.0,
     airframe_to_motor_mass_ratio=2.4,
     rail_length_m=5.0,
+    nose_half_angle_rad=None,
+    body_fineness_ratio=10.0,
 ):
     """Vertical 1D flight proxy with drag and post-burn coast."""
     time_s = np.asarray(curve["time_s"], dtype=float)
@@ -591,17 +593,31 @@ def simulate_flight_1d(
     )
     reference_area = math.pi * (0.5 * body_diameter) ** 2
 
-    def cd_for_mach(mach):
-        """Piecewise Cd vs Mach for a generic sounding rocket body."""
-        if mach < 0.75:
-            cd = 0.48
-        elif mach < 1.2:
-            cd = 0.48 + 0.35 * (mach - 0.75) / 0.45
-        elif mach < 2.0:
-            cd = 0.83 - 0.18 * (mach - 1.2) / 0.8
+    use_component_cd = nose_half_angle_rad is not None
+
+    def cd_for_mach(mach, burning=False, alt=0.0):
+        """Return total Cd: component-based (if nose_half_angle_rad given) or piecewise."""
+        if use_component_cd:
+            result = evaluate_cd_by_components(
+                mach=mach,
+                nose_half_angle_rad=nose_half_angle_rad,
+                body_fineness_ratio=body_fineness_ratio,
+                is_burning=burning,
+                altitude_m=alt,
+                body_length_m=body_fineness_ratio * body_diameter,
+            )
+            cd = result["cd_total"]
         else:
-            cd = 0.65
-        return max(0.2, cd * max(float(drag_coefficient_factor), 0.01))
+            # Legacy piecewise model (backward-compatible default)
+            if mach < 0.75:
+                cd = 0.48
+            elif mach < 1.2:
+                cd = 0.48 + 0.35 * (mach - 0.75) / 0.45
+            elif mach < 2.0:
+                cd = 0.83 - 0.18 * (mach - 1.2) / 0.8
+            else:
+                cd = 0.65
+        return max(0.05, cd * max(float(drag_coefficient_factor), 0.01))
 
     altitude = 0.0
     velocity = 0.0
@@ -622,9 +638,9 @@ def simulate_flight_1d(
         density = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-altitude / 8500.0)
         a_local = _isa_speed_of_sound(altitude)
         mach_local = abs(velocity) / max(a_local, 1.0)
-        drag = 0.5 * density * velocity**2 * cd_for_mach(mach_local) * reference_area
-        drag *= -1.0 if velocity < 0.0 else 1.0
         thrust = max(float(thrust_n[idx]), 0.0)
+        drag = 0.5 * density * velocity**2 * cd_for_mach(mach_local, burning=thrust > 0.0, alt=altitude) * reference_area
+        drag *= -1.0 if velocity < 0.0 else 1.0
         acceleration = (thrust - drag - rocket_mass * G0_M_S2) / max(rocket_mass, 1e-9)
         velocity += acceleration * dt
         altitude = max(0.0, altitude + velocity * dt)
@@ -657,7 +673,7 @@ def simulate_flight_1d(
         dens = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-alt / 8500.0)
         a_c = _isa_speed_of_sound(alt)
         mach_c = abs(vel) / max(a_c, 1.0)
-        drag_mag = 0.5 * dens * vel**2 * cd_for_mach(mach_c) * reference_area
+        drag_mag = 0.5 * dens * vel**2 * cd_for_mach(mach_c, burning=False, alt=alt) * reference_area
         drag_force = math.copysign(drag_mag, -vel)
         dvdt = (drag_force - coast_mass * G0_M_S2) / max(coast_mass, 1e-9)
         return [vel, dvdt]
@@ -682,7 +698,7 @@ def simulate_flight_1d(
         max_altitude = max(max_altitude, float(np.max(coast_sol.y[0])))
 
     ballistic_coefficient = (dry_airframe_mass + geometry.motor_initial_mass_kg) / max(
-        cd_for_mach(max_mach) * reference_area, 1e-9
+        cd_for_mach(max_mach, burning=False, alt=0.0) * reference_area, 1e-9
     )
     return {
         "simulation.advanced.flight.max_altitude_m": max_altitude,
@@ -697,6 +713,106 @@ def simulate_flight_1d(
         "simulation.advanced.metadata.reference_airframe_mass_kg": dry_airframe_mass
         + geometry.motor_initial_mass_kg,
         "simulation.advanced.metadata.propellant_loading_kg": max(float(propellant_mass[0]), 0.0),
+    }
+
+
+def evaluate_cd_by_components(
+    mach,
+    nose_half_angle_rad=0.15,
+    body_fineness_ratio=10.0,
+    is_burning=False,
+    altitude_m=0.0,
+    body_length_m=None,
+):
+    """Estimate total drag coefficient from physical components.
+
+    Implements the Missile DATCOM / RASAero II component build-up approach:
+      Cd = Cd_wave  +  Cd_friction  +  Cd_base
+
+    Wave drag — linearised supersonic theory (Missile DATCOM §4.1.3):
+      Supersonic  (M ≥ 1.05): Cd_wave = 2·θ² / √(M²−1)  (conical nose)
+      Transonic (0.80–1.05): smooth cosine rise to the supersonic value.
+      Subsonic   (M < 0.80):  Cd_wave = 0 for slender body.
+
+    Skin-friction drag — Schlichting turbulent flat-plate with compressibility:
+      Cf = 0.455 / log10(Re)^2.58 / (1 + 0.144·M²)^0.65  (Van Driest II)
+      Cd_friction = Cf · 4 · (L/D)                        (wetted area factor)
+
+    Base drag — from Hoerner & RASAero II:
+      Burning motor (plume fills base): Cd_base ≈ 0.
+      Coast:   Cd_base = 0.12 … 0.18 subsonic,
+               Cd_base = 0.25/M² supersonic.
+
+    Args:
+        mach               — current Mach number (≥ 0).
+        nose_half_angle_rad— half-cone angle of the nose [rad] (default 0.15 ≈ 8.6°).
+        body_fineness_ratio— overall body L/D (default 10).
+        is_burning         — True while motor is producing thrust (suppresses base drag).
+        altitude_m         — altitude for ISA density/viscosity (default 0).
+        body_length_m      — absolute body length [m]; if None, L = L/D · 0.15 m.
+
+    Returns:
+        dict with keys: cd_wave, cd_friction, cd_base, cd_total.
+    """
+    M = max(float(mach), 0.0)
+    theta = max(float(nose_half_angle_rad), 1e-3)
+    L_D = max(float(body_fineness_ratio), 0.5)
+    alt = max(float(altitude_m), 0.0)
+
+    # ── Wave drag ──────────────────────────────────────────────────────────────
+    M_super = max(1.05, M)
+    cd_wave_super = 2.0 * theta ** 2 / math.sqrt(max(M_super ** 2 - 1.0, 1e-4))
+
+    if M < 0.80:
+        cd_wave = 0.0
+    elif M < 1.05:
+        # Smooth cosine onset from 0 at M=0.80 to full value at M=1.05
+        t = (M - 0.80) / 0.25
+        cd_wave = cd_wave_super * 0.5 * (1.0 - math.cos(math.pi * t))
+    else:
+        cd_wave = 2.0 * theta ** 2 / math.sqrt(M ** 2 - 1.0)
+
+    # ── Skin-friction drag ────────────────────────────────────────────────────
+    if alt <= 11000.0:
+        T_alt = 288.15 - 0.0065 * alt
+    else:
+        T_alt = 216.65
+    rho = SEA_LEVEL_DENSITY_KG_M3 * (T_alt / 288.15) ** 4.256
+    mu = _sutherland_viscosity(T_alt)
+
+    a_local = _isa_speed_of_sound(alt)
+    V = M * a_local
+
+    L_body = float(body_length_m) if body_length_m is not None else L_D * 0.15
+    if V > 0.01 and mu > 0.0:
+        Re_L = max(rho * V * L_body / mu, 1e4)
+        Cf_inc = 0.455 / (math.log10(Re_L) ** 2.58)
+        # Compressibility correction (Van Driest II)
+        Cf = Cf_inc / (1.0 + 0.144 * M ** 2) ** 0.65
+    else:
+        Cf = 0.004
+
+    # Wetted area ratio relative to π*(D/2)²: 4·(L/D) for a cylinder
+    cd_friction = Cf * 4.0 * L_D
+
+    # ── Base drag ─────────────────────────────────────────────────────────────
+    if is_burning:
+        cd_base = 0.0        # plume suppresses base drag (Hoerner §20, RASAero)
+    elif M < 0.5:
+        cd_base = 0.12
+    elif M < 1.0:
+        # Subsonic rise toward transonic (roughly linear)
+        cd_base = 0.12 + 0.06 * (M - 0.5) / 0.5
+    else:
+        # Supersonic: Cd_base ~ 1/(M² · von Karman) (Hoerner §21-2)
+        cd_base = 0.25 / max(M ** 2, 0.01)
+
+    cd_total = cd_wave + cd_friction + cd_base
+    return {
+        "cd_wave": float(cd_wave),
+        "cd_friction": float(cd_friction),
+        "cd_base": float(cd_base),
+        "cd_total": float(cd_total),
     }
 
 

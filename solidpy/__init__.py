@@ -61,6 +61,7 @@ from .Multiphysics import (
     CasingMaterial,
     MotorGeometry,
     NozzleMaterial,
+    evaluate_cd_by_components,
     geometry_from_components,
     simulate_advanced_components,
     simulate_advanced_physics,
