@@ -6,8 +6,10 @@ _license_ = "x"
 
 import math
 import csv
+import warnings
 import scipy.interpolate as interpolate
 import scipy.constants as const
+import numpy as np
 
 
 class Propellant:
@@ -35,6 +37,7 @@ class Propellant:
 
         self.mean_burn_rate_index = 0
         self.mean_burn_rate_value = 0
+        self._thermo_table = None      # set by load_thermo_table()
 
     def _load_burn_rate_interpolator(self, interpolation_list):
         pressure_list = []
@@ -93,6 +96,82 @@ class Propellant:
 
         return r0
 
+    def load_thermo_table(self, data):
+        """Load pressure-dependent thermochemical properties for more accurate simulation.
+
+        Accepts a 4-column table: [[pressure_pa, cstar_m_s, k, Tc_K], ...].
+        Once loaded, cstar_at_pressure(), k_at_pressure(), and Tc_at_pressure()
+        return interpolated values instead of the constant class attributes.
+        Rows must be sorted in ascending pressure order.
+
+        ``data`` can be:
+          - A path string or file-like object for a CSV file (header skipped).
+          - A (N, 4) numeric array or nested list.
+
+        The pressure column is expected in Pa.  After loading, the base
+        specific_heat_ratio, combustion_temperature, and cstar attributes are
+        updated to the value at the median table pressure so existing code
+        that reads those attributes is still reasonable.
+        """
+        if isinstance(data, (str, bytes)):
+            rows = []
+            with open(data, "r") as fh:
+                reader = csv.reader(fh)
+                next(reader)
+                for line in reader:
+                    rows.append([float(x) for x in line[:4]])
+            arr = np.array(rows, dtype=float)
+        else:
+            arr = np.asarray(data, dtype=float)
+
+        if arr.ndim != 2 or arr.shape[1] < 4:
+            raise ValueError("Thermochemistry table must have columns: pressure_pa, cstar_m_s, k, Tc_K")
+        if len(arr) < 2:
+            raise ValueError("Thermochemistry table must have at least 2 rows")
+
+        pressures = arr[:, 0]
+        cstars = arr[:, 1]
+        ks = arr[:, 2]
+        tcs = arr[:, 3]
+
+        def _make_interp(y):
+            kind = "cubic" if len(y) >= 4 else "linear"
+            return interpolate.interp1d(
+                pressures, y, kind=kind, bounds_error=False,
+                fill_value=(float(y[0]), float(y[-1]))
+            )
+
+        self._thermo_table = {
+            "pressure_pa": pressures,
+            "cstar_interp": _make_interp(cstars),
+            "k_interp": _make_interp(ks),
+            "Tc_interp": _make_interp(tcs),
+        }
+
+        # Update base attributes to the mid-range value so existing code stays sane.
+        mid = pressures[len(pressures) // 2]
+        self.specific_heat_ratio = float(self.k_at_pressure(mid))
+        self.combustion_temperature = float(self.Tc_at_pressure(mid))
+        self.cstar = float(self.cstar_at_pressure(mid))
+
+    def cstar_at_pressure(self, pressure_pa):
+        """Return characteristic velocity c* [m/s] at the given chamber pressure."""
+        if self._thermo_table is not None:
+            return float(self._thermo_table["cstar_interp"](pressure_pa))
+        return self.cstar
+
+    def k_at_pressure(self, pressure_pa):
+        """Return specific heat ratio k at the given chamber pressure."""
+        if self._thermo_table is not None:
+            return float(self._thermo_table["k_interp"](pressure_pa))
+        return self.specific_heat_ratio
+
+    def Tc_at_pressure(self, pressure_pa):
+        """Return adiabatic flame temperature Tc [K] at the given chamber pressure."""
+        if self._thermo_table is not None:
+            return float(self._thermo_table["Tc_interp"](pressure_pa))
+        return self.combustion_temperature
+
     def calc_cstar(self):
         k = self.specific_heat_ratio
         self.cstar = math.sqrt(
@@ -114,6 +193,82 @@ class Propellant:
 
     def exponential_pressure_coeff(self):
         return
+
+
+def build_cea_properties(
+    propellant_name,
+    pressure_range_pa=None,
+    n_points=20,
+    expansion_ratio=10.0,
+):
+    """Build a pressure-dependent thermochemistry table via NASA CEA (rocketcea).
+
+    Calls the ``rocketcea`` Python wrapper (pip install rocketcea) for
+    a named solid propellant and returns a (N×4) NumPy array suitable for
+    Propellant.load_thermo_table():
+
+        [[pressure_pa, cstar_m_s, k, Tc_K], ...]
+
+    The table spans ``pressure_range_pa`` at ``n_points`` logarithmically spaced
+    points.  If ``rocketcea`` is not installed an ImportError is raised with
+    installation instructions.
+
+    Args:
+        propellant_name (str) — rocketcea propellant name, e.g. ``'KNSB'``.
+        pressure_range_pa     — (P_low, P_high) in Pa; default (1e5, 10e6).
+        n_points (int)        — number of pressure points (default 20).
+        expansion_ratio (float) — nozzle area ratio for Isp reference (default 10).
+
+    Returns:
+        np.ndarray of shape (n_points, 4): columns [pressure_pa, cstar_m_s, k, Tc_K].
+
+    Example::
+
+        from solidpy import Propellant, build_cea_properties
+
+        table = build_cea_properties('KNSB', pressure_range_pa=(1e5, 10e6))
+        knsb = Propellant(
+            specific_heat_ratio=1.1361,
+            density=1700,
+            products_molecular_mass=39.9e-3,
+            combustion_temperature=1600,
+            burn_rate_a=5.13,
+            burn_rate_n=0.22,
+        )
+        knsb.load_thermo_table(table)
+    """
+    try:
+        from rocketcea.cea_obj import CEA_Obj
+    except ImportError as exc:
+        raise ImportError(
+            "rocketcea is required for build_cea_properties(). "
+            "Install it with: pip install rocketcea"
+        ) from exc
+
+    if pressure_range_pa is None:
+        pressure_range_pa = (1e5, 10e6)
+
+    P_low, P_high = float(pressure_range_pa[0]), float(pressure_range_pa[1])
+    pressures_pa = np.logspace(np.log10(max(P_low, 1.0)), np.log10(P_high), int(n_points))
+
+    cea = CEA_Obj(propName=str(propellant_name))
+    rows = []
+    for p_pa in pressures_pa:
+        p_psia = p_pa / 6894.757
+        try:
+            eps = max(float(expansion_ratio), 1.001)
+            isp_vac, cstar, tc_r = cea.get_IvacCstrTc(Pc=p_psia, eps=eps, MR=0)
+            k = cea.get_Chamber_MolWt_gamma(Pc=p_psia, MR=0, eps=eps)[1]
+            cstar_ms = cstar * 0.3048          # ft/s → m/s
+            tc_k = tc_r * 5.0 / 9.0           # Rankine → Kelvin
+            rows.append([p_pa, cstar_ms, float(k), tc_k])
+        except Exception:
+            warnings.warn(f"CEA evaluation failed at P={p_pa:.0f} Pa — skipping.", stacklevel=2)
+
+    if not rows:
+        raise RuntimeError("CEA produced no valid results for the given propellant/pressure range.")
+
+    return np.array(rows, dtype=float)
 
 
 # knsb = Propellant(

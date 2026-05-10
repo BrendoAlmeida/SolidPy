@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 
 from .Grain import Grain
 from .Motor import Motor
-from .Propellant import Propellant
+from .Propellant import Propellant, build_cea_properties
 from .Burn import Burn, BurnSimulation
 from .BurnEmpirical import BurnEmpirical
 from .Environment import Environment
