@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from scipy.integrate import solve_ivp
 
 
 G0_M_S2 = 9.80665
@@ -588,16 +589,37 @@ def simulate_flight_1d(
     mf = dry_airframe_mass + geometry.motor_final_mass_kg
     delta_v = isp_s * G0_M_S2 * math.log(max(m0 / max(mf, 1e-9), 1.0))
 
-    rocket_mass = dry_airframe_mass + geometry.motor_final_mass_kg
-    for _ in range(2400):
-        density = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-altitude / 8500.0)
-        drag = 0.5 * density * velocity**2 * cd_for_velocity(velocity) * reference_area
-        drag *= -1.0 if velocity < 0.0 else 1.0
-        velocity += (-drag - rocket_mass * G0_M_S2) / max(rocket_mass, 1e-9) * 0.05
-        altitude = max(0.0, altitude + velocity * 0.05)
-        max_altitude = max(max_altitude, altitude)
-        if velocity <= 0.0:
-            break
+    # Coast phase: solve ballistic ODE with DOP853 instead of fixed-step Euler.
+    # State: [altitude_m, velocity_m_s]
+    coast_mass = dry_airframe_mass + geometry.motor_final_mass_kg
+
+    def coast_ode(t, y):
+        alt, vel = y
+        alt = max(alt, 0.0)
+        dens = SEA_LEVEL_DENSITY_KG_M3 * math.exp(-alt / 8500.0)
+        drag_mag = 0.5 * dens * vel**2 * cd_for_velocity(vel) * reference_area
+        drag_force = math.copysign(drag_mag, -vel)
+        dvdt = (drag_force - coast_mass * G0_M_S2) / max(coast_mass, 1e-9)
+        return [vel, dvdt]
+
+    def apogee_event(t, y):
+        return y[1]
+
+    apogee_event.terminal = True
+    apogee_event.direction = -1
+
+    coast_sol = solve_ivp(
+        coast_ode,
+        (0.0, 300.0),
+        [altitude, velocity],
+        method="DOP853",
+        events=apogee_event,
+        max_step=1.0,
+        atol=1.0,
+        rtol=1e-4,
+    )
+    if coast_sol.y.shape[1] > 0:
+        max_altitude = max(max_altitude, float(np.max(coast_sol.y[0])))
 
     ballistic_coefficient = (dry_airframe_mass + geometry.motor_initial_mass_kg) / max(
         cd_for_velocity(max_velocity) * reference_area, 1e-9
