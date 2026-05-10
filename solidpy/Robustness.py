@@ -110,8 +110,9 @@ def _apply_scenario(grain, motor, propellant, environment, scenario):
     burn_rate_factor = max(float(scenario.burn_rate_factor) * temperature_factor, 0.1)
     original_burn_rate = propellant.evaluate_burn_rate
     propellant.evaluate_burn_rate = (
-        lambda chamber_pressure, _orig=original_burn_rate, _factor=burn_rate_factor: _factor
-        * _orig(chamber_pressure)
+        lambda chamber_pressure, port_mass_flux=0.0,
+        _orig=original_burn_rate, _factor=burn_rate_factor:
+        _factor * _orig(chamber_pressure, port_mass_flux)
     )
 
     density_factor = max(float(scenario.density_factor), 0.01)

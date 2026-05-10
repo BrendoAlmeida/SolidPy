@@ -529,7 +529,17 @@ class BurnSimulation(Burn):
         burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
             time, mean_regression
         )
-        burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure)
+
+        # Port mass flux G = ṁ_nozzle / A_port for Lenoir-Robillard erosive model.
+        # Use the mean port area from current inner radii across all grains.
+        mean_inner_radius = sum(
+            g.initial_inner_radius + r
+            for g, r in zip(self.motor.grains, per_grain_regression)
+        ) / max(n_grains, 1)
+        port_area = math.pi * mean_inner_radius ** 2
+        port_mass_flux = nozzle_mass_flow / max(port_area, 1e-9)
+
+        burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure, port_mass_flux)
 
         dp_dt = (
             (

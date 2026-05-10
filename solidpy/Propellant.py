@@ -57,21 +57,41 @@ class Propellant:
             fill_value=(burn_rate_list[0], burn_rate_list[-1]),
         )
 
-    def evaluate_burn_rate(self, chamber_pressure):
+    def evaluate_burn_rate(self, chamber_pressure, port_mass_flux=0.0):
+        """Propellant burn rate with optional Lenoir-Robillard erosive correction.
+
+        Args:
+            chamber_pressure (float): chamber pressure [Pa]
+            port_mass_flux (float): port mass flux G = ṁ/A_port [kg/(m²·s)].
+                Pass 0 (default) to skip the erosive correction.
+
+        Returns:
+            float: effective burn rate [m/s]
+        """
         if "interpolation_list" in self.__dict__:
             if chamber_pressure < 0:
                 return 0
-            burn_rate = self._burn_rate_interpolator(chamber_pressure * 1e-6)
-            return float(burn_rate) / 1000
+            r0 = float(self._burn_rate_interpolator(chamber_pressure * 1e-6)) / 1000
         elif "burn_rate_a" in self.__dict__ and "burn_rate_n" in self.__dict__:
-            r = self.burn_rate_a * math.pow(chamber_pressure * 1e-6, self.burn_rate_n)
-            return r / 1000
-
+            r0 = self.burn_rate_a * math.pow(chamber_pressure * 1e-6, self.burn_rate_n) / 1000
         else:
             raise TypeError(
                 "Missing arguments. You must pass either an `interpolation_list` path or scalar ballistic "
                 "coefficients `burn_rate_a` and `burn_rate_n` arguments to Propellant class "
             )
+
+        # Lenoir-Robillard erosive burning correction.
+        # r_total = r_0 + k_e * G^0.8 * exp(-alpha_e * r_0 / G)
+        # Only active when port_mass_flux > 0 and erosive parameters are set.
+        # Ref: Lenoir & Robillard (1957); Sutton & Biblarz §12.6.
+        k_e = getattr(self, "erosive_burning_coefficient", 0.0)
+        alpha_e = getattr(self, "erosive_alpha", 35.0)
+        G = float(port_mass_flux)
+        if k_e > 0.0 and G > 1e-3:
+            erosive_correction = k_e * G ** 0.8 * math.exp(-alpha_e * r0 / max(G, 1e-9))
+            return r0 + max(erosive_correction, 0.0)
+
+        return r0
 
     def calc_cstar(self):
         k = self.specific_heat_ratio
