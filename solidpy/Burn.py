@@ -235,6 +235,17 @@ class Burn:
         )
         return self.exit_velocity
 
+    def _nozzle_divergence_factor(self):
+        """Thrust loss factor for conical nozzles: λ = (1 + cos α) / 2.
+
+        For a perfect (bell) nozzle or when angle is unspecified, λ = 1.
+        Sutton & Biblarz (2010) §3.4; Rogers/RASAero Part 4, eq.(9).
+        """
+        angle = self.motor.nozzle_angle
+        if angle is None or angle <= 0.0:
+            return 1.0
+        return 0.5 * (1.0 + math.cos(float(angle)))
+
     def evaluate_Cf(self, chamber_pressure):
         """Calculation of the engine's thrust coefficient.
 
@@ -251,6 +262,8 @@ class Burn:
             a given chamber pressure
         """
         _, _, _, k, _ = self.parameters
+        lambda_div = self._nozzle_divergence_factor()
+
         if chamber_pressure <= self.environment_pressure:
             self.Cf = 0.0
             return self.Cf
@@ -258,10 +271,10 @@ class Burn:
             thrust = self.evaluate_nozzle_mass_flow(
                 chamber_pressure
             ) * self.evaluate_exit_velocity(chamber_pressure)
-            self.Cf = thrust / (chamber_pressure * self.motor.nozzle_throat_area)
+            self.Cf = lambda_div * thrust / (chamber_pressure * self.motor.nozzle_throat_area)
             return self.Cf
 
-        self.Cf = (
+        self.Cf = lambda_div * (
             math.sqrt(
                 (2 * k**2 / (k - 1))
                 * math.pow(2 / (k + 1), (k + 1) / (k - 1))
