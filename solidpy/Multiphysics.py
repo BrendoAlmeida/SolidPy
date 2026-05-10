@@ -464,9 +464,11 @@ def simulate_cfd_proxies(
         max_reynolds = max(max_reynolds, reynolds)
         peak_gap_erosion = max(peak_gap_erosion, gap_erosion)
 
+    # Higher L/D increases residence time and combustion efficiency.
+    # Ref: Rocketdyne/Thiokol empirical L* correlations.
     efficiency = min(
         0.997,
-        0.89 + 0.013 * math.log10(max(max_reynolds, 10.0)) - 0.02 * min(ld_ratio, 2.0),
+        0.89 + 0.013 * math.log10(max(max_reynolds, 10.0)) + 0.02 * min(ld_ratio, 2.0),
     )
     return {
         "simulation.advanced.cfd.combustion_efficiency_proxy": efficiency,
