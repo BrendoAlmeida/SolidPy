@@ -329,11 +329,17 @@ class Burn:
         """
         specific_impulse = self.evaluate_total_impulse(thrust_list, time_list) / (
             self.propellant.density
-            * self.grain.volume
-            * self.motor.grain_number
+            * sum(g.volume for g in self.motor.grains)
             * self.environment.standard_gravity
         )
         return specific_impulse
+
+    def compute_total_burn_area(self, regressed_length):
+        """Sum burn area over all active grains at the given regression distance."""
+        total = 0.0
+        for grain in self.motor.grains:
+            total += grain.evaluate_tubular_burn_area(regressed_length, update_state=False)
+        return total
 
     def evaluate_burn_rate(
         self, chamber_pressure, chamber_pressure_derivative, free_volume, burn_area
@@ -489,12 +495,7 @@ class BurnSimulation(Burn):
         rho_0 = chamber_pressure / (R * T_0)  # product_gas_density
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
         igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
-        geometric_burn_area = (
-            self.motor.grain_number
-            * self.motor.grain.evaluate_tubular_burn_area(
-                regressed_length, update_state=False
-            )
-        )
+        geometric_burn_area = self.compute_total_burn_area(regressed_length)
         burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
             time, regressed_length
         )
@@ -544,12 +545,8 @@ class BurnSimulation(Burn):
                 integer: boolean integer as termination parameter
             """
             chamber_pressure, free_volume, regressed_length = state_variables
-            max_regression = min(
-                self.grain.outer_radius - self.grain.initial_inner_radius,
-                self.grain.initial_height / 2,
-            )
             if (self.motor.chamber_volume - free_volume < 1e-6) or (
-                regressed_length >= max_regression
+                self.compute_total_burn_area(regressed_length) <= 0.0
             ):
                 return 0
             return 1
@@ -629,7 +626,7 @@ class BurnSimulation(Burn):
                 tail_off_chamber_pressure.append(chamber_pressure)
                 tail_off_free_volume.append(self.motor.chamber_volume)
                 tail_off_regressed_length.append(
-                    self.grain.outer_radius - self.grain.initial_inner_radius
+                    self.grain_burn_solution[3][-1]
                 )
             else:
                 break
@@ -650,10 +647,7 @@ class BurnSimulation(Burn):
         initial_time = self.grain_burn_solution[0][-1]
         initial_chamber_pressure = self.grain_burn_solution[1][-1]
         free_volume = self.motor.chamber_volume
-        regressed_length = min(
-            self.grain.outer_radius - self.grain.initial_inner_radius,
-            self.grain.initial_height / 2,
-        )
+        regressed_length = self.grain_burn_solution[3][-1]
 
         if initial_chamber_pressure <= self.environment_pressure * 1.0001:
             self.tail_off_solution = [
@@ -859,8 +853,7 @@ class BurnExport(Export):
         )
 
         self.propellant_mass = (
-            self.BurnSimulation.motor.grain_number
-            * self.BurnSimulation.motor.grain.volume
+            sum(g.volume for g in self.BurnSimulation.motor.grains)
             * self.BurnSimulation.propellant.density
         )
 

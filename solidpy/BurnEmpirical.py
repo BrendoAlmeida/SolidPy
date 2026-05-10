@@ -104,12 +104,7 @@ class BurnEmpirical(Burn):
         # Initial conditions
         free_volume = self.motor.evaluate_free_volume()
         regressed_length = 0.0
-        burn_area = (
-            self.motor.grain_number
-            * self.motor.grain.evaluate_tubular_burn_area(
-                regressed_length, update_state=False
-            )
-        )
+        burn_area = self.compute_total_burn_area(regressed_length)
 
         # Loop iteration - calculate burn_rate at each step
         for pressure_list_index, chamber_pressure in enumerate(
@@ -135,17 +130,9 @@ class BurnEmpirical(Burn):
             burn_rate_list.append(burn_rate)
             regressed_length += burn_rate * delta_time
 
-            if (
-                regressed_length
-                >= self.grain.outer_radius - self.grain.initial_inner_radius
-            ):
+            burn_area = self.compute_total_burn_area(regressed_length)
+            if burn_area <= 0.0:
                 break
-            burn_area = (
-                self.motor.grain_number
-                * self.motor.grain.evaluate_tubular_burn_area(
-                    regressed_length, update_state=False
-                )
-            )
             free_volume += burn_area * burn_rate * delta_time
 
         return burn_rate_list

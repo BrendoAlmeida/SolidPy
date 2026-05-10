@@ -84,7 +84,7 @@ def geometry_from_components(
     exit_radius = math.sqrt(max(motor.nozzle_exit_area, 0.0) / math.pi)
     casing_wall_thickness_m = max(float(casing_wall_thickness_m), 1e-5)
     propellant_mass_kg = (
-        motor.grain_number * grain.volume * max(float(propellant.density), 0.0)
+        sum(g.volume for g in motor.grains) * max(float(propellant.density), 0.0)
     )
 
     outer_radius = motor_inner_radius + casing_wall_thickness_m

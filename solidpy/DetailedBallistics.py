@@ -45,9 +45,11 @@ def evaluate_nozzle_ablation_rate(
 def _evaluate_remaining_propellant_mass(grain, motor, propellant, regressed_length):
     masses = []
     for regression in regressed_length:
-        height, inner_radius, _ = grain.calculate_tubular_geometry(regression)
-        volume = math.pi * max(grain.outer_radius**2 - inner_radius**2, 0.0) * height
-        masses.append(max(volume * motor.grain_number * propellant.density, 0.0))
+        total_volume = 0.0
+        for g in motor.grains:
+            height, inner_radius, _ = g.calculate_tubular_geometry(regression)
+            total_volume += math.pi * max(g.outer_radius**2 - inner_radius**2, 0.0) * height
+        masses.append(max(total_volume * propellant.density, 0.0))
     return np.asarray(masses, dtype=float)
 
 
@@ -120,20 +122,15 @@ def build_detailed_ballistics(
             exit_pressure_pa = exit_pressure_pa[index]
             exit_velocity_m_s = exit_velocity_m_s[index]
 
-    grain = simulation.grain
     motor = simulation.motor
     propellant = simulation.propellant
     burn_area_m2 = np.asarray(
-        [
-            motor.grain_number
-            * grain.evaluate_tubular_burn_area(regression, update_state=False)
-            for regression in regressed_length_m
-        ],
+        [simulation.compute_total_burn_area(regression) for regression in regressed_length_m],
         dtype=float,
     )
 
     propellant_mass_kg = _evaluate_remaining_propellant_mass(
-        grain, motor, propellant, regressed_length_m
+        motor.grain, motor, propellant, regressed_length_m
     )
     if len(time_s) > 1:
         regression_rate_m_s = np.maximum(
