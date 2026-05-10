@@ -310,3 +310,107 @@ def run_detailed_ballistics(
     )
     detailed["simulation"] = simulation
     return detailed
+
+
+def evaluate_combustion_stability(motor, propellant, environment=None, pressure_points=40):
+    """Combustion stability indicators for a motor-propellant pair.
+
+    Computes:
+    - L* (characteristic chamber length): V_chamber / A_throat
+    - Kn vs pressure sweep to locate the neutral-burn operating point
+    - Pressure exponent n (from burn rate table slope) and stability verdict
+    - L* adequacy relative to Summerfield criterion for KNO3-based propellants
+
+    These are design-time analyses, independent of a full burn simulation.
+
+    Ref: Summerfield et al. (1954); Barrère et al. (1960) §7.4;
+         Sutton & Biblarz §12.3.
+
+    Args:
+        motor: Motor instance
+        propellant: Propellant instance
+        environment: Environment instance (for ambient pressure)
+        pressure_points (int): number of pressure samples for the Kn-P sweep
+
+    Returns:
+        dict with stability metrics and arrays for plotting
+    """
+    if environment is None:
+        try:
+            from .Environment import Environment as _Env
+        except ImportError:
+            from Environment import Environment as _Env
+        environment = _Env()
+
+    p_amb = float(environment.atmospheric_pressure)
+
+    # L* — characteristic chamber length
+    l_star = float(motor.chamber_volume) / max(float(motor.nozzle_throat_area), 1e-9)
+
+    # Summerfield criterion: L* >= threshold for stable combustion.
+    # KNO3/KClO4 propellants: ~1.0–2.5 m.  AP-based: ~0.5–0.8 m.
+    l_star_threshold = 1.5  # conservative for KNSB; adjust per propellant family
+
+    # Kn sweep: evaluate burn area and Kn at each regression step.
+    n_grains = len(motor.grains)
+    web = min(g.outer_radius - g.initial_inner_radius for g in motor.grains)
+    r_steps = np.linspace(0.0, web * 0.99, pressure_points)
+    kn_values = []
+    for r in r_steps:
+        total_area = sum(
+            g.evaluate_tubular_burn_area(r, update_state=False) for g in motor.grains
+        )
+        kn_values.append(total_area / max(float(motor.nozzle_throat_area), 1e-9))
+    kn_values = np.asarray(kn_values)
+
+    # Pressure sweep paired to regression steps (from de Saint Robert: P ~ Kn).
+    # Equilibrium pressure from 0-D model: P = c* * rho_p * r(P) * Kn / A_t * A_t
+    # → P^(1-n) = c* * rho_p * a * Kn  (power law r = a*P^n, r in mm/s)
+    # Solve implicitly for each Kn value.
+    p_sweep = np.linspace(max(p_amb * 1.1, 0.5e6), 12e6, pressure_points)
+    kn_at_p_sweep = []
+    for r_reg, p_est in zip(r_steps, p_sweep):
+        total_area = sum(
+            g.evaluate_tubular_burn_area(r_reg, update_state=False) for g in motor.grains
+        )
+        kn_at_p_sweep.append(total_area / max(float(motor.nozzle_throat_area), 1e-9))
+    kn_at_p_sweep = np.asarray(kn_at_p_sweep)
+
+    # Burn rate exponent n: slope of log(r) vs log(P) at mid-range pressure.
+    p_lo = 2e6
+    p_hi = 6e6
+    r_lo = propellant.evaluate_burn_rate(p_lo)
+    r_hi = propellant.evaluate_burn_rate(p_hi)
+    if r_lo > 1e-9 and r_hi > 1e-9 and p_lo > 0 and p_hi > 0:
+        n_exponent = math.log(r_hi / r_lo) / math.log(p_hi / p_lo)
+    else:
+        n_exponent = float("nan")
+
+    # Stability verdict: motor is statically stable if n < 1.
+    # For n >= 1 the propellant is in an unstable regime (mesa / plateau edge).
+    pressure_stable = (not math.isnan(n_exponent)) and n_exponent < 1.0
+    l_star_adequate = l_star >= l_star_threshold
+
+    # Nominal Kn (initial state, before any regression)
+    kn_initial = kn_values[0] if len(kn_values) else float("nan")
+    kn_burnout = kn_values[-1] if len(kn_values) else float("nan")
+    kn_type = "progressive" if kn_burnout > kn_initial else (
+        "regressive" if kn_burnout < kn_initial else "neutral"
+    )
+
+    return {
+        "stability.l_star_m": l_star,
+        "stability.l_star_adequate": l_star_adequate,
+        "stability.l_star_threshold_m": l_star_threshold,
+        "stability.burn_rate_exponent_n": n_exponent,
+        "stability.pressure_stable": pressure_stable,
+        "stability.kn_initial": kn_initial,
+        "stability.kn_burnout": kn_burnout,
+        "stability.kn_profile_type": kn_type,
+        "stability.n_grains": n_grains,
+        # Arrays for Kn vs regression plot
+        "_arrays.kn_regression_steps_m": r_steps,
+        "_arrays.kn_values": kn_values,
+        "_arrays.pressure_sweep_pa": p_sweep,
+        "_arrays.kn_at_pressure_sweep": kn_at_p_sweep,
+    }

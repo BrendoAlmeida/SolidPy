@@ -47,6 +47,7 @@ from .Export import Export
 from .DetailedBallistics import (
     build_detailed_ballistics,
     evaluate_nozzle_ablation_rate,
+    evaluate_combustion_stability,
     run_detailed_ballistics,
 )
 from .Robustness import (
