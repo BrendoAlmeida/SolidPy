@@ -255,10 +255,34 @@ def simulate_thermal_ablation(
         recovery_temp_k = flame_temp_k * t_ratio_num / max(t_ratio_den, 1e-9)
         max_recovery_temp_k = max(max_recovery_temp_k, recovery_temp_k)
 
-        heat_flux_w_m2 = max(
-            0.0,
-            1.35 * pressure_now**0.8 / max((2.0 * throat_radius_eff) ** 0.2, 1e-3),
+        # Bartz (1957) convective heat transfer at the nozzle throat.
+        # h = (0.026/D_t^0.2)*(mu^0.2*cp/Pr^0.6)*(Pc/c*)^0.8*(Dt/Rc)^0.1*sigma
+        # At throat: A_t/A = 1; assume Rc = D_t (typical SRM nozzle curvature).
+        # Ref: Bartz (1957); Sutton & Biblarz §8.3.
+        mu_gas = _sutherland_viscosity(flame_temp_k)
+        cp_gas = gamma * r_specific / max(gamma - 1.0, 1e-9)
+        prandtl = 0.82  # representative for hot combustion gases
+        mass_flux = mass_flow_now / max(throat_area_eff, 1e-9)  # = Pc/c*
+        r_curvature = max(2.0 * throat_radius_eff, 1e-9)        # Rc = D_t
+
+        # Wall temperature at inner surface (from conduction solver state).
+        T_w = float(temperatures_k[casing_inner_node])
+        # σ: stagnation-temperature wall-correction factor at M=1 (Bartz eq.6).
+        stag_factor = (gamma + 1.0) / 2.0  # = 1 + (k-1)/2 at M=1
+        tw_t0_ratio = T_w / max(flame_temp_k, 1.0)
+        sigma = (
+            (0.5 * tw_t0_ratio / max(stag_factor, 1e-9) + 0.5) ** (-0.68)
+            * stag_factor ** (-0.12)
         )
+        h_bartz = (
+            0.026
+            / max((2.0 * throat_radius_eff) ** 0.2, 1e-4)
+            * (mu_gas ** 0.2 * cp_gas / max(prandtl ** 0.6, 1e-9))
+            * max(mass_flux, 1e-9) ** 0.8
+            * (2.0 * throat_radius_eff / max(r_curvature, 1e-9)) ** 0.1
+            * max(sigma, 0.1)
+        )
+        heat_flux_w_m2 = max(0.0, h_bartz * max(recovery_temp_k - T_w, 0.0))
         max_heat_flux_w_m2 = max(max_heat_flux_w_m2, heat_flux_w_m2)
         integrated_heat_j_m2 += heat_flux_w_m2 * dt_s
 
