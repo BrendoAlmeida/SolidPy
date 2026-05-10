@@ -265,6 +265,7 @@ def build_detailed_ballistics(
         "throat_ablation_m": throat_ablation_m,
         "cf": cf,
         "ignition_active_fraction": active_fraction,
+        "gamma": float(propellant.specific_heat_ratio),
         "summary": summary,
     }
 

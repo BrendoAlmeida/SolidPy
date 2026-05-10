@@ -135,13 +135,14 @@ def simulate_thermal_ablation(
     nozzle_material=None,
     flame_temp_k=2800.0,
     r_specific=287.0,
-    gamma=1.21,
+    gamma=None,
     initial_temperature_k=298.15,
     liner_thickness_factor=1.0,
 ):
     """Transient 1D wall conduction plus empirical throat ablation."""
     casing_material = casing_material or CasingMaterial()
     nozzle_material = nozzle_material or NozzleMaterial()
+    gamma = float(_resolve_gamma(curve, gamma))
 
     time_s = np.asarray(curve["time_s"], dtype=float)
     thrust_n = np.asarray(curve["thrust_n"], dtype=float)
@@ -441,6 +442,7 @@ def simulate_cfd_proxies(
     thermal,
     r_specific=287.0,
     flame_temp_k=2200.0,
+    gamma=None,
 ):
     """Fast internal-flow proxies for Reynolds, residence and erosion risk."""
     time_s = np.asarray(curve["time_s"], dtype=float)
@@ -616,6 +618,20 @@ def simulate_flight_1d(
     }
 
 
+def _resolve_gamma(curve, gamma_arg):
+    """Return the specific heat ratio to use across advanced models.
+
+    Priority: explicit argument > curve["gamma"] > fallback 1.3.
+    Using the propellant's actual k avoids the old hard-coded 1.21 default
+    that was inconsistent with, e.g., KNSB (k=1.1361).
+    """
+    if gamma_arg is not None:
+        return float(gamma_arg)
+    if isinstance(curve, dict) and "gamma" in curve:
+        return float(curve["gamma"])
+    return 1.3
+
+
 def simulate_advanced_physics(
     geometry,
     curve,
@@ -623,9 +639,11 @@ def simulate_advanced_physics(
     nozzle_material=None,
     flame_temp_k=2800.0,
     r_specific=287.0,
+    gamma=None,
 ):
     """Run all advanced components and return a flat metrics dictionary."""
     scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
+    gamma_resolved = _resolve_gamma(curve, gamma)
     thermal = simulate_thermal_ablation(
         geometry,
         curve,
@@ -633,6 +651,7 @@ def simulate_advanced_physics(
         nozzle_material=nozzle_material,
         flame_temp_k=flame_temp_k,
         r_specific=r_specific,
+        gamma=gamma_resolved,
         liner_thickness_factor=float(scenario_factors.get("liner_thickness_factor", 1.0) or 1.0),
         initial_temperature_k=float(scenario_factors.get("initial_temperature_k", 298.15) or 298.15),
     )
@@ -649,6 +668,7 @@ def simulate_advanced_physics(
         thermal,
         r_specific=r_specific,
         flame_temp_k=flame_temp_k,
+        gamma=gamma_resolved,
     )
     ignition = simulate_ignition_proxy(geometry, curve, thermal, structural)
     flight = simulate_flight_1d(
@@ -687,8 +707,10 @@ def simulate_advanced_components(
     nozzle_material=None,
     flame_temp_k=2800.0,
     r_specific=287.0,
+    gamma=None,
 ):
     """Return advanced simulations grouped by component and as a flat bundle."""
+    gamma_resolved = _resolve_gamma(curve, gamma)
     thermal = simulate_thermal_ablation(
         geometry,
         curve,
@@ -696,6 +718,7 @@ def simulate_advanced_components(
         nozzle_material=nozzle_material,
         flame_temp_k=flame_temp_k,
         r_specific=r_specific,
+        gamma=gamma_resolved,
     )
     structural = simulate_structural_response(
         geometry,
@@ -703,7 +726,7 @@ def simulate_advanced_components(
         thermal,
         casing_material=casing_material,
     )
-    cfd = simulate_cfd_proxies(geometry, curve, thermal, r_specific=r_specific, flame_temp_k=flame_temp_k)
+    cfd = simulate_cfd_proxies(geometry, curve, thermal, r_specific=r_specific, flame_temp_k=flame_temp_k, gamma=gamma_resolved)
     ignition = simulate_ignition_proxy(geometry, curve, thermal, structural)
     flight = simulate_flight_1d(geometry, curve)
     return {
