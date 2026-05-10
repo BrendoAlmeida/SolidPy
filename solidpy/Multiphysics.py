@@ -378,6 +378,13 @@ def simulate_structural_response(
     )
     poisson = casing_material.poisson_ratio
 
+    # Select thin-wall (Barlow) or thick-wall (Lamé) depending on t/r ratio.
+    # Lamé is exact for both regimes; thin-wall underestimates σ when t/r > 0.1.
+    # Ref: Lamé (1852); Shigley §3-15.
+    ri2 = inner_radius**2
+    ro2 = outer_radius**2
+    use_lame = (wall / max(inner_radius, 1e-9)) > 0.1
+
     max_von_mises = 0.0
     max_hoop = 0.0
     max_axial = 0.0
@@ -389,8 +396,13 @@ def simulate_structural_response(
         pressure = max(float(chamber_pressure_pa[idx]), 0.0)
         if pressure <= 0.0:
             pressure = max(float(thrust_n[idx]), 0.0) / max(throat_area, 1e-9)
-        hoop = pressure * inner_radius / wall
-        axial = pressure * inner_radius / (2.0 * wall)
+        if use_lame:
+            # Lamé solution: maximum hoop stress at inner wall (r = r_i).
+            hoop = pressure * ri2 * (ro2 + ri2) / max(ro2 - ri2, 1e-9) / max(ri2, 1e-9)
+            axial = pressure * ri2 / max(ro2 - ri2, 1e-9)
+        else:
+            hoop = pressure * inner_radius / wall
+            axial = pressure * inner_radius / (2.0 * wall)
         von_mises = math.sqrt(max(hoop**2 + axial**2 - hoop * axial, 0.0))
         strain = (hoop - poisson * axial) / max(modulus_pa, 1.0)
         bulge = pressure * inner_radius**2 * (1.0 - 0.5 * poisson) / max(
