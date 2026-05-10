@@ -224,7 +224,15 @@ def simulate_thermal_ablation(
         throat_density_ratio = (2.0 / (gamma + 1.0)) ** (1.0 / max(gamma - 1.0, 1e-9))
         rho_throat = max(rho_chamber * throat_density_ratio, 1e-6)
         gas_velocity = mass_flow_now / max(rho_throat * throat_area_eff, 1e-9)
-        recovery_temp_k = flame_temp_k * (0.75 + 0.25 * math.tanh(gas_velocity / 250.0))
+
+        # Eckert recovery temperature for turbulent flow at the throat (M=1).
+        # T_r = T_0 * (1 + r*(k-1)/2 * M²) / (1 + (k-1)/2 * M²)
+        # r = Pr^(1/3) ≈ 0.89 for combustion gases; at throat M=1.
+        # Ref: Eckert (1955); Sutton & Biblarz §8.3.
+        prandtl_recovery = 0.89
+        t_ratio_num = 1.0 + prandtl_recovery * (gamma - 1.0) / 2.0
+        t_ratio_den = 1.0 + (gamma - 1.0) / 2.0
+        recovery_temp_k = flame_temp_k * t_ratio_num / max(t_ratio_den, 1e-9)
         max_recovery_temp_k = max(max_recovery_temp_k, recovery_temp_k)
 
         heat_flux_w_m2 = max(
