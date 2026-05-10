@@ -47,11 +47,14 @@ class Propellant:
                 burn_rate_list.append(float(line[1]))
 
         interpolation_kind = "cubic" if len(pressure_list) >= 4 else "linear"
+        # Clamp to measured range rather than extrapolating: cubic splines can
+        # oscillate or go negative outside the data, giving unphysical rates.
         return interpolate.interp1d(
             pressure_list,
             burn_rate_list,
             kind=interpolation_kind,
-            fill_value="extrapolate",
+            bounds_error=False,
+            fill_value=(burn_rate_list[0], burn_rate_list[-1]),
         )
 
     def evaluate_burn_rate(self, chamber_pressure):
