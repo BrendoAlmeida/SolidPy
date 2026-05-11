@@ -544,14 +544,16 @@ class BurnSimulation(Burn):
             time, mean_regression
         )
 
-        # Port mass flux G = ṁ_nozzle / A_port for Lenoir-Robillard erosive model.
+        # Port mass flux G for the Lenoir-Robillard erosive model.
         # Use the mean port area across all grains; star grains include slot area.
         total_port_area = sum(
             g.evaluate_port_area(r)
             for g, r in zip(self.motor.grains, per_grain_regression)
         )
         port_area = total_port_area / max(n_grains, 1)
-        port_mass_flux = nozzle_mass_flow / max(port_area, 1e-9)
+        # 0D spatial-average correction: assume mass flux grows linearly from
+        # zero at the bulkhead to ṁ_nozzle/A_port at the nozzle entrance.
+        port_mass_flux = 0.5 * nozzle_mass_flow / max(port_area, 1e-9)
 
         burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure, port_mass_flux)
 

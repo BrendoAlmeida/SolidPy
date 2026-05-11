@@ -61,6 +61,26 @@ class TestBurn:
     def test_nozzle_mass_flow(self):
         assert simulation_burn.evaluate_nozzle_mass_flow(0) == 0.0
 
+    def test_erosive_mass_flux_uses_spatial_average(self, monkeypatch):
+        captured = {}
+
+        def capture_burn_rate(chamber_pressure, port_mass_flux=0.0):
+            captured["port_mass_flux"] = port_mass_flux
+            return 0.001
+
+        monkeypatch.setattr(KNSB, "evaluate_burn_rate", capture_burn_rate)
+
+        chamber_pressure = 2.0e6
+        state = [chamber_pressure, Leviata.free_volume] + [0.0] * Leviata.grain_number
+        simulation_burn.vector_field(0.0, state)
+
+        nozzle_mass_flow = simulation_burn.evaluate_nozzle_mass_flow(chamber_pressure)
+        port_area = Grao_Leviata.evaluate_port_area(0.0)
+        assert np.isclose(
+            captured["port_mass_flux"],
+            0.5 * nozzle_mass_flow / port_area,
+        )
+
 
 """Rocket definitions"""
 
