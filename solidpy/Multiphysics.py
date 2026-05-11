@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from scipy import sparse
 from scipy.integrate import solve_ivp
 
 
@@ -147,6 +148,62 @@ def _series(curve, key, default):
     return np.asarray(default, dtype=float)
 
 
+def _build_wall_conduction_operator(
+    dx_arr,
+    k_arr,
+    rho_cp_arr,
+    h_outer_w_m2k,
+    ambient_temperature_k,
+):
+    """Build the linear finite-volume operator for 1D wall conduction."""
+    node_count = len(dx_arr)
+    thermal_mass = np.maximum(rho_cp_arr * dx_arr, 1e-9)
+    conductance = np.zeros(max(node_count - 1, 0), dtype=float)
+
+    for node in range(node_count - 1):
+        k_face = (
+            2.0
+            * k_arr[node]
+            * k_arr[node + 1]
+            / max(k_arr[node] + k_arr[node + 1], 1e-9)
+        )
+        distance = 0.5 * (dx_arr[node] + dx_arr[node + 1])
+        conductance[node] = k_face / max(distance, 1e-9)
+
+    diagonal = np.zeros(node_count, dtype=float)
+    lower = np.zeros(max(node_count - 1, 0), dtype=float)
+    upper = np.zeros(max(node_count - 1, 0), dtype=float)
+
+    if node_count == 1:
+        diagonal[0] = -h_outer_w_m2k / thermal_mass[0]
+    else:
+        diagonal[0] = -conductance[0] / thermal_mass[0]
+        upper[0] = conductance[0] / thermal_mass[0]
+
+        for node in range(1, node_count - 1):
+            left = conductance[node - 1]
+            right = conductance[node]
+            lower[node - 1] = left / thermal_mass[node]
+            diagonal[node] = -(left + right) / thermal_mass[node]
+            upper[node] = right / thermal_mass[node]
+
+        lower[-1] = conductance[-1] / thermal_mass[-1]
+        diagonal[-1] = -(conductance[-1] + h_outer_w_m2k) / thermal_mass[-1]
+
+    source_base = np.zeros(node_count, dtype=float)
+    source_base[-1] += h_outer_w_m2k * ambient_temperature_k / thermal_mass[-1]
+    inner_heat_flux_source = np.zeros(node_count, dtype=float)
+    inner_heat_flux_source[0] = 1.0 / thermal_mass[0]
+
+    jacobian = sparse.diags(
+        [lower, diagonal, upper],
+        offsets=[-1, 0, 1],
+        shape=(node_count, node_count),
+        format="csc",
+    )
+    return jacobian, source_base, inner_heat_flux_source
+
+
 def simulate_thermal_ablation(
     geometry,
     curve,
@@ -162,6 +219,7 @@ def simulate_thermal_ablation(
     casing_material = casing_material or CasingMaterial()
     nozzle_material = nozzle_material or NozzleMaterial()
     gamma = float(_resolve_gamma(curve, gamma))
+    initial_temperature_k = float(initial_temperature_k)
 
     time_s = np.asarray(curve["time_s"], dtype=float)
     thrust_n = np.asarray(curve["thrust_n"], dtype=float)
@@ -219,6 +277,17 @@ def simulate_thermal_ablation(
     rho_cp_arr = np.asarray(layer_rho_cp, dtype=float)
     temperatures_k = np.full(len(dx_arr), max(float(initial_temperature_k), 150.0))
     h_outer_w_m2k = 18.0
+    (
+        conduction_jacobian,
+        conduction_source_base,
+        inner_heat_flux_source,
+    ) = _build_wall_conduction_operator(
+        dx_arr,
+        k_arr,
+        rho_cp_arr,
+        h_outer_w_m2k,
+        initial_temperature_k,
+    )
 
     throat_radius_0 = 0.5 * max(float(geometry.throat_diameter_m), 1e-6)
     throat_ablation_m = 0.0
@@ -297,31 +366,31 @@ def simulate_thermal_ablation(
             )
             throat_ablation_m += ablation_rate * dt_s
 
-        alpha_cells = k_arr / np.maximum(rho_cp_arr, 1e-9)
-        stable_dt = 0.35 * float(np.min(dx_arr**2 / np.maximum(alpha_cells, 1e-12)))
-        substeps = max(1, int(math.ceil(dt_s / max(stable_dt, 1e-6))))
-        local_dt = dt_s / substeps
+        # Wall diffusion is stiff for fine meshes. Radau advances this linear
+        # finite-volume system implicitly, removing the explicit CFL substep
+        # restriction while the sparse Jacobian preserves the tridiagonal form.
+        conduction_source = (
+            conduction_source_base + inner_heat_flux_source * heat_flux_w_m2
+        )
 
-        for _ in range(substeps):
-            previous = temperatures_k.copy()
-            right_flux = np.zeros_like(temperatures_k)
-            for node in range(len(temperatures_k) - 1):
-                k_face = (
-                    2.0
-                    * k_arr[node]
-                    * k_arr[node + 1]
-                    / max(k_arr[node] + k_arr[node + 1], 1e-9)
-                )
-                distance = 0.5 * (dx_arr[node] + dx_arr[node + 1])
-                right_flux[node] = k_face * (previous[node] - previous[node + 1]) / max(
-                    distance, 1e-9
-                )
-            right_flux[-1] = h_outer_w_m2k * (previous[-1] - initial_temperature_k)
-            for node in range(len(temperatures_k)):
-                left_flux = heat_flux_w_m2 if node == 0 else right_flux[node - 1]
-                temperatures_k[node] = previous[node] + local_dt * (
-                    left_flux - right_flux[node]
-                ) / max(rho_cp_arr[node] * dx_arr[node], 1e-9)
+        def conduction_rhs(_time, wall_temperatures_k):
+            return conduction_jacobian.dot(wall_temperatures_k) + conduction_source
+
+        conduction_solution = solve_ivp(
+            conduction_rhs,
+            (0.0, dt_s),
+            temperatures_k,
+            method="Radau",
+            jac=conduction_jacobian,
+            atol=1e-6,
+            rtol=1e-5,
+        )
+        if not conduction_solution.success:
+            raise RuntimeError(
+                "Thermal conduction solver failed: "
+                f"{conduction_solution.message}"
+            )
+        temperatures_k = conduction_solution.y[:, -1]
 
         max_inner_wall_k = max(max_inner_wall_k, float(temperatures_k[casing_inner_node]))
         max_outer_wall_k = max(max_outer_wall_k, float(temperatures_k[-1]))

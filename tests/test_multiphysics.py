@@ -13,6 +13,7 @@ from solidpy import (
     run_detailed_ballistics,
     simulate_advanced_components,
     simulate_advanced_physics,
+    simulate_thermal_ablation,
 )
 
 
@@ -104,3 +105,42 @@ def test_advanced_components_groups_results():
 
     for key in ["thermal", "structural", "cfd", "ignition", "flight", "nominal_advanced"]:
         assert key in grouped
+
+
+def test_thermal_ablation_implicit_solver_keeps_liner_temperatures():
+    grain, motor, propellant, _environment = make_motor_stack()
+    geometry = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        dry_mass_kg=3.0,
+    )
+    time_s = np.linspace(0.0, 1.0, 6)
+    curve = {
+        "time_s": time_s,
+        "thrust_n": np.full_like(time_s, 450.0),
+        "mass_flow_kg_s": np.full_like(time_s, 0.42),
+        "chamber_pressure_pa": np.full_like(time_s, 2.4e6),
+        "gamma": propellant.specific_heat_ratio,
+    }
+
+    thermal = simulate_thermal_ablation(
+        geometry,
+        curve,
+        casing_material=CasingMaterial(liner_thickness_m=0.002),
+        nozzle_material=NozzleMaterial(),
+        flame_temp_k=propellant.combustion_temperature,
+        r_specific=propellant.products_constant,
+    )
+
+    expected_keys = [
+        "simulation.advanced.thermal.liner_hot_face_temp_c",
+        "simulation.advanced.thermal.liner_casing_interface_temp_c",
+        "simulation.advanced.thermal.casing_inner_wall_temp_c",
+        "simulation.advanced.thermal.casing_outer_wall_temp_c",
+    ]
+    for key in expected_keys:
+        assert key in thermal
+        assert np.isfinite(thermal[key])
+    assert thermal["simulation.advanced.metadata.thermal_node_count"] > 4.0
