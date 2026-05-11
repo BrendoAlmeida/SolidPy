@@ -73,3 +73,10 @@ from .Multiphysics import (
     simulate_structural_response,
     simulate_thermal_ablation,
 )
+from .Acoustics import CavityResonance
+from .MonteCarlo import DispersionAnalysis
+from .TwoPhaseFlow import (
+    estimate_kinetic_lag_isp_loss,
+    estimate_thermal_lag_isp_loss,
+    estimate_two_phase_isp_loss,
+)
