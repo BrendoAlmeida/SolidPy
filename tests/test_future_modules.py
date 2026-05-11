@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import numpy as np
 import pytest
 
 from solidpy import (
@@ -18,12 +19,21 @@ def test_acoustics_skeleton_public_api():
         speed_of_sound_m_s=950.0,
     )
 
-    with pytest.raises(NotImplementedError):
-        resonance.longitudinal_frequencies()
-    with pytest.raises(NotImplementedError):
-        resonance.tangential_frequencies()
-    with pytest.raises(NotImplementedError):
-        resonance.evaluate_rayleigh_risk([], [], [])
+    longitudinal = resonance.longitudinal_frequencies()
+    assert longitudinal == pytest.approx([791.6666666667, 1583.3333333333, 2375.0])
+
+    tangential = resonance.tangential_frequencies()
+    assert len(tangential) == 3
+    assert tangential == sorted(tangential)
+    assert all(frequency > 0.0 for frequency in tangential)
+
+    time_s = np.linspace(0.0, 0.02, 500)
+    pressure = np.sin(2.0 * np.pi * 500.0 * time_s)
+    heat_release = 2.0 * pressure
+    risk = resonance.evaluate_rayleigh_risk(pressure, heat_release, time_s)
+    assert risk["risk_level"] == "high"
+    assert risk["normalized_correlation"] == pytest.approx(1.0)
+    assert risk["is_destabilizing"] is True
 
 
 def test_monte_carlo_skeleton_public_api():
