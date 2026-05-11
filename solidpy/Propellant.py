@@ -12,6 +12,23 @@ import scipy.constants as const
 import numpy as np
 
 
+PA_PER_PSIA = 6894.757293168
+FT_TO_M = 0.3048
+RANKINE_TO_KELVIN = 5.0 / 9.0
+DEFAULT_CEA_PRESSURE_RANGE_PA = (101325.0, 150.0 * 101325.0)
+
+
+def _import_rocketcea():
+    try:
+        from rocketcea.cea_obj import CEA_Obj, add_new_propellant
+    except ImportError as exc:
+        raise ImportError(
+            "RocketCEA support requires the optional 'rocketcea' package. "
+            "Install it with: pip install rocketcea"
+        ) from exc
+    return CEA_Obj, add_new_propellant
+
+
 class Propellant:
     def __init__(
         self,
@@ -19,6 +36,13 @@ class Propellant:
         products_molecular_mass,
         combustion_temperature,
         density=None,
+        *,
+        cstar=None,
+        cea_formulation=None,
+        cea_name=None,
+        cea_pressure_range_pa=None,
+        cea_n_points=40,
+        cea_expansion_ratio=10.0,
         **kwargs
     ):
         self.specific_heat_ratio = specific_heat_ratio
@@ -26,6 +50,23 @@ class Propellant:
         self.products_molecular_mass = products_molecular_mass
         self.products_constant = const.R / products_molecular_mass
         self.combustion_temperature = combustion_temperature
+        self.cstar = cstar
+
+        self.cea_formulation = cea_formulation
+        self.cea_name = cea_name
+        self.cea_pressure_range_pa = (
+            DEFAULT_CEA_PRESSURE_RANGE_PA
+            if cea_pressure_range_pa is None
+            else cea_pressure_range_pa
+        )
+        self.cea_n_points = cea_n_points
+        self.cea_expansion_ratio = cea_expansion_ratio
+        self._cea_obj = None
+
+        self._thermo_table = None      # set by load_thermo_table() or RocketCEA
+        self._cstar_func = None
+        self._gamma_func = None
+        self._temperature_func = None
 
         self.__dict__.update(kwargs)
         self._burn_rate_interpolator = None
@@ -33,11 +74,16 @@ class Propellant:
             self._burn_rate_interpolator = self._load_burn_rate_interpolator(
                 self.interpolation_list
             )
-        self.calc_cstar()
+        if self.cstar is None:
+            self.calc_cstar()
+        else:
+            self.cstar = float(self.cstar)
+
+        if self.cea_formulation is not None:
+            self._load_cea_thermo()
 
         self.mean_burn_rate_index = 0
         self.mean_burn_rate_value = 0
-        self._thermo_table = None      # set by load_thermo_table()
 
     def _load_burn_rate_interpolator(self, interpolation_list):
         pressure_list = []
@@ -129,7 +175,21 @@ class Propellant:
         if len(arr) < 2:
             raise ValueError("Thermochemistry table must have at least 2 rows")
 
+        self._load_thermo_array(arr)
+
+    def _load_thermo_array(self, arr):
+        arr = np.asarray(arr, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] < 4:
+            raise ValueError("Thermochemistry table must have columns: pressure_pa, cstar_m_s, k, Tc_K")
+        if len(arr) < 2:
+            raise ValueError("Thermochemistry table must have at least 2 rows")
+
+        order = np.argsort(arr[:, 0])
+        arr = arr[order]
         pressures = arr[:, 0]
+        if np.any(np.diff(pressures) <= 0.0):
+            raise ValueError("Thermochemistry table pressures must be unique and ascending")
+
         cstars = arr[:, 1]
         ks = arr[:, 2]
         tcs = arr[:, 3]
@@ -141,36 +201,112 @@ class Propellant:
                 fill_value=(float(y[0]), float(y[-1]))
             )
 
+        self._cstar_func = _make_interp(cstars)
+        self._gamma_func = _make_interp(ks)
+        self._temperature_func = _make_interp(tcs)
+
         self._thermo_table = {
             "pressure_pa": pressures,
-            "cstar_interp": _make_interp(cstars),
-            "k_interp": _make_interp(ks),
-            "Tc_interp": _make_interp(tcs),
+            "cstar_interp": self._cstar_func,
+            "k_interp": self._gamma_func,
+            "Tc_interp": self._temperature_func,
         }
 
         # Update base attributes to the mid-range value so existing code stays sane.
         mid = pressures[len(pressures) // 2]
-        self.specific_heat_ratio = float(self.k_at_pressure(mid))
+        self.specific_heat_ratio = float(self.get_gamma(mid))
         self.combustion_temperature = float(self.Tc_at_pressure(mid))
-        self.cstar = float(self.cstar_at_pressure(mid))
+        self.cstar = float(self.get_cstar(mid))
+
+    def _load_cea_thermo(self):
+        card = str(self.cea_formulation).strip()
+        if not card:
+            raise ValueError("cea_formulation must be a non-empty RocketCEA propellant card")
+
+        CEA_Obj, add_new_propellant = _import_rocketcea()
+        self.cea_name = self.cea_name or f"solidpy_propellant_{id(self):x}"
+        add_new_propellant(self.cea_name, card)
+        self._cea_obj = CEA_Obj(propName=self.cea_name)
+
+        pressures_pa = self._build_cea_pressure_grid()
+        eps = max(float(self.cea_expansion_ratio), 1.001)
+        rows = []
+
+        for pressure_pa in pressures_pa:
+            pressure_psia = pressure_pa / PA_PER_PSIA
+            try:
+                _, cstar_ft_s, chamber_temperature_r = self._cea_obj.get_IvacCstrTc(
+                    Pc=pressure_psia,
+                    eps=eps,
+                    MR=0,
+                )
+                gamma = self._cea_obj.get_Chamber_MolWt_gamma(
+                    Pc=pressure_psia,
+                    eps=eps,
+                    MR=0,
+                )[1]
+                rows.append([
+                    pressure_pa,
+                    float(cstar_ft_s) * FT_TO_M,
+                    float(gamma),
+                    float(chamber_temperature_r) * RANKINE_TO_KELVIN,
+                ])
+            except Exception:
+                warnings.warn(
+                    f"RocketCEA evaluation failed at P={pressure_pa:.0f} Pa; skipping.",
+                    stacklevel=2,
+                )
+
+        if len(rows) < 2:
+            raise RuntimeError(
+                "RocketCEA produced fewer than two valid thermodynamic points "
+                "for the requested pressure range."
+            )
+
+        self._load_thermo_array(np.array(rows, dtype=float))
+
+    def _build_cea_pressure_grid(self):
+        n_points = int(self.cea_n_points)
+        if n_points < 2:
+            raise ValueError("cea_n_points must be at least 2")
+
+        try:
+            p_low, p_high = self.cea_pressure_range_pa
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cea_pressure_range_pa must be a (low_pa, high_pa) pair") from exc
+
+        p_low = float(p_low)
+        p_high = float(p_high)
+        if p_low <= 0.0 or p_high <= 0.0 or p_high <= p_low:
+            raise ValueError("cea_pressure_range_pa must contain positive ascending pressures")
+
+        return np.linspace(p_low, p_high, n_points)
+
+    def get_cstar(self, pressure_pa):
+        """Return characteristic velocity c* [m/s] at the given chamber pressure."""
+        if self._cstar_func is not None:
+            return float(self._cstar_func(pressure_pa))
+        return float(self.cstar)
+
+    def get_gamma(self, pressure_pa):
+        """Return specific heat ratio gamma/k at the given chamber pressure."""
+        if self._gamma_func is not None:
+            return float(self._gamma_func(pressure_pa))
+        return float(self.specific_heat_ratio)
 
     def cstar_at_pressure(self, pressure_pa):
         """Return characteristic velocity c* [m/s] at the given chamber pressure."""
-        if self._thermo_table is not None:
-            return float(self._thermo_table["cstar_interp"](pressure_pa))
-        return self.cstar
+        return self.get_cstar(pressure_pa)
 
     def k_at_pressure(self, pressure_pa):
         """Return specific heat ratio k at the given chamber pressure."""
-        if self._thermo_table is not None:
-            return float(self._thermo_table["k_interp"](pressure_pa))
-        return self.specific_heat_ratio
+        return self.get_gamma(pressure_pa)
 
     def Tc_at_pressure(self, pressure_pa):
         """Return adiabatic flame temperature Tc [K] at the given chamber pressure."""
-        if self._thermo_table is not None:
-            return float(self._thermo_table["Tc_interp"](pressure_pa))
-        return self.combustion_temperature
+        if self._temperature_func is not None:
+            return float(self._temperature_func(pressure_pa))
+        return float(self.combustion_temperature)
 
     def calc_cstar(self):
         k = self.specific_heat_ratio
@@ -237,13 +373,7 @@ def build_cea_properties(
         )
         knsb.load_thermo_table(table)
     """
-    try:
-        from rocketcea.cea_obj import CEA_Obj
-    except ImportError as exc:
-        raise ImportError(
-            "rocketcea is required for build_cea_properties(). "
-            "Install it with: pip install rocketcea"
-        ) from exc
+    CEA_Obj, _ = _import_rocketcea()
 
     if pressure_range_pa is None:
         pressure_range_pa = (1e5, 10e6)
@@ -254,13 +384,13 @@ def build_cea_properties(
     cea = CEA_Obj(propName=str(propellant_name))
     rows = []
     for p_pa in pressures_pa:
-        p_psia = p_pa / 6894.757
+        p_psia = p_pa / PA_PER_PSIA
         try:
             eps = max(float(expansion_ratio), 1.001)
             isp_vac, cstar, tc_r = cea.get_IvacCstrTc(Pc=p_psia, eps=eps, MR=0)
             k = cea.get_Chamber_MolWt_gamma(Pc=p_psia, MR=0, eps=eps)[1]
-            cstar_ms = cstar * 0.3048          # ft/s → m/s
-            tc_k = tc_r * 5.0 / 9.0           # Rankine → Kelvin
+            cstar_ms = cstar * FT_TO_M
+            tc_k = tc_r * RANKINE_TO_KELVIN
             rows.append([p_pa, cstar_ms, float(k), tc_k])
         except Exception:
             warnings.warn(f"CEA evaluation failed at P={p_pa:.0f} Pa — skipping.", stacklevel=2)

@@ -55,6 +55,20 @@ class Burn:
         )
         return parameters
 
+    def _parameters_at_pressure(self, chamber_pressure=None):
+        pressure = (
+            self.environment_pressure
+            if chamber_pressure is None
+            else max(float(chamber_pressure), 0.0)
+        )
+        return (
+            self.propellant.Tc_at_pressure(pressure),  # T_0
+            self.propellant.products_constant,  # R
+            self.propellant.density,  # rho_g
+            self.propellant.get_gamma(pressure),  # k
+            self.motor.nozzle_throat_area,  # A_t
+        )
+
     def evaluate_nozzle_mass_flow(self, chamber_pressure):
         """Calculation of total nozzle mass flow.
 
@@ -67,10 +81,10 @@ class Burn:
         Returns:
             float: nozzle mass flow for the specified chamber pressure
         """
-        T_0, R, _, k, A_t = self.parameters
         if chamber_pressure <= self.environment_pressure:
             return 0.0
 
+        T_0, R, _, k, A_t = self._parameters_at_pressure(chamber_pressure)
         pressure_ratio = self.environment_pressure / chamber_pressure
         critical_pressure_ratio = math.pow(2 / (k + 1), k / (k - 1))
 
@@ -94,9 +108,9 @@ class Burn:
 
     def is_nozzle_choked(self, chamber_pressure):
         """Return whether chamber-to-ambient pressure ratio chokes the throat."""
-        _, _, _, k, _ = self.parameters
         if chamber_pressure <= self.environment_pressure:
             return False
+        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         critical_pressure_ratio = math.pow(2 / (k + 1), k / (k - 1))
         return self.environment_pressure / chamber_pressure <= critical_pressure_ratio
 
@@ -110,7 +124,7 @@ class Burn:
         Returns:
             float: mach number
         """
-        _, _, _, k, _ = self.parameters
+        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         if chamber_pressure is not None and not self.is_nozzle_choked(
             chamber_pressure
         ):
@@ -127,7 +141,7 @@ class Burn:
             )
             return min(self.exit_mach, 1.0)
 
-        cache_key = (k, self.motor.expansion_ratio)
+        cache_key = (round(k, 12), self.motor.expansion_ratio)
         if cache_key in self._exit_mach_cache:
             self.exit_mach = self._exit_mach_cache[cache_key]
             return self.exit_mach
@@ -160,11 +174,11 @@ class Burn:
         Returns:
             float: exit pressure for the specified chamber pressure
         """
-        _, _, _, k, _ = self.parameters
         if not self.is_nozzle_choked(chamber_pressure):
             self.exit_pressure = self.environment_pressure
             return self.exit_pressure
 
+        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         self.exit_pressure = chamber_pressure * math.pow(
             (1 + (k - 1) / 2 * self.evaluate_exit_mach(chamber_pressure) ** 2),
             -k / (k - 1),
@@ -180,7 +194,7 @@ class Burn:
         Returns:
             float: exit temperature
         """
-        T_0, _, _, k, _ = self.parameters
+        T_0, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         if chamber_pressure is not None and not self.is_nozzle_choked(
             chamber_pressure
         ):
@@ -206,7 +220,7 @@ class Burn:
         Returns:
             float: exit velocity
         """
-        _, R, _, k, _ = self.parameters
+        T_0, R, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         if chamber_pressure is not None and not self.is_nozzle_choked(
             chamber_pressure
         ):
@@ -217,7 +231,7 @@ class Burn:
                 max(
                     (2 * k / (k - 1))
                     * R
-                    * self.propellant.combustion_temperature
+                    * T_0
                     * (
                         1
                         - math.pow(
@@ -261,12 +275,12 @@ class Burn:
             (float): the motor's thrust coefficient for
             a given chamber pressure
         """
-        _, _, _, k, _ = self.parameters
         lambda_div = self._nozzle_divergence_factor()
 
         if chamber_pressure <= self.environment_pressure:
             self.Cf = 0.0
             return self.Cf
+        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
         if not self.is_nozzle_choked(chamber_pressure):
             thrust = self.evaluate_nozzle_mass_flow(
                 chamber_pressure
@@ -380,7 +394,7 @@ class Burn:
         Returns:
             float: current propellant burn rate
         """
-        T_0, R, rho_g, _, _ = self.parameters
+        T_0, R, rho_g, _, _ = self._parameters_at_pressure(chamber_pressure)
 
         rho_0 = chamber_pressure / (R * T_0)  # product_gas_density
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
@@ -518,7 +532,7 @@ class BurnSimulation(Burn):
         free_volume = state_variables[1]
         per_grain_regression = list(state_variables[2:2 + n_grains])
 
-        T_0, R, rho_g, _, _ = self.parameters
+        T_0, R, rho_g, _, _ = self._parameters_at_pressure(chamber_pressure)
         rho_0 = chamber_pressure / (R * T_0)
         nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
         igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
@@ -612,8 +626,6 @@ class BurnSimulation(Burn):
     def solve_analytical_tail_off_regime(self):
         """Evaluate the original choked-flow analytical tail-off model."""
 
-        T_0, R, _, _, A_t = self.parameters
-
         # Set initial values at the end of grain burn simulation
         (
             self.initial_tail_off_time,
@@ -625,6 +637,11 @@ class BurnSimulation(Burn):
             self.grain_burn_solution[2][-1],
         )
 
+        T_0, R, _, _, A_t = self._parameters_at_pressure(
+            self.initial_tail_off_chamber_pressure
+        )
+        cstar = self.propellant.get_cstar(self.initial_tail_off_chamber_pressure)
+
         # Analytical solution to the fluid behavior after grain burn
         self.evaluate_tail_off_chamber_pressure = (
             lambda time: self.initial_tail_off_chamber_pressure
@@ -632,7 +649,7 @@ class BurnSimulation(Burn):
                 -R
                 * T_0
                 * A_t
-                / (self.initial_tail_off_free_volume * self.propellant.calc_cstar())
+                / (self.initial_tail_off_free_volume * cstar)
                 * (time - self.initial_tail_off_time)
             )
         )
@@ -672,8 +689,6 @@ class BurnSimulation(Burn):
 
     def solve_numerical_tail_off_regime(self):
         """Numerically integrate post-burn chamber blowdown."""
-        T_0, R, _, _, _ = self.parameters
-
         initial_time = self.grain_burn_solution[0][-1]
         initial_chamber_pressure = self.grain_burn_solution[1][-1]
         free_volume = self.motor.chamber_volume
@@ -690,6 +705,7 @@ class BurnSimulation(Burn):
 
         def tail_off_vector(time, state_variables):
             chamber_pressure = max(float(state_variables[0]), self.environment_pressure)
+            T_0, R, _, _, _ = self._parameters_at_pressure(chamber_pressure)
             nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
             return [-nozzle_mass_flow * R * T_0 / free_volume]
 
