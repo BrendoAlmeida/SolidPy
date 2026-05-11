@@ -53,11 +53,44 @@ def test_monte_carlo_skeleton_public_api():
 
 def test_two_phase_flow_skeleton_public_api():
     particle_distribution = {"species": "Al2O3", "diameter_m": 5e-6}
-    nozzle_state = {"pressure_pa": [3.0e6, 101325.0]}
+    nozzle_state = {
+        "pressure_pa": [3.0e6, 101325.0],
+        "temperature_k": [3300.0, 1800.0],
+        "nozzle_length_m": 0.16,
+    }
 
-    with pytest.raises(NotImplementedError):
-        estimate_thermal_lag_isp_loss(220.0, 0.12, particle_distribution, nozzle_state)
-    with pytest.raises(NotImplementedError):
-        estimate_kinetic_lag_isp_loss(220.0, 0.12, particle_distribution, nozzle_state)
-    with pytest.raises(NotImplementedError):
-        estimate_two_phase_isp_loss(220.0, 0.12, particle_distribution, nozzle_state)
+    thermal = estimate_thermal_lag_isp_loss(
+        220.0,
+        0.12,
+        particle_distribution,
+        nozzle_state,
+    )
+    kinetic = estimate_kinetic_lag_isp_loss(
+        220.0,
+        0.12,
+        particle_distribution,
+        nozzle_state,
+    )
+    combined = estimate_two_phase_isp_loss(
+        220.0,
+        0.12,
+        particle_distribution,
+        nozzle_state,
+    )
+
+    assert thermal["thermal_loss_s"] > 0.0
+    assert kinetic["kinetic_loss_s"] > 0.0
+    assert combined["total_loss_s"] > max(
+        thermal["thermal_loss_s"],
+        kinetic["kinetic_loss_s"],
+    )
+    assert combined["corrected_isp_s"] < 220.0
+
+    no_condensed = estimate_two_phase_isp_loss(
+        220.0,
+        0.0,
+        particle_distribution,
+        nozzle_state,
+    )
+    assert no_condensed["total_loss_s"] == pytest.approx(0.0)
+    assert no_condensed["corrected_isp_s"] == pytest.approx(220.0)
