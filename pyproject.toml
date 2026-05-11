@@ -20,6 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cea = [
+  "rocketcea>=1.2",
+]
 dev = [
   "pytest>=7",
 ]
