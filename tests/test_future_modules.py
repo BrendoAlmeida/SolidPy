@@ -12,6 +12,15 @@ from solidpy import (
 )
 
 
+def _linear_impact_simulation(sample):
+    wind = sample.get("wind_speed_m_s", 0.0)
+    drag = sample.get("drag_coefficient_factor", 0.0)
+    return {
+        "simulation.3dof.landing_downrange_m": 1000.0 + 12.0 * wind - 80.0 * drag,
+        "simulation.3dof.landing_crossrange_m": -30.0 + 18.0 * wind,
+    }
+
+
 def test_acoustics_skeleton_public_api():
     resonance = CavityResonance(
         chamber_length_m=0.6,
@@ -38,17 +47,30 @@ def test_acoustics_skeleton_public_api():
 
 def test_monte_carlo_skeleton_public_api():
     analysis = DispersionAnalysis(
-        simulation=object(),
-        parameter_sigmas={"dry_mass_kg": 0.05, "wind_speed_m_s": 1.5},
+        simulation=_linear_impact_simulation,
+        parameter_sigmas={"wind_speed_m_s": 1.5, "drag_coefficient_factor": 0.05},
         random_seed=42,
     )
 
-    with pytest.raises(NotImplementedError):
-        analysis.sample_inputs(8)
-    with pytest.raises(NotImplementedError):
-        analysis.run(8)
-    with pytest.raises(NotImplementedError):
-        analysis.dispersion_ellipse([(0.0, 0.0), (1.0, 1.0)])
+    samples = analysis.sample_inputs(8)
+    assert len(samples) == 8
+    assert samples == analysis.sample_inputs(8)
+    assert set(samples[0]) == {"wind_speed_m_s", "drag_coefficient_factor"}
+
+    ellipse = analysis.dispersion_ellipse(
+        [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)],
+        confidence=0.95,
+    )
+    assert ellipse["center_m"] == pytest.approx((1.0, 0.5))
+    assert ellipse["semi_major_axis_m"] >= ellipse["semi_minor_axis_m"] > 0.0
+    assert np.asarray(ellipse["covariance_matrix"]).shape == (2, 2)
+    assert np.isfinite(ellipse["orientation_angle_rad"])
+
+    result = analysis.run(8)
+    assert result["impact_points"].shape == (8, 2)
+    assert len(result["inputs"]) == 8
+    assert len(result["results"]) == 8
+    assert result["dispersion_ellipse"]["semi_major_axis_m"] > 0.0
 
 
 def test_two_phase_flow_skeleton_public_api():
