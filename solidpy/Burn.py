@@ -8,7 +8,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, brentq
 from scipy.integrate import solve_ivp
 try:
     from scipy.integrate import cumulative_trapezoid
@@ -158,7 +158,49 @@ class Burn:
                 - self.motor.expansion_ratio
             )
 
-        self.exit_mach = fsolve(func, np.array(2))[0]
+        # Use a bracketed root-find for the supersonic root.
+        # A/A*(M) is strictly monotonically increasing for M > 1, so brentq
+        # is guaranteed to converge once we bracket the root. fsolve with a
+        # fixed initial guess of M=2 silently fails for high expansion ratios
+        # combined with low γ (e.g. KNSB, ε ≳ 16) — it returns the initial
+        # guess unchanged with a large residual.
+        lo = 1.0 + 1e-9
+        # Grow the upper bracket until func(M_hi) > 0 (root is bracketed).
+        hi = 50.0
+        for _ in range(20):
+            if func(hi) > 0:
+                break
+            hi *= 2.0
+        else:
+            # Fallback: expansion ratio may be extremely large; try brentq
+            # anyway with the last hi — if it still can't bracket, re-raise.
+            pass
+
+        if func(lo) * func(hi) >= 0:
+            # Safety: bracket failed (should not happen for physical inputs).
+            # Fall back to fsolve so we do not raise unexpectedly, but warn.
+            import warnings
+            warnings.warn(
+                f"evaluate_exit_mach: could not bracket supersonic root for "
+                f"k={k:.6g}, expansion_ratio={self.motor.expansion_ratio:.6g}. "
+                "Falling back to fsolve; result may be inaccurate.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.exit_mach = fsolve(func, np.array(2))[0]
+        else:
+            self.exit_mach = brentq(func, lo, hi, xtol=1e-10, rtol=1e-10)
+            # Verify convergence to a tight tolerance.
+            residual = abs(func(self.exit_mach))
+            if residual > 1e-6:
+                import warnings
+                warnings.warn(
+                    f"evaluate_exit_mach: brentq residual {residual:.3e} exceeds "
+                    "tolerance after solving. Result may be inaccurate.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         self._exit_mach_cache[cache_key] = self.exit_mach
         return self.exit_mach
 
