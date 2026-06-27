@@ -31,13 +31,29 @@ except ImportError:
 
 
 class Burn:
-    def __init__(self, grain, motor, propellant, environment=None):
+    def __init__(self, grain, motor, propellant, environment=None, *, eta_c: float = 1.0):
+        """Initialise a burn simulation.
+
+        Args:
+            grain:       Grain object (or list of Grain objects via motor.grains).
+            motor:       Motor object.
+            propellant:  Propellant object.
+            environment: Environment object (defaults to sea-level standard).
+            eta_c:       Combustion efficiency factor (0 < eta_c ≤ 1).
+                         Scales the delivered thrust: F_real = eta_c * F_ideal.
+                         Encompasses c* efficiency, nozzle thermal losses, and any
+                         other empirical corrections beyond the isentropic model.
+                         Default 1.0 preserves backward-compatibility with main.
+                         Pass geometry.isp_efficiency here instead of applying it
+                         externally in the data-generation pipeline.
+        """
         if environment is None:
             environment = Environment()
         self.motor = motor
         self.grain = grain
         self.propellant = propellant
         self.environment = environment
+        self.eta_c = float(eta_c)
 
         self.gravity = environment.gravity
         self.environment_pressure = environment.atmospheric_pressure
@@ -355,16 +371,20 @@ class Burn:
         return self.Cf
 
     def evaluate_thrust(self, chamber_pressure):
-        """Calculation of engine's thrust
+        """Calculation of engine's thrust.
+
+        Applies eta_c (combustion efficiency) to the ideal isentropic thrust.
+        F_real = eta_c * Cf * Pc * At
 
         Args:
-            chamber_pressure (float): current chamber
+            chamber_pressure (float): current chamber pressure
 
         Returns:
             float: motor's thrust for a given chamber pressure
         """
         self.thrust = (
-            self.evaluate_Cf(chamber_pressure)
+            self.eta_c
+            * self.evaluate_Cf(chamber_pressure)
             * chamber_pressure
             * self.motor.nozzle_throat_area
         )

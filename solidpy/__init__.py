@@ -80,3 +80,12 @@ from .TwoPhaseFlow import (
     estimate_thermal_lag_isp_loss,
     estimate_two_phase_isp_loss,
 )
+
+# AI-surrogate branch only — not present in main.
+from .surrogate_physics import (
+    BurnAreaCurve,
+    SurrogateStaticFeatures,
+    compute_burn_area_curve,
+    compute_static_features,
+    static_features_to_dict,
+)
