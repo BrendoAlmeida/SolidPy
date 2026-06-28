@@ -483,8 +483,10 @@ class BurnSimulation(Burn):
         burn_area_activation=None,
         ignition_ramp_time=0.0,
         tail_off_method="numerical",
+        *,
+        eta_c: float = 1.0,
     ):
-        Burn.__init__(self, grain, motor, propellant, environment)
+        Burn.__init__(self, grain, motor, propellant, environment, eta_c=eta_c)
         self.max_step_size = max_step_size
         self.igniter_mass_flow = igniter_mass_flow
         self.igniter_burn_time = max(float(igniter_burn_time), 0.0)

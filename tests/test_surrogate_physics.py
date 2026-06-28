@@ -13,6 +13,7 @@ import pytest
 
 from solidpy import Burn, Grain, Motor, Propellant
 from solidpy.surrogate_physics import (
+    _estimate_equilibrium_pressure,
     compute_burn_area_curve,
     compute_static_features,
     static_features_to_dict,
@@ -175,3 +176,55 @@ class TestBurnAreaCurve:
     def test_geometry_label(self, tubular_grain, star_grain):
         assert compute_burn_area_curve(tubular_grain).geometry == "tubular"
         assert compute_burn_area_curve(star_grain).geometry == "star"
+
+
+# ---------------------------------------------------------------------------
+# Testes: _estimate_equilibrium_pressure
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def kndx_propellant_ballistic():
+    """Propelente com burn_rate_a/burn_rate_n (necessário para evaluate_burn_rate)."""
+    return Propellant(
+        specific_heat_ratio=1.1308,
+        products_molecular_mass=0.04197,
+        combustion_temperature=1720.0,
+        density=1879.0,
+        burn_rate_a=8.875,   # mm/s a 1 MPa  (a em mm/s/MPa^n)
+        burn_rate_n=0.32,
+    )
+
+
+class TestEstimateEquilibriumPressure:
+    def test_returns_positive_pressure(self, tubular_grain, motor, kndx_propellant_ballistic):
+        kn = tubular_grain.burn_area / motor.nozzle_throat_area
+        P_eq = _estimate_equilibrium_pressure(kn, kndx_propellant_ballistic)
+        assert P_eq > 0.0
+
+    def test_pressure_in_realistic_range(self, tubular_grain, motor, kndx_propellant_ballistic):
+        # Para propelentes APCP com Kn típico (50–300), P_eq deve estar em 0,5–15 MPa.
+        kn = tubular_grain.burn_area / motor.nozzle_throat_area
+        P_eq = _estimate_equilibrium_pressure(kn, kndx_propellant_ballistic)
+        assert 0.5e6 < P_eq < 15e6
+
+    def test_higher_kn_gives_higher_pressure(self, tubular_grain, motor, kndx_propellant_ballistic):
+        # P_eq escala monotonicamente com Kn.
+        kn = tubular_grain.burn_area / motor.nozzle_throat_area
+        P_low = _estimate_equilibrium_pressure(kn * 0.5, kndx_propellant_ballistic)
+        P_high = _estimate_equilibrium_pressure(kn * 2.0, kndx_propellant_ballistic)
+        assert P_high > P_low
+
+    def test_convergence_in_few_iterations(self, tubular_grain, motor, kndx_propellant_ballistic):
+        # 6 e 12 iterações devem concordar em < 1% — o default (6) é suficiente.
+        kn = tubular_grain.burn_area / motor.nozzle_throat_area
+        P6 = _estimate_equilibrium_pressure(kn, kndx_propellant_ballistic, n_iter=6)
+        P12 = _estimate_equilibrium_pressure(kn, kndx_propellant_ballistic, n_iter=12)
+        assert abs(P6 / P12 - 1.0) < 0.01
+
+    def test_result_consistent_with_static_features(self, tubular_grain, motor, kndx_propellant_ballistic):
+        # Verifica que compute_static_features aceita P_ref estimado sem erro.
+        kn = tubular_grain.burn_area / motor.nozzle_throat_area
+        P_eq = _estimate_equilibrium_pressure(kn, kndx_propellant_ballistic)
+        feats = compute_static_features(tubular_grain, motor, kndx_propellant_ballistic, P_ref_pa=P_eq)
+        assert feats.P_ref_pa == pytest.approx(P_eq)
+        assert feats.Cf_ref > 0

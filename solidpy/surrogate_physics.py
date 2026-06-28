@@ -293,6 +293,42 @@ def compute_burn_area_curve(
 
 
 # ---------------------------------------------------------------------------
+# Helper: pressão de câmara de equilíbrio via iteração de ponto fixo
+# ---------------------------------------------------------------------------
+
+def _estimate_equilibrium_pressure(
+    kn_initial: float,
+    propellant: "Propellant",
+    *,
+    n_iter: int = 6,
+    P0_pa: float = 3.5e6,
+) -> float:
+    """Pressão de câmara de equilíbrio inicial via iteração de ponto fixo.
+
+    Vieille: r(P) = a * P^n  →  P_eq = rho_p * Kn * r(P_eq) * c*(P_eq)
+    Para n < 1 (todos os propelentes APCP), a iteração converge em 4–6 steps.
+
+    Retorna P_eq em Pa. Útil para passar como P_ref_pa a compute_static_features
+    em vez de um escalar fixo global, eliminando erro basal de 2–3% em motores
+    que operam fora do regime de 3,5 MPa.
+    """
+    P = float(P0_pa)
+    kn = float(kn_initial)
+    for _ in range(n_iter):
+        r = float(propellant.evaluate_burn_rate(P, 0.0))
+        gamma = float(propellant.get_gamma(P))
+        R_sp = float(propellant.products_constant)
+        T0 = float(propellant.Tc_at_pressure(P))
+        c_star = (
+            math.sqrt(R_sp * T0 / gamma)
+            * ((gamma + 1.0) / 2.0) ** ((gamma + 1.0) / (2.0 * (gamma - 1.0)))
+        )
+        rho_p = float(propellant.density)
+        P = max(rho_p * kn * r * c_star, 1e3)
+    return P
+
+
+# ---------------------------------------------------------------------------
 # Helper: converter SurrogateStaticFeatures → dict para salvar no dataset
 # ---------------------------------------------------------------------------
 
