@@ -12,9 +12,11 @@ import numpy as np
 try:
     from .Burn import BurnSimulation
     from .Environment import Environment
+    from ._numpy_compat import trapezoid as _trapezoid
 except ImportError:
     from Burn import BurnSimulation
     from Environment import Environment
+    from _numpy_compat import trapezoid as _trapezoid
 
 
 STANDARD_GRAVITY = 9.80665
@@ -182,7 +184,7 @@ def build_detailed_ballistics(
         dtype=float,
     )
 
-    total_impulse_ns = float(np.trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
+    total_impulse_ns = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
     burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
     peak_thrust_n = float(np.max(thrust_n)) if len(thrust_n) else 0.0
     avg_thrust_n = total_impulse_ns / burn_time_s if burn_time_s > 0.0 else 0.0
@@ -190,10 +192,10 @@ def build_detailed_ballistics(
         max(propellant_mass_kg[0] - propellant_mass_kg[-1], 0.0)
     )
     generated_integral_kg = (
-        float(np.trapezoid(mass_generated_kg_s, time_s)) if len(time_s) > 1 else 0.0
+        float(_trapezoid(mass_generated_kg_s, time_s)) if len(time_s) > 1 else 0.0
     )
     expelled_integral_kg = (
-        float(np.trapezoid(mass_nozzle_kg_s, time_s)) if len(time_s) > 1 else 0.0
+        float(_trapezoid(mass_nozzle_kg_s, time_s)) if len(time_s) > 1 else 0.0
     )
     mass_conservation_error_pct = (
         100.0
@@ -208,7 +210,7 @@ def build_detailed_ballistics(
         else 0.0
     )
     cstar_effective_m_s = (
-        float(np.trapezoid(chamber_pressure_pa * throat_area_m2, time_s))
+        float(_trapezoid(chamber_pressure_pa * throat_area_m2, time_s))
         / max(generated_integral_kg, 1e-9)
         if generated_integral_kg > 1e-9
         else 0.0

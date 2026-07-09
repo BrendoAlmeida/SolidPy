@@ -12,6 +12,11 @@ import numpy as np
 from scipy import sparse
 from scipy.integrate import solve_ivp
 
+try:
+    from ._numpy_compat import trapezoid as _trapezoid
+except ImportError:
+    from _numpy_compat import trapezoid as _trapezoid
+
 
 G0_M_S2 = 9.80665
 SEA_LEVEL_DENSITY_KG_M3 = 1.225
@@ -725,7 +730,7 @@ def simulate_flight_1d(
             rail_exit_velocity = velocity
             rail_exit_twr = thrust / max(rocket_mass * G0_M_S2, 1.0)
 
-    total_impulse = float(np.trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
+    total_impulse = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
     propellant_burned = max(geometry.motor_initial_mass_kg - geometry.motor_final_mass_kg, 1e-9)
     isp_s = total_impulse / (propellant_burned * G0_M_S2)
     m0 = dry_airframe_mass + geometry.motor_initial_mass_kg
@@ -1395,7 +1400,7 @@ def simulate_advanced_physics(
         drag_coefficient_factor=float(scenario_factors.get("drag_coefficient_factor", 1.0) or 1.0),
     )
     total_impulse = (
-        float(np.trapezoid(curve["thrust_n"], curve["time_s"]))
+        float(_trapezoid(curve["thrust_n"], curve["time_s"]))
         if len(curve.get("time_s", [])) > 1
         else 0.0
     )

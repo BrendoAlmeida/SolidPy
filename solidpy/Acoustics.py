@@ -10,6 +10,11 @@ from typing import Optional
 import numpy as np
 from scipy.special import jnp_zeros
 
+try:
+    from ._numpy_compat import trapezoid as _trapezoid
+except ImportError:
+    from _numpy_compat import trapezoid as _trapezoid
+
 
 def _validate_positive(value, name):
     value = float(value)
@@ -184,21 +189,21 @@ class CavityResonance:
         )
 
         numerator = float(
-            np.trapezoid(
+            _trapezoid(
                 np.reshape(pressure_perturbation * heat_release_perturbation, (time_s.size, -1)),
                 time_s,
                 axis=0,
             ).sum()
         )
         pressure_energy = float(
-            np.trapezoid(
+            _trapezoid(
                 np.reshape(pressure_perturbation * pressure_perturbation, (time_s.size, -1)),
                 time_s,
                 axis=0,
             ).sum()
         )
         heat_energy = float(
-            np.trapezoid(
+            _trapezoid(
                 np.reshape(heat_release_perturbation * heat_release_perturbation, (time_s.size, -1)),
                 time_s,
                 axis=0,

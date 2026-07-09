@@ -13,9 +13,11 @@ import numpy as np
 try:
     from .DetailedBallistics import run_detailed_ballistics
     from .Environment import Environment
+    from ._numpy_compat import trapezoid as _trapezoid
 except ImportError:
     from DetailedBallistics import run_detailed_ballistics
     from Environment import Environment
+    from _numpy_compat import trapezoid as _trapezoid
 
 
 BURN_RATE_TEMP_SENSITIVITY_PER_K = 0.005
@@ -139,7 +141,7 @@ def _rescale_thrust(result, factor):
     propellant_mass_kg = np.asarray(result["propellant_mass_kg"], dtype=float)
     burned_kg = max(float(propellant_mass_kg[0] - propellant_mass_kg[-1]), 0.0)
     burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
-    total_impulse = float(np.trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
+    total_impulse = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
 
     summary = result["summary"]
     summary["simulation.nominal.total_impulse_ns"] = total_impulse
