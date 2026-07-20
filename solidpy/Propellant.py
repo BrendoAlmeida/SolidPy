@@ -313,8 +313,7 @@ class Propellant:
         self.cstar = math.sqrt(
             (const.R * self.combustion_temperature)
             / (self.products_molecular_mass * k)
-            * ((k + 1) / 2) ** ((k + 1) / (k - 1))
-        )
+        ) * ((k + 1) / 2) ** ((k + 1) / (2 * (k - 1)))
         return self.cstar
 
     # Test - Média Móvel
