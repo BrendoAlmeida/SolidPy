@@ -80,20 +80,50 @@ class TestEtaC:
         burn = Burn(tubular_grain, motor, kndx_propellant)
         assert burn.eta_c == 1.0
 
-    def test_eta_c_scales_thrust_linearly(self, tubular_grain, motor, kndx_propellant):
+    def test_eta_c_scales_T0_nozzle_mdot_and_Ve(
+        self, tubular_grain, motor, kndx_propellant
+    ):
+        # New model (§2.1): eta_c enters as T_0_ef = eta_c**2 * T_0, so it
+        # propagates to mdot (1/sqrt(T_0)) and exit velocity (sqrt(T_0)).
+        # Critically, Cf and thrust-at-fixed-P do NOT change with eta_c —
+        # they are dimensionless functions of pressure ratios only.
+        # eta_c's physical effect on thrust comes through chamber pressure
+        # (energy balance -> Pmax), which is exercised by solve_burn, not by
+        # an isolated evaluate_thrust(Pfixed) call.
         P = 3.5e6
         burn_ideal = Burn(tubular_grain, motor, kndx_propellant, eta_c=1.0)
         burn_90 = Burn(tubular_grain, motor, kndx_propellant, eta_c=0.90)
 
+        T0_ideal = burn_ideal._parameters_at_pressure(P)[0]
+        T0_90 = burn_90._parameters_at_pressure(P)[0]
+        assert T0_90 == pytest.approx(T0_ideal * 0.81, rel=1e-9)
+
+        mdot_ideal = burn_ideal.evaluate_nozzle_mass_flow(P)
+        mdot_90 = burn_90.evaluate_nozzle_mass_flow(P)
+        # mdot ∝ 1/sqrt(T_0); T0_90 = 0.81*T0 -> 1/sqrt(0.81) = 1/0.9
+        assert mdot_90 == pytest.approx(mdot_ideal / 0.9, rel=1e-6)
+
+        Ve_ideal = burn_ideal.evaluate_exit_velocity(P)
+        Ve_90 = burn_90.evaluate_exit_velocity(P)
+        # Ve ∝ sqrt(T_0); T0_90 = 0.81*T0 -> sqrt(0.81) = 0.9
+        assert Ve_90 == pytest.approx(Ve_ideal * 0.9, rel=1e-6)
+
+        # Thrust at *fixed* Pc is unchanged: Cf is dimensionless, depends on
+        # pressure ratios only (not on T_0). eta_c's effect on thrust is
+        # indirect, via the energy balance that sets Pc in solve_burn.
         thrust_ideal = burn_ideal.evaluate_thrust(P)
         thrust_90 = burn_90.evaluate_thrust(P)
+        assert thrust_ideal == pytest.approx(thrust_90, rel=1e-9)
 
-        assert thrust_ideal > 0
-        assert abs(thrust_90 / thrust_ideal - 0.90) < 1e-9
-
-    def test_eta_c_zero_gives_zero_thrust(self, tubular_grain, motor, kndx_propellant):
+    def test_eta_c_zero_keeps_thrust_finite(
+        self, tubular_grain, motor, kndx_propellant
+    ):
+        # eta_c=0 collapses T_0 but Cf is still well-defined (pure pressure
+        # ratios). The result is finite; we don't assert zero — that was the
+        # deprecated linear-model assertion.
         burn = Burn(tubular_grain, motor, kndx_propellant, eta_c=0.0)
-        assert burn.evaluate_thrust(3.5e6) == pytest.approx(0.0)
+        result = burn.evaluate_thrust(3.5e6)
+        assert math.isfinite(result)
 
 
 # ---------------------------------------------------------------------------

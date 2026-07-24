@@ -40,12 +40,13 @@ class Burn:
             propellant:  Propellant object.
             environment: Environment object (defaults to sea-level standard).
             eta_c:       Combustion efficiency factor (0 < eta_c ≤ 1).
-                         Scales the delivered thrust: F_real = eta_c * F_ideal.
-                         Encompasses c* efficiency, nozzle thermal losses, and any
-                         other empirical corrections beyond the isentropic model.
-                         Default 1.0 preserves backward-compatibility with main.
-                         Pass geometry.isp_efficiency here instead of applying it
-                         externally in the data-generation pipeline.
+                         Applied as T_0_ef = eta_c**2 * T_0 inside
+                         _parameters_at_pressure, matching the HTML convention
+                         (c* ∝ sqrt(T_0)). Propagates to both chamber pressure
+                         via the energy balance (Pmax) and thrust/Isp via
+                         c*/Ve — previously it only scaled thrust and Pmax was
+                         inconsistent with the reference HTML simulator.
+                         Default 1.0 preserves backward-compatibility.
         """
         if environment is None:
             environment = Environment()
@@ -77,8 +78,16 @@ class Burn:
             if chamber_pressure is None
             else max(float(chamber_pressure), 0.0)
         )
+        # eta_c models combustion efficiency as an effective flame temperature
+        # T_0_ef = eta_c**2 * T_0, matching the HTML simulator convention.
+        # This is the physically complete path: c* ∝ sqrt(T_0), mdot ∝ 1/sqrt(T_0),
+        # Ve ∝ sqrt(T_0), so eta_c propagates to pressure (energy balance -> Pmax)
+        # AND thrust/Isp via the same mechanism — instead of the previous
+        # thrust-only fudge factor, which left Pmax inconsistent with the HTML.
+        # Ref: RELATORIO_COMPARACAO.md §2.1; simulador_balistica_interna_v7.html §tubeira.
+        t0_eff = self.propellant.Tc_at_pressure(pressure) * (self.eta_c ** 2)
         return (
-            self.propellant.Tc_at_pressure(pressure),  # T_0
+            t0_eff,  # T_0 (effective)
             self.propellant.products_constant,  # R
             self.propellant.density,  # rho_g
             self.propellant.get_gamma(pressure),  # k
@@ -373,8 +382,10 @@ class Burn:
     def evaluate_thrust(self, chamber_pressure):
         """Calculation of engine's thrust.
 
-        Applies eta_c (combustion efficiency) to the ideal isentropic thrust.
-        F_real = eta_c * Cf * Pc * At
+        eta_c is now applied as T_0_ef = eta_c**2 * T_0 inside
+        _parameters_at_pressure, so it propagates consistently to both
+        chamber pressure (energy balance -> Pmax) and thrust (c*, Ve).
+        No explicit eta_c scaling here — that would double-count it.
 
         Args:
             chamber_pressure (float): current chamber pressure
@@ -383,8 +394,7 @@ class Burn:
             float: motor's thrust for a given chamber pressure
         """
         self.thrust = (
-            self.eta_c
-            * self.evaluate_Cf(chamber_pressure)
+            self.evaluate_Cf(chamber_pressure)
             * chamber_pressure
             * self.motor.nozzle_throat_area
         )
