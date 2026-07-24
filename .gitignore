@@ -1,5 +1,31 @@
+# python
 __pycache__/
 *pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# venvs / editores
 .venv/
 .idea/
+.vscode/
+.omo/
+
+# testes / lint / cobertura
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+
+# lockfiles / requirements (deps em pyproject.toml)
+uv.lock
+requirements.txt
+
+# outputs de simulação
+data/**/graphs/*.png
+data/**/graphs/*.svg
+data/burn_simulation/burn_data.csv
+data/rail_movement/rail_data.csv
