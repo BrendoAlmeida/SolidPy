@@ -72,6 +72,7 @@ from .Multiphysics import (
     simulate_ignition_proxy,
     simulate_structural_response,
     simulate_thermal_ablation,
+    StructuralMonteCarlo,
 )
 from .Acoustics import CavityResonance
 from .MonteCarlo import DispersionAnalysis

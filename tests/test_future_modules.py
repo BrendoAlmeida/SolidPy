@@ -6,10 +6,12 @@ import pytest
 from solidpy import (
     CavityResonance,
     DispersionAnalysis,
+    StructuralMonteCarlo,
     estimate_kinetic_lag_isp_loss,
     estimate_thermal_lag_isp_loss,
     estimate_two_phase_isp_loss,
 )
+from solidpy.Multiphysics import CasingMaterial, MotorGeometry
 
 
 def _linear_impact_simulation(sample):
@@ -116,3 +118,97 @@ def test_two_phase_flow_skeleton_public_api():
     )
     assert no_condensed["total_loss_s"] == pytest.approx(0.0)
     assert no_condensed["corrected_isp_s"] == pytest.approx(220.0)
+
+
+def _structural_geometry():
+    return MotorGeometry(
+        motor_length_m=0.200,
+        motor_inner_diameter_m=0.070,
+        casing_wall_thickness_m=0.0015,
+        grain_outer_diameter_m=0.034,
+        grain_core_diameter_m=0.020,
+        grain_gap_m=0.005,
+        grain_length_each_m=0.040,
+        grain_number=4,
+        fill_length_m=0.180,
+        throat_diameter_m=0.012,
+        exit_diameter_m=0.020,
+        free_volume_m3=2.0e-4,
+        propellant_mass_kg=0.500,
+        dry_mass_kg=2.0,
+        motor_initial_mass_kg=2.5,
+        motor_final_mass_kg=2.0,
+    )
+
+
+def _structural_casing():
+    return CasingMaterial(
+        density_kg_m3=7800.0,
+        modulus_gpa=210.0,
+        yield_strength_mpa=250.0,
+        ultimate_strength_mpa=400.0,
+        poisson_ratio=0.3,
+        max_service_temp_c=300.0,
+        thermal_conductivity_w_mk=45.0,
+    )
+
+
+def test_structural_monte_carlo_public_api():
+    def pmax_dist():
+        return 5.0e6
+
+    smc = StructuralMonteCarlo(
+        _structural_geometry(),
+        _structural_casing(),
+        peak_pressure_distribution=pmax_dist,
+        parameter_sigmas={"perturb_peak_pressure": 1.0e6},
+        random_seed=42,
+    )
+    r = smc.run(64)
+    assert r["n_evaluated"] == 64
+    assert r["failure_probability"] == 0.0
+    assert r["failure_probability_casing"] == 0.0
+    assert len(r["peak_pressure_pa"]) == 64
+    assert len(r["burst_safety_factor"]) == 64
+    assert abs(np.mean(r["peak_pressure_pa"]) - 5.0e6) < 0.5e6
+    assert all(sf > 1.0 for sf in r["burst_safety_factor"])
+
+
+def test_structural_monte_carlo_failure_regime():
+    def pmax_dist():
+        return 8.0e6
+
+    smc = StructuralMonteCarlo(
+        _structural_geometry(),
+        _structural_casing(),
+        peak_pressure_distribution=pmax_dist,
+        parameter_sigmas={"perturb_peak_pressure": 2.0e6},
+        random_seed=1,
+        bolt_count=4,
+        bolt_diameter_m=0.004,
+        bolt_strength_mpa=600.0,
+    )
+    r = smc.run(512)
+    assert r["n_evaluated"] == 512
+    assert r["failure_probability_casing"] > 0.0
+    assert r["failure_probability_bolts"] > 0.0
+    assert r["failure_probability"] >= r["failure_probability_casing"]
+    assert r["failure_probability"] >= r["failure_probability_bolts"]
+    assert r["failure_probability"] <= (
+        r["failure_probability_casing"] + r["failure_probability_bolts"]
+    )
+
+
+def test_structural_monte_carlo_rejects_both_modes():
+    with pytest.raises(ValueError):
+        StructuralMonteCarlo(
+            _structural_geometry(),
+            _structural_casing(),
+            peak_pressure_distribution=lambda: 5e6,
+            ballistics_callable=lambda s: {},
+        )
+    with pytest.raises(ValueError):
+        StructuralMonteCarlo(
+            _structural_geometry(),
+            _structural_casing(),
+        )

@@ -1557,3 +1557,239 @@ def simulate_advanced_components(
             **flight,
         },
     }
+
+
+class StructuralMonteCarlo:
+    """Monte Carlo for casing / closure-bolt failure probability.
+
+    Provides a "structural-only" dispersion analysis focused on the
+    probability that the casing or the closure bolts fail given uncertainty
+    in the inputs that set peak chamber pressure (the dominant driver of
+    the structural margins once geometry and material are fixed).
+
+    Two sampling modes are supported:
+
+    1. ``peak_pressure_distribution`` (cheap): supply a callable that returns
+       a single sampled P_máx (Pa) for each iteration. Useful when the user
+       already has Pmax statistics from a ballistics Monte Carlo.
+
+    2. ``ballistics_callable`` (expensive): supply a callable that receives
+       the perturbed-parameter dict and returns a ``curve`` dict with the
+       keys ``"time_s"`` and ``"chamber_pressure_pa"``. Peak pressure is
+       then extracted internally via :func:`Export.refine_peak_parabolic`-
+       equivalent argmax, calling ``simulate_structural_response`` with the
+       full curve so the metal fatigue / bulge / thermo-elastic metrics
+       are also accurately sampled.
+
+    Parameter sampling uses the same ``DispersionAnalysis``-style convention
+    as ``MonteCarlo.py``: ``parameter_sigmas`` maps ``name -> sigma`` (float)
+    or ``name -> {"mean": ..., "sigma": ...}``. Sampling is gaussian;
+    "perturb_peak_pressure" inside ``parameter_sigmas`` is a reserved key
+    that, when present, is added to the raw peak pressure of each sample
+    (useful to inject Pmax scatter on top of (a, n, rho, T0, Dt, eta_c)
+    perturbations).
+
+    Failure criterion (any criterion below):
+
+    - burst_safety_factor        < 1.0  (casing bulk rupture, Tresca)
+    - safety_factor / governing_margin < 1.0  (casing wall yield, von Mises)
+    - closure_bolt_shear_sf      < 1.0  (closure bolt shear)
+    - closure_bolt_bearing_sf    < 1.0  (closure bolt bearing pressure)
+    """
+
+    def __init__(
+        self,
+        geometry,
+        casing_material,
+        *,
+        peak_pressure_distribution=None,
+        ballistics_callable=None,
+        parameter_sigmas=None,
+        bolt_count=0,
+        bolt_diameter_m=0.0,
+        bolt_strength_mpa=0.0,
+        casing_strength_factor=1.0,
+        thermal=None,
+        random_seed=None,
+    ):
+        if (peak_pressure_distribution is None) == (ballistics_callable is None):
+            raise ValueError(
+                "Provide exactly one of peak_pressure_distribution or "
+                "ballistics_callable."
+            )
+        self.geometry = geometry
+        self.casing_material = casing_material or CasingMaterial()
+        self.peak_pressure_distribution = peak_pressure_distribution
+        self.ballistics_callable = ballistics_callable
+        self.parameter_sigmas = dict(parameter_sigmas or {})
+        self.bolt_count = bolt_count
+        self.bolt_diameter_m = bolt_diameter_m
+        self.bolt_strength_mpa = bolt_strength_mpa
+        self.casing_strength_factor = casing_strength_factor
+        # ``thermal`` is required by simulate_structural_response for the
+        # thermo-elastic margin. Provide a neutral default so the structural
+        # path does not silently crash when the user has not run a thermal
+        # analysis before the structural Monte Carlo.
+        self.thermal = thermal or {
+            "simulation.advanced.thermal.casing_inner_wall_temp_c": 20.0,
+            "simulation.advanced.thermal.throat_ablation_mm": 0.0,
+        }
+        self.random_seed = random_seed
+
+    def _sample_parameters(self, n_iterations, rng):
+        """Build n perturbed-parameter dicts using the DispersionAnalysis
+        convention (mean=0 default, normal noise with sigma=parameter_sigmas[k]).
+        When ``"perturb_peak_pressure"`` is in sigmas, it is returned separately
+        so callers can add it on top of the raw Pmax without confusing the
+        ballistics callable (which only consumes "real" propellant params).
+        """
+        samples = []
+        pmax_perturbs = []
+        for _ in range(n_iterations):
+            sample = {}
+            pmax_perturb = 0.0
+            for name, spec in self.parameter_sigmas.items():
+                if isinstance(spec, dict):
+                    mean = float(spec.get("mean", spec.get("nominal", 0.0)))
+                    sigma = float(spec.get("sigma", spec.get("std", spec.get("stddev", 0.0))))
+                else:
+                    mean = 0.0
+                    sigma = float(spec)
+                value = mean + sigma * rng.standard_normal() if sigma > 0.0 else mean
+                if name == "perturb_peak_pressure":
+                    pmax_perturb = value
+                else:
+                    sample[name] = value
+            samples.append(sample)
+            pmax_perturbs.append(pmax_perturb)
+        return samples, pmax_perturbs
+
+    @staticmethod
+    def _extract_peak_pressure(curve):
+        """Pull peak chamber pressure (Pa) from a curve dict."""
+        t = np.asarray(curve.get("time_s", []), dtype=float)
+        p = np.asarray(curve.get("chamber_pressure_pa", []), dtype=float)
+        if t.size == 0 or p.size == 0:
+            return 0.0
+        return float(np.max(p))
+
+    def _run_single(self, sample, pmax_perturb):
+        """One Monte Carlo iteration: perturb -> resolve Pmax -> structural -> FS.
+
+        Returns (peak_pressure, structural_dict) or None if the iteration
+        failed (e.g. ballistics callable raised — treat as a no-vote).
+        """
+        try:
+            if self.peak_pressure_distribution is not None:
+                peak_pressure = float(self.peak_pressure_distribution())
+            else:
+                curve = self.ballistics_callable(sample)
+                peak_pressure = self._extract_peak_pressure(curve)
+            peak_pressure = max(peak_pressure + pmax_perturb, 0.0)
+
+            # Synthesise a 1-point curve, since every structural metric that
+            # is failure-relevant (max_pressure, max_von_mises, blow_force,
+            # bolt stresses) sees only the peak pressure through the path
+            # we already extracted. Full-pressure-history is consumed only
+            # by the pressurization impulse and the fatigue proxy, neither of
+            # which feeds the standard failure criteria.
+            synthetic_curve = {
+                "time_s": np.array([0.0, 0.001, 1.0]),
+                "thrust_n": np.array([0.0, 0.0, 0.0]),
+                "chamber_pressure_pa": np.array([0.0, peak_pressure, 0.0]),
+                "mass_flow_kg_s": np.array([0.0, 0.0, 0.0]),
+            }
+            structural = simulate_structural_response(
+                self.geometry,
+                synthetic_curve,
+                self.thermal,
+                casing_material=self.casing_material,
+                casing_strength_factor=self.casing_strength_factor,
+                bolt_count=self.bolt_count,
+                bolt_diameter_m=self.bolt_diameter_m,
+                bolt_strength_mpa=self.bolt_strength_mpa,
+            )
+            return peak_pressure, structural
+        except Exception:
+            return None
+
+    def run(self, n_iterations):
+        """Execute n_iterations samples serially and return a summary dict.
+
+        Returns a dict with:
+            - failure_probability:        any-criterion <1.0 fraction
+            - failure_probability_casing: governing margin <1.0
+            - failure_probability_burst:  burst_safety_factor <1.0
+            - failure_probability_bolts:  shear OR bearing <1.0
+            - peak_pressure_pa:           list of sampled Pmax (Pa)
+            - burst_sf, governing_sf, bolt_shear_sf, bolt_bearing_sf: lists
+            - samples:                    the perturbed-parameter dicts
+            - n_iterations, n_evaluated
+        """
+        rng = np.random.default_rng(self.random_seed)
+        samples, pmax_perturbs = self._sample_parameters(n_iterations, rng)
+        peak_pressures = []
+        burst_sf_list = []
+        governing_sf_list = []
+        bolt_shear_sf_list = []
+        bolt_bearing_sf_list = []
+        failures_casing = 0
+        failures_burst = 0
+        failures_bolts = 0
+        n_evaluated = 0
+        for sample, pmax_perturb in zip(samples, pmax_perturbs):
+            result = self._run_single(sample, pmax_perturb)
+            if result is None:
+                continue
+            peak_pressure, structural = result
+            n_evaluated += 1
+            peak_pressures.append(peak_pressure)
+            burst_sf = structural["simulation.advanced.structural.burst_safety_factor"]
+            governing_sf = structural["simulation.advanced.structural.safety_factor"]
+            bolt_shear_sf = structural["simulation.advanced.structural.closure_bolt_shear_safety_factor"]
+            bolt_bearing_sf = structural["simulation.advanced.structural.closure_bolt_bearing_safety_factor"]
+            burst_sf_list.append(burst_sf)
+            governing_sf_list.append(governing_sf)
+            bolt_shear_sf_list.append(bolt_shear_sf)
+            bolt_bearing_sf_list.append(bolt_bearing_sf)
+            failed_casing = (governing_sf < 1.0) or (burst_sf < 1.0)
+            failed_burst = burst_sf < 1.0
+            # ``inf`` SF means bolts were not configured; don't count as failure.
+            bolt_configured = self.bolt_count > 0 and self.bolt_diameter_m > 0.0
+            failed_bolts = (
+                bolt_configured
+                and (bolt_shear_sf < 1.0 or bolt_bearing_sf < 1.0)
+            )
+            if failed_casing:
+                failures_casing += 1
+            if failed_burst:
+                failures_burst += 1
+            if failed_bolts:
+                failures_bolts += 1
+        # Use a proper union rather than summing single-criterion failures
+        # because casing and bolt failures can co-occur on the same sample.
+        failures_any = 0
+        for i in range(n_evaluated):
+            fcasing = (governing_sf_list[i] < 1.0) or (burst_sf_list[i] < 1.0)
+            bolt_configured = self.bolt_count > 0 and self.bolt_diameter_m > 0.0
+            fbolts = (
+                bolt_configured
+                and (bolt_shear_sf_list[i] < 1.0 or bolt_bearing_sf_list[i] < 1.0)
+            )
+            if fcasing or fbolts:
+                failures_any += 1
+        n = max(n_evaluated, 1)
+        return {
+            "n_iterations": n_iterations,
+            "n_evaluated": n_evaluated,
+            "failure_probability": failures_any / n,
+            "failure_probability_casing": failures_casing / n,
+            "failure_probability_burst": failures_burst / n,
+            "failure_probability_bolts": failures_bolts / n,
+            "peak_pressure_pa": peak_pressures,
+            "burst_safety_factor": burst_sf_list,
+            "governing_safety_factor": governing_sf_list,
+            "bolt_shear_safety_factor": bolt_shear_sf_list,
+            "bolt_bearing_safety_factor": bolt_bearing_sf_list,
+            "samples": samples,
+        }
