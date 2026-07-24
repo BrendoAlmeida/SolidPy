@@ -461,6 +461,10 @@ def simulate_structural_response(
     thermal,
     casing_material=None,
     casing_strength_factor=1.0,
+    *,
+    bolt_count=0,
+    bolt_diameter_m=0.0,
+    bolt_strength_mpa=0.0,
 ):
     """Thin-wall casing stress, deformation, buckling and fatigue proxies."""
     casing_material = casing_material or CasingMaterial()
@@ -581,6 +585,39 @@ def simulate_structural_response(
         * max(outer_radius**2 - inner_radius**2, 0.0)
         / max(math.sqrt(3.0) * outer_radius**2, 1.0)
     )
+
+    # Closure-bolt shear and bearing against the casing wall.
+    # blowF is the axial pull on the forward closure under MEOP; the cross
+    # section used here is the chamber bore (upper bound — no deduction for
+    # the nozzle opening), matching the HTML structuralAnalysis().
+    #   shear: tau_bolt = blowF / (n_bolts · π/4 · d²); τ_ult ≈ 0.6·Su_bolt
+    #   bearing: the load path through the wall itself.
+    #     The wall in bearing is *confined* (the bolt squeezes it against
+    #     the head), so MMPDS/MIL-HDBK-5 allow Fbru ≈ 1.5–1.8·Su once
+    #     edge distance e/D ≥ 2; 1.5·Su is the conservative lower bound.
+    # Ref: simulador_balistica_interna_v7.html (~L1718); MIL-HDBK-5.
+    blow_force_n = max_pressure * math.pi * 0.25 * max(geometry.motor_inner_diameter_m, 0.0) ** 2
+    bolt_shear_sf = float("inf")
+    bolt_bearing_sf = float("inf")
+    bolt_shear_stress_mpa = 0.0
+    bolt_bearing_stress_mpa = 0.0
+    if bolt_count > 0 and bolt_diameter_m > 0.0:
+        shear_area_m2 = bolt_count * math.pi * 0.25 * bolt_diameter_m**2
+        bolt_shear_stress_pa = blow_force_n / max(shear_area_m2, 1e-9)
+        bolt_shear_stress_mpa = bolt_shear_stress_pa / 1e6
+        bolt_shear_sf = (
+            0.6 * bolt_strength_mpa * 1e6 / max(bolt_shear_stress_pa, 1.0)
+        )
+        bearing_area_m2 = bolt_count * bolt_diameter_m * wall
+        bolt_bearing_stress_pa = blow_force_n / max(bearing_area_m2, 1e-9)
+        bolt_bearing_stress_mpa = bolt_bearing_stress_pa / 1e6
+        bolt_bearing_sf = (
+            1.5
+            * casing_material.resolved_ultimate_strength_mpa
+            * 1e6
+            * max(casing_strength_factor, 0.01)
+            / max(bolt_bearing_stress_pa, 1.0)
+        )
     onset_temp_c = 0.6 * casing_material.max_service_temp_c
     inner_wall_temp_c = thermal["simulation.advanced.thermal.casing_inner_wall_temp_c"]
     thermoelastic_margin = 1.0 - max(
@@ -611,6 +648,11 @@ def simulate_structural_response(
         "simulation.advanced.structural.burst_pressure_mpa": burst_pressure_pa / 1e6,
         "simulation.advanced.structural.burst_safety_factor": burst_safety_factor,
         "simulation.advanced.structural.yield_pressure_mpa": yield_pressure_pa / 1e6,
+        "simulation.advanced.structural.closure_bolt_blow_force_n": blow_force_n,
+        "simulation.advanced.structural.closure_bolt_shear_safety_factor": bolt_shear_sf,
+        "simulation.advanced.structural.closure_bolt_bearing_safety_factor": bolt_bearing_sf,
+        "simulation.advanced.structural.closure_bolt_shear_stress_mpa": bolt_shear_stress_mpa,
+        "simulation.advanced.structural.closure_bolt_bearing_stress_mpa": bolt_bearing_stress_mpa,
     }
 
 
