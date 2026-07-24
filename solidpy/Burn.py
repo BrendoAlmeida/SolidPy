@@ -1043,6 +1043,15 @@ class BurnExport(Export):
             self.BurnSimulation.total_burn_solution[1:],
         )
 
+        # Parabolic refinement of the raw argmax pressure peak: important
+        # for structural sizing when the adaptive mesh brackets the true
+        # pressure maximum between samples. Falls back silently to the
+        # raw argmax when the bracket would not yield a concave-down vertex.
+        self.max_chamber_pressure_refined = Export.refine_peak_parabolic(
+            self.BurnSimulation.total_burn_solution[0],
+            self.BurnSimulation.total_burn_solution[1],
+        )
+
         self.total_impulse = self.BurnSimulation.evaluate_total_impulse(
             self.thrust, self.time
         )
@@ -1070,6 +1079,12 @@ class BurnExport(Export):
         print(
             "Max Chamber Pressure: {:.2f} bar at {:.2f} s".format(
                 self.max_chamber_pressure[0] / 1e5, self.max_chamber_pressure[1]
+            )
+        )
+        print(
+            "Max Chamber Pressure (refined): {:.2f} bar at {:.2f} s".format(
+                self.max_chamber_pressure_refined[0] / 1e5,
+                self.max_chamber_pressure_refined[1],
             )
         )
         print(
