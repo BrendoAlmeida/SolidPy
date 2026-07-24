@@ -1,8 +1,5 @@
 """surrogate_physics — Exportação de grandezas físicas estáticas para surrogate ML.
 
-Este módulo existe SOMENTE na branch ``ai-surrogate``.  O branch ``main`` mantém
-apenas a lógica de simulação ODE pura.
-
 Objetivo:
     Fornecer ao projeto MotorTransformer todas as grandezas que precisam ser
     reimplementadas em PyTorch para construir as PINN-lite losses do surrogate.

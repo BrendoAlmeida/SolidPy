@@ -81,7 +81,8 @@ from .TwoPhaseFlow import (
     estimate_two_phase_isp_loss,
 )
 
-# AI-surrogate branch only — not present in main.
+# Physics export surface for external ML pipelines (e.g. MotorTransformer's
+# PINN-lite surrogate). No extra dependencies beyond core (numpy only).
 from .surrogate_physics import (
     BurnAreaCurve,
     SurrogateStaticFeatures,
