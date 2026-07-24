@@ -76,11 +76,18 @@ class CasingMaterial:
     liner_k_w_mk: float = 0.25
     liner_density_kg_m3: float = 1100.0
     liner_cp_j_kgk: float = 1600.0
+    ultimate_strength_mpa: Optional[float] = None
 
     @property
     def resolved_allowable_stress_mpa(self):
         if self.allowable_stress_mpa is not None:
             return float(self.allowable_stress_mpa)
+        return float(self.yield_strength_mpa)
+
+    @property
+    def resolved_ultimate_strength_mpa(self):
+        if self.ultimate_strength_mpa is not None:
+            return float(self.ultimate_strength_mpa)
         return float(self.yield_strength_mpa)
 
 
@@ -553,6 +560,27 @@ def simulate_structural_response(
     governing_margin = (
         composite_margin if casing_material.material_family == "composite" else metal_sf
     )
+
+    # Burst pressure per Tresca criterion for a closed-end thick cylinder
+    # under internal pressure. Uses ultimate strength (Su) as the flow limit
+    # instead of the yield strength used above; this is the analytical
+    # limit-load solution for a perfectly plastic material, matching what
+    # the HTML simulator reports as pBurst in structuralAnalysis().
+    # Ref: Tresca; Mendelson §8; simulador_balistica_interna_v7.html (~L1700).
+    ultimate_pa = (
+        casing_material.resolved_ultimate_strength_mpa * 1e6 * max(casing_strength_factor, 0.01)
+    )
+    burst_pressure_pa = (
+        (2.0 / math.sqrt(3.0))
+        * ultimate_pa
+        * math.log(max(outer_radius / max(inner_radius, 1e-9), 1.0))
+    )
+    burst_safety_factor = burst_pressure_pa / max(max_pressure, 1.0)
+    yield_pressure_pa = (
+        ultimate_pa
+        * max(outer_radius**2 - inner_radius**2, 0.0)
+        / max(math.sqrt(3.0) * outer_radius**2, 1.0)
+    )
     onset_temp_c = 0.6 * casing_material.max_service_temp_c
     inner_wall_temp_c = thermal["simulation.advanced.thermal.casing_inner_wall_temp_c"]
     thermoelastic_margin = 1.0 - max(
@@ -580,6 +608,9 @@ def simulate_structural_response(
         / max(yield_pa, 1.0),
         "simulation.advanced.structural.pressurization_impulse_mpa_s": pressure_integral / 1e6,
         "simulation.advanced.structural.thermoelastic_margin": thermoelastic_margin,
+        "simulation.advanced.structural.burst_pressure_mpa": burst_pressure_pa / 1e6,
+        "simulation.advanced.structural.burst_safety_factor": burst_safety_factor,
+        "simulation.advanced.structural.yield_pressure_mpa": yield_pressure_pa / 1e6,
     }
 
 
