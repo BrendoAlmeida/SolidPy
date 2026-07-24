@@ -501,7 +501,25 @@ def simulate_structural_response(
         else:
             hoop = pressure * inner_radius / wall
             axial = pressure * inner_radius / (2.0 * wall)
-        von_mises = math.sqrt(max(hoop**2 + axial**2 - hoop * axial, 0.0))
+        # Radial stress at the inner wall equals the internal pressure with
+        # opposite sign (Lamé boundary condition: sigma_r(r_i) = -P). The
+        # previous biaxial formula (sqrt(sh^2 + sa^2 - sh*sa)) discarded it
+        # and reported an optimistic von Mises, especially for thick walls
+        # (asymptotic ~42% under-estimate as wall -> infinity). Use the exact
+        # triaxial form so FS no longer approves vessels that should fail.
+        # Ref: von Mises (1913); Shigley §3-15.
+        radial = -pressure
+        von_mises = math.sqrt(
+            max(
+                0.5
+                * (
+                    (hoop - radial) ** 2
+                    + (radial - axial) ** 2
+                    + (axial - hoop) ** 2
+                ),
+                0.0,
+            )
+        )
         strain = (hoop - poisson * axial) / max(modulus_pa, 1.0)
         bulge = pressure * inner_radius**2 * (1.0 - 0.5 * poisson) / max(
             modulus_pa * wall, 1.0
