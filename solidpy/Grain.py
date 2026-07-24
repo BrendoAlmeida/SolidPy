@@ -18,6 +18,7 @@ class Grain:
         n_points=6,
         epsilon=0.2,
         slot_fraction=0.8,
+        ends_burn=False,
     ):
         """Propellant grain with tubular or star (slotted-cylinder) geometry.
 
@@ -26,6 +27,15 @@ class Grain:
             epsilon      — half-angle of each slot in radians.
             slot_fraction— fraction of the web occupied by slots;
                            1.0 means slots extend to the outer case.
+
+        ends_burn:
+            When True the two end (transversal) faces are treated as inhibited
+            (e.g. by a liner/spacer) and do not regress: their area contribution
+            is set to zero and the grain height stays at ``initial_height``
+            throughout the burn. Only the cylindrical bore (and slot walls, for
+            star grains) keeps regressing. Default False preserves the existing
+            BATES-style behaviour where both end faces burn and the grain
+            shortens axially.
         """
         self.outer_radius = outer_radius
         self.initial_inner_radius = initial_inner_radius
@@ -39,6 +49,7 @@ class Grain:
                 f"than the core radius ({initial_inner_radius*1e3:.2f} mm); "
                 "web thickness would be zero or negative."
             )
+        self.ends_burn = bool(ends_burn)
         self.inner_radius = initial_inner_radius
         self.mass = mass
         self.n_points = max(int(n_points), 1)
@@ -82,12 +93,21 @@ class Grain:
         inner_radius = min(
             self.initial_inner_radius + regressed_length, self.outer_radius
         )
-        height = max(self.initial_height - 2 * regressed_length, 0.0)
+        if self.ends_burn:
+            # Inhibited end faces do not regress axially: the grain keeps its
+            # full length and only the cylindrical bore widens.
+            height = self.initial_height
+            burned_through = regressed_length >= web_thickness
+        else:
+            height = max(self.initial_height - 2 * regressed_length, 0.0)
         if burned_through:
             return height, inner_radius, 0.0
 
-        transversal_area = 2 * np.pi * (self.outer_radius**2 - inner_radius**2)
         longitudinal_area = 2 * np.pi * inner_radius * height
+        if self.ends_burn:
+            return height, inner_radius, longitudinal_area
+
+        transversal_area = 2 * np.pi * (self.outer_radius**2 - inner_radius**2)
         burn_area = transversal_area + longitudinal_area
         return height, inner_radius, burn_area
 
@@ -135,7 +155,10 @@ class Grain:
         if burned_through:
             return max(L0 - 2 * w, 0.0), min(Ri + w, Ro), 0.0
 
-        h = L0 - 2 * w
+        # Inhibited end faces keep the grain at full length; only the bore /
+        # slot walls regress. Let h be set first so the burned_through branch
+        # above still uses the classical L0-2*w web-burnout criterion.
+        h = L0 if self.ends_burn else L0 - 2 * w
         r_bore = Ri + w
 
         if w < w_floor:
@@ -150,7 +173,8 @@ class Grain:
             P_lat = (2 * np.pi - 2 * N * eps) * r_bore + 2 * N * slot_wall
             A_end = (np.pi - N * eps) * (Ro ** 2 - r_bore ** 2)
 
-        burn_area = max(P_lat * h + 2.0 * A_end, 0.0)
+        end_faces_area = 0.0 if self.ends_burn else 2.0 * A_end
+        burn_area = max(P_lat * h + end_faces_area, 0.0)
         return h, r_bore, burn_area
 
     def evaluate_star_burn_area(self, regressed_length, update_state=False):
