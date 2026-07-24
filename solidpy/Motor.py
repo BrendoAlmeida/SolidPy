@@ -22,6 +22,27 @@ class Motor:
         if not isinstance(grains, (list, tuple)):
             grains = [grains]
 
+        # Explicit geometry validation. The previous code either crashed deep
+        # inside solve_ivp with a misleading `math domain error`, fell back to
+        # an unflagged degenerate motor (all-zero outputs, Isp=NaN), or
+        # returned a subsonic exit Mach via fsolve without signaling the
+        # error. Surface the cause at construction time with a clear message.
+        if nozzle_exit_radius is not None and nozzle_throat_radius is not None:
+            if nozzle_exit_radius <= nozzle_throat_radius:
+                raise ValueError(
+                    f"nozzle exit radius ({nozzle_exit_radius*1e3:.2f} mm) must be "
+                    f"larger than throat radius ({nozzle_throat_radius*1e3:.2f} mm); "
+                    "a convergent-divergent nozzle cannot have exit ≤ throat."
+                )
+        for grain in grains if isinstance(grains, (list, tuple)) else [grains]:
+            if grain.outer_radius is not None and chamber_inner_radius is not None:
+                if grain.outer_radius > chamber_inner_radius:
+                    raise ValueError(
+                        f"grain outer radius ({grain.outer_radius*1e3:.2f} mm) is "
+                        f"larger than chamber inner radius ({chamber_inner_radius*1e3:.2f} mm); "
+                        "the grain would not fit inside the chamber."
+                    )
+
         self.grain_separation = grain_separation
 
         # Legacy mode: single grain replicated grain_number times
@@ -40,6 +61,12 @@ class Motor:
         self.expansion_ratio = self.nozzle_exit_area / self.nozzle_throat_area
         self.evaluate_chamber_volume()
         self.evaluate_propellant_volume()
+        if self.chamber_volume < self.propellant_volume:
+            raise ValueError(
+                f"chamber volume ({self.chamber_volume*1e6:.1f} cm³) is smaller than "
+                f"propellant volume ({self.propellant_volume*1e6:.1f} cm³); "
+                "the grain would not fit inside the chamber."
+            )
         self.evaluate_free_volume()
         self.evaluate_total_burn_area()
         self.evaluate_Kn()

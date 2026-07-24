@@ -29,6 +29,16 @@ class Grain:
         """
         self.outer_radius = outer_radius
         self.initial_inner_radius = initial_inner_radius
+        # Geometry sanity: a tubular/star grain needs an outer radius strictly
+        # larger than the core, otherwise the web is zero-or-negative and the
+        # motor degenerates silently (burn_area=0, Isp=NaN) without ever
+        # raising. Surface the cause at construction time with a clear message.
+        if outer_radius <= initial_inner_radius:
+            raise ValueError(
+                f"grain outer radius ({outer_radius*1e3:.2f} mm) must be larger "
+                f"than the core radius ({initial_inner_radius*1e3:.2f} mm); "
+                "web thickness would be zero or negative."
+            )
         self.inner_radius = initial_inner_radius
         self.mass = mass
         self.n_points = max(int(n_points), 1)
