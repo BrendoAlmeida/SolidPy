@@ -117,9 +117,10 @@ class Propellant:
         Returns:
             float: effective burn rate [m/s]
         """
+        # Pressure guard: trial sub-steps of solve_ivp can probe negative
+        # values. Burn rate is physically defined at non-negative pressure.
+        chamber_pressure = max(float(chamber_pressure), 0.0)
         if "interpolation_list" in self.__dict__:
-            if chamber_pressure < 0:
-                return 0
             r0 = float(self._burn_rate_interpolator(chamber_pressure * 1e-6)) / 1000
         elif "burn_rate_a" in self.__dict__ and "burn_rate_n" in self.__dict__:
             r0 = self.burn_rate_a * math.pow(chamber_pressure * 1e-6, self.burn_rate_n) / 1000

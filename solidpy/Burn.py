@@ -593,6 +593,12 @@ class BurnSimulation(Burn):
         """
         n_grains = len(self.motor.grains)
         chamber_pressure = state_variables[0]
+        # Solve_ivp (RK45/DOP853) may probe negative chamber pressures
+        # during rejected trial steps; without a floor, evaluate_burn_rate
+        # raises ValueError: math domain error (math.pow(negative**fraction)).
+        # This is the same guard the HTML applies at html_physics.js:173
+        # (Pnew = P5 < Pamb ? Pamb : P5). 6-8 of 180 test designs crashed here.
+        chamber_pressure = max(float(chamber_pressure), self.environment_pressure)
         free_volume = state_variables[1]
         per_grain_regression = list(state_variables[2:2 + n_grains])
 
