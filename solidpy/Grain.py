@@ -151,9 +151,10 @@ class Grain:
         Rs = Ri + self.slot_fraction * web  # slot floor initial radius
         w_floor = max(Ro - Rs, 0.0)         # regression when floor reaches case
 
-        burned_through = (w >= web) or (w >= L0 / 2)
+        burned_through = w >= web or (not self.ends_burn and w >= L0 / 2)
         if burned_through:
-            return max(L0 - 2 * w, 0.0), min(Ri + w, Ro), 0.0
+            height = L0 if self.ends_burn else max(L0 - 2 * w, 0.0)
+            return height, min(Ri + w, Ro), 0.0
 
         # Inhibited end faces keep the grain at full length; only the bore /
         # slot walls regress. Let h be set first so the burned_through branch

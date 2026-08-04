@@ -18,6 +18,8 @@ class Motor:
         nozzle_angle=None,
         chamber_length=None,
         grain_separation=0.0,
+        dry_mass_kg=None,
+        dry_center_of_mass_position_m=None,
     ):
         if not isinstance(grains, (list, tuple)):
             grains = [grains]
@@ -44,6 +46,8 @@ class Motor:
                     )
 
         self.grain_separation = grain_separation
+        self.dry_mass_kg = dry_mass_kg
+        self.dry_center_of_mass_position_m = dry_center_of_mass_position_m
 
         # Legacy mode: single grain replicated grain_number times
         if grain_number is not None and len(grains) == 1:

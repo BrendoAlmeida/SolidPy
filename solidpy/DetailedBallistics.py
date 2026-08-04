@@ -20,12 +20,18 @@ except ImportError:
 
 
 STANDARD_GRAVITY = 9.80665
+DETAILED_BALLISTICS_SCHEMA_VERSION = 4.0
 
 
 def _deduplicate_time(time, *series):
     time = np.asarray(time, dtype=float)
     keep = np.concatenate(([True], np.diff(time) > 1e-12))
     return time[keep], [np.asarray(values, dtype=float)[keep] for values in series]
+
+
+def _linear_endpoint_clamped(x, xp, fp):
+    """Linearly interpolate ``fp`` while clamping outside ``xp`` endpoints."""
+    return np.interp(np.asarray(x, dtype=float), np.asarray(xp, dtype=float), np.asarray(fp, dtype=float))
 
 
 def evaluate_nozzle_ablation_rate(
@@ -44,15 +50,109 @@ def evaluate_nozzle_ablation_rate(
     )
 
 
-def _evaluate_remaining_propellant_mass(grain, motor, propellant, regressed_length):
+def _remaining_geometry(grain, regression):
+    """Return remaining grain height and cross-sectional propellant area."""
+    w = max(float(regression), 0.0)
+    if grain.geometry == "star":
+        height, inner_radius, _ = grain.calculate_star_geometry(w)
+        height = grain.initial_height if grain.ends_burn else height
+        bore_radius = min(grain.initial_inner_radius + w, grain.outer_radius)
+        web = grain.outer_radius - grain.initial_inner_radius
+        slot_floor_radius = grain.initial_inner_radius + grain.slot_fraction * web
+        if w < grain.outer_radius - slot_floor_radius:
+            slot_radius = min(slot_floor_radius + w, grain.outer_radius)
+            area = math.pi * (grain.outer_radius**2 - bore_radius**2)
+            area -= grain.n_points * grain.epsilon * (
+                slot_radius**2 - bore_radius**2
+            )
+        else:
+            area = (math.pi - grain.n_points * grain.epsilon) * (
+                grain.outer_radius**2 - bore_radius**2
+            )
+        return max(height, 0.0), max(area, 0.0)
+    height, inner_radius, _ = grain.calculate_tubular_geometry(w)
+    return height, math.pi * max(grain.outer_radius**2 - inner_radius**2, 0.0)
+
+
+def _validate_dynamic_series(time_s, propellant_mass_kg, motor_mass_kg, *centers):
+    """Reject invalid mass/time values and non-finite center positions."""
+    for values in (time_s, propellant_mass_kg, motor_mass_kg):
+        if not np.all(np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError("detailed ballistics produced invalid mass or time series")
+    if any(not np.all(np.isfinite(values)) for values in centers):
+        raise ValueError("detailed ballistics produced invalid center-of-mass series")
+
+
+def _evaluate_dynamic_mass_and_cg(motor, propellant, regressions):
     masses = []
-    for regression in regressed_length:
-        total_volume = 0.0
-        for g in motor.grains:
-            height, inner_radius, _ = g.calculate_tubular_geometry(regression)
-            total_volume += math.pi * max(g.outer_radius**2 - inner_radius**2, 0.0) * height
-        masses.append(max(total_volume * propellant.density, 0.0))
-    return np.asarray(masses, dtype=float)
+    cgs = []
+    for regression in regressions:
+        propellant_mass = 0.0
+        moment = 0.0
+        stack_start = 0.0
+        for grain in motor.grains:
+            height, area = _remaining_geometry(grain, regression)
+            mass = max(area * height * propellant.density, 0.0)
+            propellant_mass += mass
+            centroid = stack_start + 0.5 * height
+            if not grain.ends_burn and height > 0.0:
+                centroid += max(float(regression), 0.0)
+            moment += mass * centroid
+            stack_start += grain.initial_height + motor.grain_separation
+        masses.append(propellant_mass)
+        cgs.append(moment / propellant_mass if propellant_mass > 0.0 else 0.0)
+    propellant_mass_kg = np.asarray(masses, dtype=float)
+    propellant_cg_m = np.asarray(cgs, dtype=float)
+    dry_mass_kg = float(motor.dry_mass_kg)
+    dry_cg_m = float(motor.dry_center_of_mass_position_m)
+    motor_mass_kg = propellant_mass_kg + dry_mass_kg
+    motor_moment = propellant_mass_kg * propellant_cg_m + dry_mass_kg * dry_cg_m
+    motor_cg_m = np.divide(
+        motor_moment,
+        motor_mass_kg,
+        out=np.full_like(motor_mass_kg, dry_cg_m),
+        where=motor_mass_kg > 0.0,
+    )
+    propellant_cg_m = np.where(propellant_mass_kg > 0.0, propellant_cg_m, dry_cg_m)
+    return propellant_mass_kg, propellant_cg_m, motor_mass_kg, motor_cg_m
+
+
+def _validate_dry_hardware(motor):
+    if motor.dry_mass_kg is None or motor.dry_center_of_mass_position_m is None:
+        raise ValueError("detailed ballistics requires explicit dry hardware mass and center of mass")
+    if not np.isfinite(float(motor.dry_mass_kg)) or not np.isfinite(float(motor.dry_center_of_mass_position_m)):
+        raise ValueError("dry hardware mass and center of mass must be finite")
+    if float(motor.dry_mass_kg) < 0.0:
+        raise ValueError("dry hardware mass must be non-negative")
+    if float(motor.dry_center_of_mass_position_m) < 0.0:
+        raise ValueError("dry hardware center of mass must be non-negative")
+
+
+def _validate_result_series(result, time_s):
+    """Authoritatively validate every ndarray-valued series in the complete mapping.
+
+    Scalars and nested metadata (``gamma``, ``summary``, ``schema_version``,
+    ``interpolation``) are excluded by type; only one-dimensional ndarray series
+    aligned to ``time_s`` and finite are accepted. Non-negativity is applied by
+    named physical series rather than by dictionary ordering.
+    """
+    for key, values in result.items():
+        if not isinstance(values, np.ndarray):
+            continue
+        if values.ndim != 1:
+            raise ValueError(f"detailed ballistics series {key!r} is not one-dimensional")
+        if len(values) != len(time_s):
+            raise ValueError("detailed ballistics series are not aligned to time_s")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("detailed ballistics produced non-finite series values")
+    nonnegative_keys = {
+        "time_s", "free_volume_m3", "regressed_length_m", "burn_area_m2",
+        "regression_rate_m_s", "mass_flow_kg_s", "mass_generated_kg_s",
+        "mass_nozzle_kg_s", "propellant_mass_kg", "motor_mass_kg", "throat_area_m2",
+        "throat_diameter_m", "throat_ablation_m", "cf", "ignition_active_fraction",
+    }
+    if any(np.any(result[key] < 0.0) for key in nonnegative_keys):
+        raise ValueError("detailed ballistics produced negative physical series values")
 
 
 def build_detailed_ballistics(
@@ -63,10 +163,13 @@ def build_detailed_ballistics(
     ablation_pressure_exponent=0.42,
     ablation_mass_flow_exponent=0.32,
 ):
-    """Build high-value internal time series from a ``BurnSimulation`` instance.
+    """Build detailed series on the nozzle-to-combustion-chamber axis.
 
-    Returns a dictionary with arrays for plotting/analysis and a nested
-    ``summary`` dictionary with aggregate performance and consistency metrics.
+    The axial origin is the nozzle-side stack reference, positive toward the
+    combustion chamber. Grain stack positions use each grain's height and the
+    configured ``grain_separation`` gap. All interpolated series use linear
+    interpolation with endpoint clamping outside the raw time domain; no
+    extrapolation is performed.
     """
     raw_time = np.asarray(simulation.total_burn_solution[0], dtype=float)
     raw_pressure = np.asarray(simulation.total_burn_solution[1], dtype=float)
@@ -100,12 +203,12 @@ def build_detailed_ballistics(
         if max_time_points is not None:
             count = min(count, max(int(max_time_points), 2))
         time_s = np.linspace(float(raw_time[0]), float(raw_time[-1]), count)
-        chamber_pressure_pa = np.interp(time_s, raw_time, raw_pressure)
-        free_volume_m3 = np.interp(time_s, raw_time, raw_free_volume)
-        regressed_length_m = np.interp(time_s, raw_time, raw_regression)
-        thrust_n = np.interp(time_s, raw_time, raw_thrust)
-        exit_pressure_pa = np.interp(time_s, raw_time, raw_exit_pressure)
-        exit_velocity_m_s = np.interp(time_s, raw_time, raw_exit_velocity)
+        chamber_pressure_pa = _linear_endpoint_clamped(time_s, raw_time, raw_pressure)
+        free_volume_m3 = _linear_endpoint_clamped(time_s, raw_time, raw_free_volume)
+        regressed_length_m = _linear_endpoint_clamped(time_s, raw_time, raw_regression)
+        thrust_n = _linear_endpoint_clamped(time_s, raw_time, raw_thrust)
+        exit_pressure_pa = _linear_endpoint_clamped(time_s, raw_time, raw_exit_pressure)
+        exit_velocity_m_s = _linear_endpoint_clamped(time_s, raw_time, raw_exit_velocity)
     else:
         time_s = raw_time
         chamber_pressure_pa = raw_pressure
@@ -124,15 +227,26 @@ def build_detailed_ballistics(
             exit_pressure_pa = exit_pressure_pa[index]
             exit_velocity_m_s = exit_velocity_m_s[index]
 
+    if len(time_s) == 0 or not np.all(np.isfinite(time_s)) or np.any(np.diff(time_s) <= 0.0):
+        raise ValueError("detailed ballistics requires a finite strictly increasing time domain")
+
     motor = simulation.motor
     propellant = simulation.propellant
+    _validate_dry_hardware(motor)
     burn_area_m2 = np.asarray(
         [simulation.compute_total_burn_area(regression) for regression in regressed_length_m],
         dtype=float,
     )
 
-    propellant_mass_kg = _evaluate_remaining_propellant_mass(
-        motor.grain, motor, propellant, regressed_length_m
+    propellant_mass_kg, propellant_cg_m, motor_mass_kg, motor_cg_m = _evaluate_dynamic_mass_and_cg(
+        motor, propellant, regressed_length_m
+    )
+    _validate_dynamic_series(
+        time_s,
+        propellant_mass_kg,
+        motor_mass_kg,
+        propellant_cg_m,
+        motor_cg_m,
     )
     if len(time_s) > 1:
         regression_rate_m_s = np.maximum(
@@ -184,6 +298,29 @@ def build_detailed_ballistics(
         dtype=float,
     )
 
+    result = {
+        "time_s": time_s,
+        "thrust_n": thrust_n,
+        "chamber_pressure_pa": chamber_pressure_pa,
+        "free_volume_m3": free_volume_m3,
+        "regressed_length_m": regressed_length_m,
+        "burn_area_m2": burn_area_m2,
+        "regression_rate_m_s": regression_rate_m_s,
+        "mass_flow_kg_s": mass_generated_kg_s,
+        "mass_generated_kg_s": mass_generated_kg_s,
+        "mass_nozzle_kg_s": mass_nozzle_kg_s,
+        "propellant_mass_kg": propellant_mass_kg,
+        "propellant_center_of_mass_position_m": propellant_cg_m,
+        "motor_mass_kg": motor_mass_kg,
+        "motor_center_of_mass_position_m": motor_cg_m,
+        "exit_pressure_pa": exit_pressure_pa,
+        "exit_velocity_m_s": exit_velocity_m_s,
+        "throat_area_m2": throat_area_m2,
+        "throat_diameter_m": throat_diameter_m,
+        "throat_ablation_m": throat_ablation_m,
+        "cf": cf,
+        "ignition_active_fraction": active_fraction,
+    }
     total_impulse_ns = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
     burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
     peak_thrust_n = float(np.max(thrust_n)) if len(thrust_n) else 0.0
@@ -226,7 +363,7 @@ def build_detailed_ballistics(
     )
 
     summary = {
-        "simulation.schema_version": 3.0,
+        "simulation.schema_version": DETAILED_BALLISTICS_SCHEMA_VERSION,
         "simulation.model_fidelity": "solidpy_detailed_ballistics",
         "simulation.nominal.burn_time_s": burn_time_s,
         "simulation.nominal.peak_thrust_n": peak_thrust_n,
@@ -248,28 +385,19 @@ def build_detailed_ballistics(
         "simulation.nominal.ignition_active_fraction_final": float(active_fraction[-1]),
     }
 
-    return {
-        "time_s": time_s,
-        "thrust_n": thrust_n,
-        "chamber_pressure_pa": chamber_pressure_pa,
-        "free_volume_m3": free_volume_m3,
-        "regressed_length_m": regressed_length_m,
-        "burn_area_m2": burn_area_m2,
-        "regression_rate_m_s": regression_rate_m_s,
-        "mass_flow_kg_s": mass_generated_kg_s,
-        "mass_generated_kg_s": mass_generated_kg_s,
-        "mass_nozzle_kg_s": mass_nozzle_kg_s,
-        "propellant_mass_kg": propellant_mass_kg,
-        "exit_pressure_pa": exit_pressure_pa,
-        "exit_velocity_m_s": exit_velocity_m_s,
-        "throat_area_m2": throat_area_m2,
-        "throat_diameter_m": throat_diameter_m,
-        "throat_ablation_m": throat_ablation_m,
-        "cf": cf,
-        "ignition_active_fraction": active_fraction,
+    result.update({
+        "schema_version": DETAILED_BALLISTICS_SCHEMA_VERSION,
+        "interpolation": {
+            "method": "linear",
+            "outside_domain": "endpoint_clamping",
+            "extrapolation": False,
+            "domain": "time_s",
+        },
         "gamma": float(propellant.specific_heat_ratio),
         "summary": summary,
-    }
+    })
+    _validate_result_series(result, time_s)
+    return result
 
 
 def run_detailed_ballistics(
@@ -287,6 +415,7 @@ def run_detailed_ballistics(
     **simulation_kwargs,
 ):
     """Run a fresh high-resolution burn and return detailed internal series."""
+    _validate_dry_hardware(motor)
     cloned_grain, cloned_motor, cloned_propellant, cloned_environment = copy.deepcopy(
         (grain, motor, propellant, environment)
     )

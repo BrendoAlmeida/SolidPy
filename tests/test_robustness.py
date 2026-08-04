@@ -26,6 +26,8 @@ def make_motor_stack():
         nozzle_exit_radius=44.44 / 2000,
         nozzle_angle=15 * np.pi / 180,
         chamber_length=600 / 1000,
+        dry_mass_kg=3.0,
+        dry_center_of_mass_position_m=0.0,
     )
     propellant = Propellant(
         specific_heat_ratio=1.1361,
