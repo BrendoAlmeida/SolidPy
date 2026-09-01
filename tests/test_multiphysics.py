@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
+from scipy import sparse
 
 from solidpy import (
     CasingMaterial,
@@ -224,3 +225,57 @@ def test_thermal_ablation_thin_liner_is_stable_across_time_grids():
         "simulation.advanced.thermal.heat_load_kj_m2",
     ]:
         assert np.isclose(coarse[key], fine[key], rtol=3e-3, atol=1e-3)
+
+
+def test_thermal_ablation_uses_sparse_analytic_jacobian(monkeypatch):
+    import solidpy.Multiphysics as multiphysics
+
+    grain, motor, propellant, _environment = make_motor_stack()
+    geometry = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        dry_mass_kg=3.0,
+    )
+    time_s = np.linspace(0.0, 0.2, 3)
+    curve = {
+        "time_s": time_s,
+        "thrust_n": np.full_like(time_s, 4500.0),
+        "mass_flow_kg_s": np.full_like(time_s, 0.6),
+        "chamber_pressure_pa": np.full_like(time_s, 8.0e6),
+        "gamma": propellant.specific_heat_ratio,
+    }
+    captured = {}
+    solve_ivp = multiphysics.solve_ivp
+
+    def capture_solver(*args, **kwargs):
+        captured["rhs"] = args[0]
+        captured["jacobian"] = kwargs["jac"]
+        return solve_ivp(*args, **kwargs)
+
+    monkeypatch.setattr(multiphysics, "solve_ivp", capture_solver)
+    thermal = simulate_thermal_ablation(
+        geometry,
+        curve,
+        casing_material=CasingMaterial(liner_thickness_m=1.5e-4),
+        nozzle_material=NozzleMaterial(),
+        flame_temp_k=2800.0,
+        r_specific=propellant.products_constant,
+    )
+
+    state = np.full(
+        int(thermal["simulation.advanced.metadata.thermal_node_count"]),
+        600.0,
+    )
+    direction = np.zeros_like(state)
+    direction[0] = 1.0
+    perturbation = 1e-4
+    finite_difference = (
+        captured["rhs"](0.0, state + perturbation * direction)
+        - captured["rhs"](0.0, state - perturbation * direction)
+    ) / (2.0 * perturbation)
+    jacobian = captured["jacobian"](0.0, state)
+
+    assert sparse.isspmatrix_csc(jacobian)
+    assert np.allclose(jacobian.dot(direction), finite_difference, rtol=1e-5, atol=1e-5)

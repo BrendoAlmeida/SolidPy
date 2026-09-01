@@ -300,6 +300,10 @@ def simulate_thermal_ablation(
         h_outer_w_m2k,
         initial_temperature_k,
     )
+    heat_flux_jacobian_source = sparse.csc_matrix(
+        ([inner_heat_flux_source[0]], ([0], [0])),
+        shape=conduction_jacobian.shape,
+    )
 
     throat_radius_0 = 0.5 * max(float(geometry.throat_diameter_m), 1e-6)
     throat_ablation_m = 0.0
@@ -355,17 +359,34 @@ def simulate_thermal_ablation(
             * (2.0 * throat_radius_eff / max(r_curvature, 1e-9)) ** 0.1
         )
 
-        def heat_flux_from_hot_face(hot_face_temperature_k):
+        def heat_flux_and_derivative_from_hot_face(hot_face_temperature_k):
             tw_t0_ratio = hot_face_temperature_k / max(flame_temp_k, 1.0)
+            sigma_base = 0.5 * tw_t0_ratio / max(stag_factor, 1e-9) + 0.5
             sigma = (
-                (0.5 * tw_t0_ratio / max(stag_factor, 1e-9) + 0.5) ** (-0.68)
+                sigma_base ** (-0.68)
                 * stag_factor ** (-0.12)
             )
-            h_bartz = h_bartz_base * max(sigma, 0.1)
-            return max(
-                0.0,
-                h_bartz * max(recovery_temp_k - hot_face_temperature_k, 0.0),
+            temperature_delta_k = recovery_temp_k - hot_face_temperature_k
+            if temperature_delta_k <= 0.0:
+                return 0.0, 0.0
+            if sigma <= 0.1:
+                return (
+                    h_bartz_base * 0.1 * temperature_delta_k,
+                    -h_bartz_base * 0.1,
+                )
+            sigma_derivative = (
+                -0.34
+                * sigma
+                / max(flame_temp_k * stag_factor * sigma_base, 1e-9)
             )
+            heat_flux_w_m2 = h_bartz_base * sigma * temperature_delta_k
+            heat_flux_derivative = h_bartz_base * (
+                sigma_derivative * temperature_delta_k - sigma
+            )
+            return heat_flux_w_m2, heat_flux_derivative
+
+        def heat_flux_from_hot_face(hot_face_temperature_k):
+            return heat_flux_and_derivative_from_hot_face(hot_face_temperature_k)[0]
 
         if not np.isnan(throat_ablation_series_m[idx]):
             throat_ablation_m = max(float(throat_ablation_series_m[idx]), 0.0)
@@ -385,11 +406,18 @@ def simulate_thermal_ablation(
             )
             return conduction_jacobian.dot(wall_temperatures_k) + conduction_source
 
+        def conduction_rhs_jacobian(_time, wall_temperatures_k):
+            _, heat_flux_derivative = heat_flux_and_derivative_from_hot_face(
+                wall_temperatures_k[0]
+            )
+            return conduction_jacobian + heat_flux_jacobian_source * heat_flux_derivative
+
         conduction_solution = solve_ivp(
             conduction_rhs,
             (0.0, dt_s),
             temperatures_k,
             method="Radau",
+            jac=conduction_rhs_jacobian,
             atol=1e-6,
             rtol=1e-5,
         )
