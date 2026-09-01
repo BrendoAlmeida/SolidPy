@@ -346,26 +346,26 @@ def simulate_thermal_ablation(
         mass_flux = mass_flow_now / max(throat_area_eff, 1e-9)  # = Pc/c*
         r_curvature = max(2.0 * throat_radius_eff, 1e-9)        # Rc = D_t
 
-        # Wall temperature at inner surface (from conduction solver state).
-        T_w = float(temperatures_k[casing_inner_node])
-        # σ: stagnation-temperature wall-correction factor at M=1 (Bartz eq.6).
         stag_factor = (gamma + 1.0) / 2.0  # = 1 + (k-1)/2 at M=1
-        tw_t0_ratio = T_w / max(flame_temp_k, 1.0)
-        sigma = (
-            (0.5 * tw_t0_ratio / max(stag_factor, 1e-9) + 0.5) ** (-0.68)
-            * stag_factor ** (-0.12)
-        )
-        h_bartz = (
+        h_bartz_base = (
             0.026
             / max((2.0 * throat_radius_eff) ** 0.2, 1e-4)
             * (mu_gas ** 0.2 * cp_gas / max(prandtl ** 0.6, 1e-9))
             * max(mass_flux, 1e-9) ** 0.8
             * (2.0 * throat_radius_eff / max(r_curvature, 1e-9)) ** 0.1
-            * max(sigma, 0.1)
         )
-        heat_flux_w_m2 = max(0.0, h_bartz * max(recovery_temp_k - T_w, 0.0))
-        max_heat_flux_w_m2 = max(max_heat_flux_w_m2, heat_flux_w_m2)
-        integrated_heat_j_m2 += heat_flux_w_m2 * dt_s
+
+        def heat_flux_from_hot_face(hot_face_temperature_k):
+            tw_t0_ratio = hot_face_temperature_k / max(flame_temp_k, 1.0)
+            sigma = (
+                (0.5 * tw_t0_ratio / max(stag_factor, 1e-9) + 0.5) ** (-0.68)
+                * stag_factor ** (-0.12)
+            )
+            h_bartz = h_bartz_base * max(sigma, 0.1)
+            return max(
+                0.0,
+                h_bartz * max(recovery_temp_k - hot_face_temperature_k, 0.0),
+            )
 
         if not np.isnan(throat_ablation_series_m[idx]):
             throat_ablation_m = max(float(throat_ablation_series_m[idx]), 0.0)
@@ -378,14 +378,11 @@ def simulate_thermal_ablation(
             )
             throat_ablation_m += ablation_rate * dt_s
 
-        # Wall diffusion is stiff for fine meshes. Radau advances this linear
-        # finite-volume system implicitly, removing the explicit CFL substep
-        # restriction while the sparse Jacobian preserves the tridiagonal form.
-        conduction_source = (
-            conduction_source_base + inner_heat_flux_source * heat_flux_w_m2
-        )
-
         def conduction_rhs(_time, wall_temperatures_k):
+            heat_flux_w_m2 = heat_flux_from_hot_face(wall_temperatures_k[0])
+            conduction_source = (
+                conduction_source_base + inner_heat_flux_source * heat_flux_w_m2
+            )
             return conduction_jacobian.dot(wall_temperatures_k) + conduction_source
 
         conduction_solution = solve_ivp(
@@ -393,7 +390,6 @@ def simulate_thermal_ablation(
             (0.0, dt_s),
             temperatures_k,
             method="Radau",
-            jac=conduction_jacobian,
             atol=1e-6,
             rtol=1e-5,
         )
@@ -402,6 +398,20 @@ def simulate_thermal_ablation(
                 "Thermal conduction solver failed: "
                 f"{conduction_solution.message}"
             )
+        heat_flux_samples_w_m2 = np.asarray(
+            [
+                heat_flux_from_hot_face(hot_face_temperature_k)
+                for hot_face_temperature_k in conduction_solution.y[0]
+            ],
+            dtype=float,
+        )
+        max_heat_flux_w_m2 = max(
+            max_heat_flux_w_m2,
+            float(np.max(heat_flux_samples_w_m2)),
+        )
+        integrated_heat_j_m2 += float(
+            _trapezoid(heat_flux_samples_w_m2, conduction_solution.t)
+        )
         temperatures_k = conduction_solution.y[:, -1]
 
         max_inner_wall_k = max(max_inner_wall_k, float(temperatures_k[casing_inner_node]))

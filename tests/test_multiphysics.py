@@ -146,3 +146,81 @@ def test_thermal_ablation_implicit_solver_keeps_liner_temperatures():
         assert key in thermal
         assert np.isfinite(thermal[key])
     assert thermal["simulation.advanced.metadata.thermal_node_count"] > 4.0
+
+
+def test_thermal_ablation_thin_liner_stays_below_recovery_temperature():
+    grain, motor, propellant, _environment = make_motor_stack()
+    geometry = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        dry_mass_kg=3.0,
+    )
+    time_s = np.linspace(0.0, 1.0, 6)
+    curve = {
+        "time_s": time_s,
+        "thrust_n": np.full_like(time_s, 4500.0),
+        "mass_flow_kg_s": np.full_like(time_s, 0.6),
+        "chamber_pressure_pa": np.full_like(time_s, 8.0e6),
+        "gamma": propellant.specific_heat_ratio,
+    }
+
+    thermal = simulate_thermal_ablation(
+        geometry,
+        curve,
+        casing_material=CasingMaterial(liner_thickness_m=1.5e-4),
+        nozzle_material=NozzleMaterial(),
+        flame_temp_k=2800.0,
+        r_specific=propellant.products_constant,
+    )
+
+    recovery_temp_c = thermal["simulation.advanced.metadata.max_chamber_temperature_k"] - 273.15
+    for key in [
+        "simulation.advanced.thermal.liner_hot_face_temp_c",
+        "simulation.advanced.thermal.liner_casing_interface_temp_c",
+        "simulation.advanced.thermal.casing_inner_wall_temp_c",
+        "simulation.advanced.thermal.casing_outer_wall_temp_c",
+    ]:
+        assert np.isfinite(thermal[key])
+        assert thermal[key] <= recovery_temp_c + 1e-3
+
+
+def test_thermal_ablation_thin_liner_is_stable_across_time_grids():
+    grain, motor, propellant, _environment = make_motor_stack()
+    geometry = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        dry_mass_kg=3.0,
+    )
+
+    def simulate_for_time_grid(time_s):
+        curve = {
+            "time_s": time_s,
+            "thrust_n": np.full_like(time_s, 4500.0),
+            "mass_flow_kg_s": np.full_like(time_s, 0.6),
+            "chamber_pressure_pa": np.full_like(time_s, 8.0e6),
+            "gamma": propellant.specific_heat_ratio,
+        }
+        return simulate_thermal_ablation(
+            geometry,
+            curve,
+            casing_material=CasingMaterial(liner_thickness_m=1.5e-4),
+            nozzle_material=NozzleMaterial(),
+            flame_temp_k=2800.0,
+            r_specific=propellant.products_constant,
+        )
+
+    coarse = simulate_for_time_grid(np.linspace(0.0, 1.0, 6))
+    fine = simulate_for_time_grid(np.linspace(0.0, 1.0, 101))
+
+    for key in [
+        "simulation.advanced.thermal.liner_hot_face_temp_c",
+        "simulation.advanced.thermal.liner_casing_interface_temp_c",
+        "simulation.advanced.thermal.casing_inner_wall_temp_c",
+        "simulation.advanced.thermal.casing_outer_wall_temp_c",
+        "simulation.advanced.thermal.heat_load_kj_m2",
+    ]:
+        assert np.isclose(coarse[key], fine[key], rtol=3e-3, atol=1e-3)
