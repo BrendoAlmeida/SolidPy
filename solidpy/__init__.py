@@ -59,6 +59,7 @@ from .Robustness import (
 )
 from .Multiphysics import (
     CasingMaterial,
+    DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
     MotorGeometry,
     NozzleMaterial,
     evaluate_barrowman_stability,

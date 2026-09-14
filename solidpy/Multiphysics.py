@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from scipy import sparse
@@ -21,6 +21,7 @@ except ImportError:
 G0_M_S2 = 9.80665
 SEA_LEVEL_DENSITY_KG_M3 = 1.225
 SPEED_OF_SOUND_M_S = 343.0  # sea-level reference; use _isa_speed_of_sound() for altitude
+DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG = 45.0
 
 
 def _isa_speed_of_sound(altitude_m):
@@ -59,10 +60,19 @@ class MotorGeometry:
     dry_mass_kg: float
     motor_initial_mass_kg: float
     motor_final_mass_kg: float
+    casing_mass_kg: float = 0.0
+    liner_mass_kg: float = 0.0
+    nozzle_mass_kg: float = 0.0
 
 
 @dataclass(frozen=True)
 class CasingMaterial:
+    """Material properties for the casing and optional liner.
+
+    ``bulkhead_fraction`` scales the casing wall thickness used for each of
+    the two bulkheads in the native dry-mass estimate.
+    """
+
     density_kg_m3: float = 7850.0
     modulus_gpa: float = 205.0
     yield_strength_mpa: float = 620.0
@@ -77,6 +87,7 @@ class CasingMaterial:
     liner_density_kg_m3: float = 1100.0
     liner_cp_j_kgk: float = 1600.0
     ultimate_strength_mpa: Optional[float] = None
+    bulkhead_fraction: float = 1.35
 
     @property
     def resolved_allowable_stress_mpa(self):
@@ -93,6 +104,14 @@ class CasingMaterial:
 
 @dataclass(frozen=True)
 class NozzleMaterial:
+    """Thermal and geometric properties for a nozzle material.
+
+    ``wall_thickness_m`` is retained as a legacy absolute-thickness field for
+    existing consumers. The native geometry model in
+    :func:`geometry_from_components` uses ``wall_thickness_factor`` together
+    with ``min_wall_thickness_m`` instead, as defined by the dry-mass model.
+    """
+
     density_kg_m3: float = 1800.0
     thermal_conductivity_w_mk: float = 80.0
     heat_capacity_j_kgk: float = 710.0
@@ -101,49 +120,272 @@ class NozzleMaterial:
     ablation_pressure_exponent: float = 0.42
     ablation_mass_flux_exponent: float = 0.32
     wall_thickness_m: float = 0.005
+    wall_thickness_factor: float = 1.15
+    min_wall_thickness_m: float = 0.004
 
 
 def geometry_from_components(
-    grain,
-    motor,
-    propellant,
-    casing_wall_thickness_m,
-    dry_mass_kg=None,
-    casing_density_kg_m3=7850.0,
-):
-    """Derive an advanced-model geometry from SolidPy components."""
-    motor_inner_radius = math.sqrt(max(motor.chamber_area, 0.0) / math.pi)
-    throat_radius = math.sqrt(max(motor.nozzle_throat_area, 0.0) / math.pi)
-    exit_radius = math.sqrt(max(motor.nozzle_exit_area, 0.0) / math.pi)
-    casing_wall_thickness_m = max(float(casing_wall_thickness_m), 1e-5)
-    propellant_mass_kg = (
-        sum(g.volume for g in motor.grains) * max(float(propellant.density), 0.0)
+    grain: Any,
+    motor: Any,
+    propellant: Any,
+    casing_wall_thickness_m: float,
+    dry_mass_kg: Optional[float] = None,
+    casing_density_kg_m3: float = 7850.0,
+    casing_material: Optional[CasingMaterial] = None,
+    nozzle_material: Optional[NozzleMaterial] = None,
+) -> MotorGeometry:
+    """Derive an advanced-model geometry from SolidPy components.
+
+    When no material objects are supplied, this function preserves the legacy
+    casing-only dry-mass calculation for valid inputs.  Supplying either material
+    enables the component model: casing shell plus two bulkheads, liner, and
+    the convergent/divergent nozzle shell are calculated independently.  A
+    material omitted in that mode keeps the corresponding legacy fallback.
+
+    The convergent half-angle is fixed at
+    ``DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG``.  ``motor.nozzle_angle`` is
+    used only for the divergent cone.  If the divergent radii are equal, its
+    zero axial length is interpreted as a zero-length thin cylindrical sleeve;
+    no nozzle length is invented, so its lateral area and mass are zero.
+    """
+    def finite_float(value: Any, name: str) -> float:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be a finite real number") from exc
+        if not math.isfinite(converted):
+            raise ValueError(f"{name} must be finite")
+        return converted
+
+    def nonnegative_float(value: Any, name: str) -> float:
+        converted = finite_float(value, name)
+        if converted < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+        return converted
+
+    chamber_area = nonnegative_float(motor.chamber_area, "motor.chamber_area")
+    throat_area = nonnegative_float(
+        motor.nozzle_throat_area,
+        "motor.nozzle_throat_area",
+    )
+    exit_area = nonnegative_float(motor.nozzle_exit_area, "motor.nozzle_exit_area")
+    chamber_length = nonnegative_float(motor.chamber_length, "motor.chamber_length")
+    casing_wall_thickness_m = max(
+        finite_float(casing_wall_thickness_m, "casing_wall_thickness_m"),
+        1e-5,
+    )
+    if casing_material is None:
+        casing_density_kg_m3 = nonnegative_float(
+            casing_density_kg_m3,
+            "casing_density_kg_m3",
+        )
+    propellant_density = nonnegative_float(
+        propellant.density,
+        "propellant.density",
     )
 
-    outer_radius = motor_inner_radius + casing_wall_thickness_m
-    casing_volume = (
-        math.pi * max(outer_radius**2 - motor_inner_radius**2, 0.0) * motor.chamber_length
+    grain_outer_radius = nonnegative_float(
+        grain.outer_radius,
+        "grain.outer_radius",
     )
-    casing_mass = casing_volume * max(float(casing_density_kg_m3), 1.0)
-    dry_mass = casing_mass if dry_mass_kg is None else max(float(dry_mass_kg), 0.0)
+    grain_core_radius = nonnegative_float(
+        grain.initial_inner_radius,
+        "grain.initial_inner_radius",
+    )
+    grain_height = nonnegative_float(grain.initial_height, "grain.initial_height")
+    free_volume = finite_float(motor.free_volume, "motor.free_volume")
+    grain_volumes = [
+        nonnegative_float(grain_item.volume, "grain.volume")
+        for grain_item in motor.grains
+    ]
+    propellant_mass_kg = sum(grain_volumes) * propellant_density
+
+    motor_inner_radius = math.sqrt(chamber_area / math.pi)
+    throat_radius = math.sqrt(throat_area / math.pi)
+    exit_radius = math.sqrt(exit_area / math.pi)
+
+    if casing_material is not None:
+        casing_density = nonnegative_float(
+            casing_material.density_kg_m3,
+            "casing_material.density_kg_m3",
+        )
+        liner_thickness_m = finite_float(
+            casing_material.liner_thickness_m,
+            "casing_material.liner_thickness_m",
+        )
+        bulkhead_fraction = finite_float(
+            casing_material.bulkhead_fraction,
+            "casing_material.bulkhead_fraction",
+        )
+        if bulkhead_fraction <= 0.0:
+            raise ValueError("casing_material.bulkhead_fraction must be > 0")
+        if liner_thickness_m > 0.0:
+            liner_density = nonnegative_float(
+                casing_material.liner_density_kg_m3,
+                "casing_material.liner_density_kg_m3",
+            )
+
+    if nozzle_material is not None:
+        nozzle_density = nonnegative_float(
+            nozzle_material.density_kg_m3,
+            "nozzle_material.density_kg_m3",
+        )
+        wall_thickness_factor = finite_float(
+            nozzle_material.wall_thickness_factor,
+            "nozzle_material.wall_thickness_factor",
+        )
+        if wall_thickness_factor <= 0.0:
+            raise ValueError("nozzle_material.wall_thickness_factor must be > 0")
+        min_wall_thickness_m = nonnegative_float(
+            nozzle_material.min_wall_thickness_m,
+            "nozzle_material.min_wall_thickness_m",
+        )
+        divergent_angle = finite_float(
+            getattr(motor, "nozzle_angle", None),
+            "motor.nozzle_angle",
+        )
+        if not 0.0 < divergent_angle < math.pi / 2.0:
+            raise ValueError(
+                "motor.nozzle_angle must be finite and strictly between 0 and pi/2 "
+                "radians when nozzle mass is calculated"
+            )
+
+    try:
+        outer_radius = motor_inner_radius + casing_wall_thickness_m
+        casing_volume = (
+            math.pi
+            * max(outer_radius**2 - motor_inner_radius**2, 0.0)
+            * chamber_length
+        )
+    except OverflowError as exc:
+        raise ValueError("casing geometry calculation overflowed") from exc
+
+    casing_mass = 0.0
+    liner_mass = 0.0
+    nozzle_mass = 0.0
+
+    if casing_material is None:
+        legacy_casing_mass = casing_volume * max(casing_density_kg_m3, 1.0)
+        casing_mass = legacy_casing_mass
+
+    if casing_material is not None or nozzle_material is not None:
+        if casing_material is not None:
+            try:
+                bulkhead_thickness_m = casing_wall_thickness_m * bulkhead_fraction
+                bulkhead_volume_m3 = (
+                    2.0
+                    * (math.pi / 4.0)
+                    * (2.0 * motor_inner_radius) ** 2
+                    * bulkhead_thickness_m
+                )
+                casing_mass = (casing_volume + bulkhead_volume_m3) * casing_density
+            except OverflowError as exc:
+                raise ValueError("bulkhead geometry calculation overflowed") from exc
+
+            if liner_thickness_m > 0.0:
+                liner_inner_diameter_m = max(
+                    2.0 * motor_inner_radius - 2.0 * liner_thickness_m,
+                    0.0,
+                )
+                liner_volume_m3 = (
+                    (math.pi / 4.0)
+                    * max(
+                        (2.0 * motor_inner_radius) ** 2
+                        - liner_inner_diameter_m**2,
+                        0.0,
+                    )
+                    * chamber_length
+                )
+                liner_mass = liner_volume_m3 * liner_density
+
+        if nozzle_material is not None:
+            nozzle_wall_thickness_m = max(
+                casing_wall_thickness_m * wall_thickness_factor,
+                min_wall_thickness_m,
+            )
+
+            div_delta = max(exit_radius - throat_radius, 0.0)
+            if div_delta == 0.0:
+                # Equal radii produce a zero-length cylindrical limit. The
+                # plan provides no independent nozzle length, so preserve the
+                # finite, zero-area divergent contribution rather than inventing
+                # an axial dimension.
+                div_slant = 0.0
+                div_area = 2.0 * math.pi * throat_radius * div_slant
+            else:
+                tangent = math.tan(divergent_angle)
+                div_len = div_delta / tangent
+                div_slant = math.hypot(div_len, div_delta)
+                div_area = math.pi * (throat_radius + exit_radius) * div_slant
+
+            conv_delta = max(motor_inner_radius - throat_radius, 0.0)
+            conv_angle = math.radians(DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG)
+            conv_len = conv_delta / math.tan(conv_angle)
+            conv_slant = math.hypot(conv_len, conv_delta)
+            conv_area = math.pi * (motor_inner_radius + throat_radius) * conv_slant
+            nozzle_mass = (div_area + conv_area) * nozzle_wall_thickness_m * nozzle_density
+
+        dry_mass = (
+            casing_mass + liner_mass + nozzle_mass
+            if dry_mass_kg is None
+            else max(finite_float(dry_mass_kg, "dry_mass_kg"), 0.0)
+        )
+    else:
+        dry_mass = (
+            legacy_casing_mass
+            if dry_mass_kg is None
+            else max(finite_float(dry_mass_kg, "dry_mass_kg"), 0.0)
+        )
+
+    motor_inner_diameter = finite_float(
+        2.0 * motor_inner_radius,
+        "motor inner diameter",
+    )
+    throat_diameter = finite_float(2.0 * throat_radius, "throat diameter")
+    exit_diameter = finite_float(2.0 * exit_radius, "exit diameter")
+    grain_outer_diameter = finite_float(
+        2.0 * grain_outer_radius,
+        "grain outer diameter",
+    )
+    grain_core_diameter = finite_float(
+        2.0 * grain_core_radius,
+        "grain core diameter",
+    )
+    grain_gap = finite_float(
+        max(motor_inner_radius - grain_outer_radius, 0.0),
+        "grain gap",
+    )
+    casing_mass = finite_float(casing_mass, "casing mass")
+    liner_mass = finite_float(liner_mass, "liner mass")
+    nozzle_mass = finite_float(nozzle_mass, "nozzle mass")
+    dry_mass = finite_float(dry_mass, "dry mass")
+    propellant_mass_kg = finite_float(propellant_mass_kg, "propellant mass")
+    motor_initial_mass = finite_float(
+        dry_mass + propellant_mass_kg,
+        "motor initial mass",
+    )
+    casing_volume = finite_float(casing_volume, "casing volume")
 
     return MotorGeometry(
-        motor_length_m=float(motor.chamber_length),
-        motor_inner_diameter_m=2.0 * motor_inner_radius,
+        motor_length_m=chamber_length,
+        motor_inner_diameter_m=motor_inner_diameter,
         casing_wall_thickness_m=casing_wall_thickness_m,
-        grain_outer_diameter_m=2.0 * grain.outer_radius,
-        grain_core_diameter_m=2.0 * grain.initial_inner_radius,
-        grain_gap_m=max(motor_inner_radius - grain.outer_radius, 0.0),
-        grain_length_each_m=float(grain.initial_height),
+        grain_outer_diameter_m=grain_outer_diameter,
+        grain_core_diameter_m=grain_core_diameter,
+        grain_gap_m=grain_gap,
+        grain_length_each_m=grain_height,
         grain_number=int(motor.grain_number),
-        fill_length_m=float(motor.chamber_length),
-        throat_diameter_m=2.0 * throat_radius,
-        exit_diameter_m=2.0 * exit_radius,
-        free_volume_m3=float(motor.free_volume),
-        propellant_mass_kg=float(propellant_mass_kg),
-        dry_mass_kg=float(dry_mass),
-        motor_initial_mass_kg=float(dry_mass + propellant_mass_kg),
-        motor_final_mass_kg=float(dry_mass),
+        fill_length_m=chamber_length,
+        throat_diameter_m=throat_diameter,
+        exit_diameter_m=exit_diameter,
+        free_volume_m3=free_volume,
+        propellant_mass_kg=propellant_mass_kg,
+        dry_mass_kg=dry_mass,
+        motor_initial_mass_kg=motor_initial_mass,
+        motor_final_mass_kg=dry_mass,
+        casing_mass_kg=casing_mass,
+        liner_mass_kg=liner_mass,
+        nozzle_mass_kg=nozzle_mass,
     )
 
 
