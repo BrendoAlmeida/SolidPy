@@ -25,13 +25,25 @@ try:
     from .Burn import Burn
     from .Grain import Grain
     from .Motor import Motor
-    from .Multiphysics import CasingMaterial, NozzleMaterial
+    from .Multiphysics import (
+        CasingMaterial,
+        NozzleMaterial,
+        _casing_mass_with_bulkheads_kg,
+        _liner_mass_kg,
+        _nozzle_mass_kg,
+    )
     from .Propellant import Propellant
 except ImportError:
     from Burn import Burn
     from Grain import Grain
     from Motor import Motor
-    from Multiphysics import CasingMaterial, NozzleMaterial
+    from Multiphysics import (
+        CasingMaterial,
+        NozzleMaterial,
+        _casing_mass_with_bulkheads_kg,
+        _liner_mass_kg,
+        _nozzle_mass_kg,
+    )
     from Propellant import Propellant
 
 
@@ -122,7 +134,8 @@ class SurrogateStructuralFeatures:
     Atributos
     ---------
     casing_mass_kg:
-        Massa do casing cilíndrico, ``π (r_o²-r_i²) L ρ``.
+        Massa da casca cilíndrica mais duas tampas planas (bulkheads), com a
+        espessura das tampas escalada por ``bulkhead_fraction``.
         Fonte: ``Multiphysics.py::geometry_from_components``.
 
     liner_mass_kg:
@@ -133,11 +146,10 @@ class SurrogateStructuralFeatures:
     nozzle_mass_kg:
         Massa aproximada da parede cônica convergente e divergente. Cada
         contribuição é ``A_lateral * wall_thickness * density``. O
-        convergente usa o semiângulo fixo de 35°; o divergente usa
+        convergente usa o semiângulo fixo de 45°; o divergente usa
         ``motor.nozzle_angle`` como semiângulo, exclusivamente para esta
-        aproximação geométrica. Quando o ângulo divergente não é informado,
-        o default separado de 15° é usado somente para esta estimativa de
-        massa; isso não altera o fator de divergência de ``Burn``.
+        aproximação geométrica. O ângulo divergente é obrigatório para a
+        estimativa de massa e valores ausentes são rejeitados.
         Fonte: raios/ângulo de ``Motor.py`` e ``NozzleMaterial``.
 
     dry_mass_kg:
@@ -184,17 +196,6 @@ class SurrogateStructuralFeatures:
     von_mises_at_reference_pa: float
     burst_pressure_pa: float
     burst_safety_factor_at_reference_pa: float
-
-
-# ``Motor`` stores the chamber, throat and exit radii, but not the axial
-# convergent profile. This fixed semi-angle is the documented approximation
-# used only to estimate the convergent cone's lateral area.
-CONVERGENT_HALF_ANGLE_RAD = math.radians(35.0)
-
-# ``Motor.nozzle_angle`` is optional for bell/unspecified nozzles. This is a
-# separate fallback used only by the mass estimate; it is not a default for
-# Burn.py's divergence factor or for any ODE calculation.
-DIVERGENT_HALF_ANGLE_RAD = math.radians(15.0)
 
 
 @dataclass(frozen=True)
@@ -433,31 +434,6 @@ def _cone_half_angle(name: str, value: float) -> float:
     return value
 
 
-def _cone_lateral_area(radius_1_m: float, radius_2_m: float, half_angle_rad: float) -> float:
-    """Área lateral de um tronco de cone definido pelos raios internos.
-
-    O comprimento axial é inferido do semiângulo do cone. A aproximação é
-    deliberadamente geométrica: a espessura da parede é aplicada depois como
-    ``área lateral × espessura``.
-    """
-    radius_1_m = _finite_nonnegative("raio 1 do cone", radius_1_m)
-    radius_2_m = _finite_nonnegative("raio 2 do cone", radius_2_m)
-    angle = _cone_half_angle("semiângulo do cone", half_angle_rad)
-    delta_radius_m = abs(radius_2_m - radius_1_m)
-    if delta_radius_m == 0.0:
-        return 0.0
-    try:
-        slant_length_m = delta_radius_m / math.sin(angle)
-        area_m2 = math.pi * (radius_1_m + radius_2_m) * slant_length_m
-    except OverflowError as exc:
-        raise ValueError(
-            "área lateral do cone excede o intervalo numérico"
-        ) from exc
-    if not math.isfinite(area_m2):
-        raise ValueError("área lateral do cone deve ser finita")
-    return area_m2
-
-
 def _infer_propellant_mass_kg(motor: Motor) -> float:
     """Infere massa de propelente apenas quando o grão a armazena.
 
@@ -552,9 +528,9 @@ def compute_structural_features(
         "motor.chamber_length", motor.chamber_length
     )
 
-    casing_density_kg_m3 = max(_finite_value(
+    _finite_nonnegative(
         "casing_material.density_kg_m3", casing_material.density_kg_m3
-    ), 1.0)
+    )
     # O caminho térmico canônico trata espessuras não positivas como liner
     # inativo. Valores não finitos continuam inválidos, mas uma espessura
     # negativa não deve exigir densidade nem gerar massa de liner.
@@ -573,11 +549,26 @@ def compute_structural_features(
             "casing_material.allowable_stress_mpa",
             casing_material.allowable_stress_mpa,
         )
+    bulkhead_fraction = _finite_value(
+        "casing_material.bulkhead_fraction", casing_material.bulkhead_fraction
+    )
+    if bulkhead_fraction <= 0.0:
+        raise ValueError("casing_material.bulkhead_fraction deve ser maior que zero")
+    if liner_thickness_m > 0.0:
+        _finite_positive(
+            "casing_material.liner_density_kg_m3",
+            casing_material.liner_density_kg_m3,
+        )
     nozzle_density_kg_m3 = _finite_positive(
         "nozzle_material.density_kg_m3", nozzle_material.density_kg_m3
     )
-    nozzle_wall_m = _finite_positive(
-        "nozzle_material.wall_thickness_m", nozzle_material.wall_thickness_m
+    wall_thickness_factor = _finite_positive(
+        "nozzle_material.wall_thickness_factor",
+        nozzle_material.wall_thickness_factor,
+    )
+    min_wall_thickness_m = _finite_nonnegative(
+        "nozzle_material.min_wall_thickness_m",
+        nozzle_material.min_wall_thickness_m,
     )
 
     wall_m = max(_finite_value("casing_wall_thickness_m", casing_wall_thickness_m), 1e-5)
@@ -591,77 +582,40 @@ def compute_structural_features(
     if liner_thickness_m > 0.0 and liner_thickness_m >= chamber_radius_m:
         raise ValueError("a espessura do liner deve ser menor que o raio da câmara")
 
-    try:
-        outer_radius_m = chamber_radius_m + wall_m
-        casing_volume_m3 = (
-            math.pi
-            * (outer_radius_m**2 - chamber_radius_m**2)
-            * chamber_length_m
-        )
-        casing_mass_kg = casing_volume_m3 * casing_density_kg_m3
-    except OverflowError as exc:
-        raise ValueError(
-            "cálculo da massa do casing excede o intervalo numérico"
-        ) from exc
-    if not math.isfinite(casing_volume_m3) or not math.isfinite(casing_mass_kg):
-        raise ValueError("cálculo da massa do casing não é finito")
-
-    liner_mass_kg = 0.0
-    if liner_thickness_m > 0.0:
-        liner_density_kg_m3 = _finite_positive(
-            "casing_material.liner_density_kg_m3",
-            casing_material.liner_density_kg_m3,
-        )
-        liner_inner_radius_m = chamber_radius_m - liner_thickness_m
-        try:
-            liner_volume_m3 = (
-                math.pi
-                * (chamber_radius_m**2 - liner_inner_radius_m**2)
-                * chamber_length_m
-            )
-            liner_mass_kg = liner_volume_m3 * liner_density_kg_m3
-        except OverflowError as exc:
-            raise ValueError(
-                "cálculo da massa do liner excede o intervalo numérico"
-            ) from exc
-        if not math.isfinite(liner_volume_m3) or not math.isfinite(liner_mass_kg):
-            raise ValueError("cálculo da massa do liner não é finito")
-
-    # ``Motor.nozzle_angle`` is the divergent semi-angle in Burn.py. It must
-    # not be reused for the convergent section, whose 35° approximation is a
-    # separate documented convention.
-    convergent_area_m2 = _cone_lateral_area(
-        chamber_radius_m,
-        throat_radius_m,
-        CONVERGENT_HALF_ANGLE_RAD,
-    )
-    divergent_half_angle_rad = motor.nozzle_angle
-    if divergent_half_angle_rad is None:
-        # A missing angle means a bell/unspecified nozzle in Burn.py. For a
-        # mass estimate only, approximate its divergent surface with the
-        # separate 15° default. This does not change Burn.py's lambda.
-        divergent_half_angle_rad = DIVERGENT_HALF_ANGLE_RAD
-    else:
-        divergent_half_angle_rad = _cone_half_angle(
-            "motor.nozzle_angle", divergent_half_angle_rad
-        )
-    divergent_area_m2 = _cone_lateral_area(
-        throat_radius_m,
-        exit_radius_m,
-        divergent_half_angle_rad,
+    divergent_half_angle_rad = _cone_half_angle(
+        "motor.nozzle_angle", motor.nozzle_angle
     )
     try:
-        nozzle_mass_kg = (
-            (convergent_area_m2 + divergent_area_m2)
-            * nozzle_wall_m
-            * nozzle_density_kg_m3
+        casing_mass_kg = _casing_mass_with_bulkheads_kg(
+            chamber_radius_m,
+            wall_m,
+            chamber_length_m,
+            casing_material,
+        )
+        liner_mass_kg = _liner_mass_kg(
+            chamber_radius_m,
+            chamber_length_m,
+            casing_material,
+        )
+        nozzle_mass_kg = _nozzle_mass_kg(
+            chamber_radius_m,
+            throat_radius_m,
+            exit_radius_m,
+            divergent_half_angle_rad,
+            wall_m,
+            nozzle_material,
         )
     except OverflowError as exc:
         raise ValueError(
-            "cálculo da massa da tubeira excede o intervalo numérico"
+            "cálculo da massa do casing, liner ou tubeira excede o intervalo numérico"
         ) from exc
-    if not math.isfinite(nozzle_mass_kg):
-        raise ValueError("cálculo da massa da tubeira não é finito")
+    for name, value in (
+        ("cálculo da massa do casing", casing_mass_kg),
+        ("cálculo da massa do liner", liner_mass_kg),
+        ("cálculo da massa da tubeira", nozzle_mass_kg),
+    ):
+        if not math.isfinite(value):
+            raise ValueError(f"{name} não é finito")
 
     try:
         dry_mass_kg = casing_mass_kg + liner_mass_kg + nozzle_mass_kg

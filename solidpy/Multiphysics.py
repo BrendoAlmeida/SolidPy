@@ -124,6 +124,95 @@ class NozzleMaterial:
     min_wall_thickness_m: float = 0.004
 
 
+def _casing_mass_with_bulkheads_kg(
+    motor_inner_radius_m: float,
+    casing_wall_thickness_m: float,
+    chamber_length_m: float,
+    casing_material: CasingMaterial,
+) -> float:
+    """Casca cilíndrica do casing mais duas tampas planas."""
+    casing_volume_m3 = (
+        math.pi
+        * max(
+            (motor_inner_radius_m + casing_wall_thickness_m) ** 2
+            - motor_inner_radius_m**2,
+            0.0,
+        )
+        * chamber_length_m
+    )
+    bulkhead_thickness_m = (
+        casing_wall_thickness_m * casing_material.bulkhead_fraction
+    )
+    bulkhead_volume_m3 = (
+        2.0
+        * (math.pi / 4.0)
+        * (2.0 * motor_inner_radius_m) ** 2
+        * bulkhead_thickness_m
+    )
+    return (
+        casing_volume_m3 + bulkhead_volume_m3
+    ) * casing_material.density_kg_m3
+
+
+def _liner_mass_kg(
+    motor_inner_radius_m: float,
+    chamber_length_m: float,
+    casing_material: CasingMaterial,
+) -> float:
+    """Massa do liner cilíndrico, ou zero quando ele está inativo."""
+    if casing_material.liner_thickness_m <= 0.0:
+        return 0.0
+    liner_inner_diameter_m = max(
+        2.0 * motor_inner_radius_m - 2.0 * casing_material.liner_thickness_m,
+        0.0,
+    )
+    liner_volume_m3 = (
+        (math.pi / 4.0)
+        * max(
+            (2.0 * motor_inner_radius_m) ** 2 - liner_inner_diameter_m**2,
+            0.0,
+        )
+        * chamber_length_m
+    )
+    return liner_volume_m3 * casing_material.liner_density_kg_m3
+
+
+def _nozzle_mass_kg(
+    motor_inner_radius_m: float,
+    throat_radius_m: float,
+    exit_radius_m: float,
+    divergent_half_angle_rad: float,
+    casing_wall_thickness_m: float,
+    nozzle_material: NozzleMaterial,
+) -> float:
+    """Massa das paredes cônicas convergente e divergente da tubeira.
+
+    ``divergent_half_angle_rad`` já deve vir validado pelo chamador como
+    finito em ``(0, pi/2)``; esta função não aceita ``None`` nem faz fallback.
+    """
+    nozzle_wall_thickness_m = max(
+        casing_wall_thickness_m * nozzle_material.wall_thickness_factor,
+        nozzle_material.min_wall_thickness_m,
+    )
+    div_delta = max(exit_radius_m - throat_radius_m, 0.0)
+    if div_delta == 0.0:
+        div_area = 0.0
+    else:
+        div_len = div_delta / math.tan(divergent_half_angle_rad)
+        div_area = math.pi * (throat_radius_m + exit_radius_m) * math.hypot(
+            div_len, div_delta
+        )
+    conv_delta = max(motor_inner_radius_m - throat_radius_m, 0.0)
+    conv_angle = math.radians(DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG)
+    conv_len = conv_delta / math.tan(conv_angle)
+    conv_area = math.pi * (motor_inner_radius_m + throat_radius_m) * math.hypot(
+        conv_len, conv_delta
+    )
+    return (
+        div_area + conv_area
+    ) * nozzle_wall_thickness_m * nozzle_material.density_kg_m3
+
+
 def geometry_from_components(
     grain: Any,
     motor: Any,
@@ -271,59 +360,34 @@ def geometry_from_components(
     if casing_material is not None or nozzle_material is not None:
         if casing_material is not None:
             try:
-                bulkhead_thickness_m = casing_wall_thickness_m * bulkhead_fraction
-                bulkhead_volume_m3 = (
-                    2.0
-                    * (math.pi / 4.0)
-                    * (2.0 * motor_inner_radius) ** 2
-                    * bulkhead_thickness_m
+                casing_mass = _casing_mass_with_bulkheads_kg(
+                    motor_inner_radius,
+                    casing_wall_thickness_m,
+                    chamber_length,
+                    casing_material,
                 )
-                casing_mass = (casing_volume + bulkhead_volume_m3) * casing_density
+                liner_mass = _liner_mass_kg(
+                    motor_inner_radius,
+                    chamber_length,
+                    casing_material,
+                )
             except OverflowError as exc:
-                raise ValueError("bulkhead geometry calculation overflowed") from exc
-
-            if liner_thickness_m > 0.0:
-                liner_inner_diameter_m = max(
-                    2.0 * motor_inner_radius - 2.0 * liner_thickness_m,
-                    0.0,
-                )
-                liner_volume_m3 = (
-                    (math.pi / 4.0)
-                    * max(
-                        (2.0 * motor_inner_radius) ** 2
-                        - liner_inner_diameter_m**2,
-                        0.0,
-                    )
-                    * chamber_length
-                )
-                liner_mass = liner_volume_m3 * liner_density
+                raise ValueError(
+                    "bulkhead or liner geometry calculation overflowed"
+                ) from exc
 
         if nozzle_material is not None:
-            nozzle_wall_thickness_m = max(
-                casing_wall_thickness_m * wall_thickness_factor,
-                min_wall_thickness_m,
-            )
-
-            div_delta = max(exit_radius - throat_radius, 0.0)
-            if div_delta == 0.0:
-                # Equal radii produce a zero-length cylindrical limit. The
-                # plan provides no independent nozzle length, so preserve the
-                # finite, zero-area divergent contribution rather than inventing
-                # an axial dimension.
-                div_slant = 0.0
-                div_area = 2.0 * math.pi * throat_radius * div_slant
-            else:
-                tangent = math.tan(divergent_angle)
-                div_len = div_delta / tangent
-                div_slant = math.hypot(div_len, div_delta)
-                div_area = math.pi * (throat_radius + exit_radius) * div_slant
-
-            conv_delta = max(motor_inner_radius - throat_radius, 0.0)
-            conv_angle = math.radians(DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG)
-            conv_len = conv_delta / math.tan(conv_angle)
-            conv_slant = math.hypot(conv_len, conv_delta)
-            conv_area = math.pi * (motor_inner_radius + throat_radius) * conv_slant
-            nozzle_mass = (div_area + conv_area) * nozzle_wall_thickness_m * nozzle_density
+            try:
+                nozzle_mass = _nozzle_mass_kg(
+                    motor_inner_radius,
+                    throat_radius,
+                    exit_radius,
+                    divergent_angle,
+                    casing_wall_thickness_m,
+                    nozzle_material,
+                )
+            except OverflowError as exc:
+                raise ValueError("nozzle geometry calculation overflowed") from exc
 
         dry_mass = (
             casing_mass + liner_mass + nozzle_mass

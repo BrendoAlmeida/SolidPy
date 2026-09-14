@@ -29,8 +29,6 @@ from solidpy.surrogate_physics import (
     compute_structural_features,
     static_features_to_dict,
     structural_features_to_dict,
-    CONVERGENT_HALF_ANGLE_RAD,
-    DIVERGENT_HALF_ANGLE_RAD,
 )
 
 # ---------------------------------------------------------------------------
@@ -254,7 +252,11 @@ class TestStructuralFeatures:
             liner_thickness_m=0.0015,
             liner_density_kg_m3=1100.0,
         )
-        nozzle = NozzleMaterial(density_kg_m3=1800.0, wall_thickness_m=0.003)
+        nozzle = NozzleMaterial(
+            density_kg_m3=1800.0,
+            wall_thickness_factor=0.75,
+            min_wall_thickness_m=0.003,
+        )
         casing_wall_m = 0.004
         features = compute_structural_features(
             motor,
@@ -270,41 +272,51 @@ class TestStructuralFeatures:
             motor,
             kndx_propellant,
             casing_wall_thickness_m=casing_wall_m,
-            casing_density_kg_m3=casing.density_kg_m3,
+            casing_material=casing,
+            nozzle_material=nozzle,
         )
-        assert features.casing_mass_kg == pytest.approx(geometry.dry_mass_kg)
+        assert features.casing_mass_kg == pytest.approx(geometry.casing_mass_kg)
+        assert features.liner_mass_kg == pytest.approx(geometry.liner_mass_kg)
+        assert features.nozzle_mass_kg == pytest.approx(geometry.nozzle_mass_kg)
+        assert features.dry_mass_kg == pytest.approx(geometry.dry_mass_kg)
 
         chamber_radius_m = math.sqrt(motor.chamber_area / math.pi)
-        liner_inner_radius_m = chamber_radius_m - casing.liner_thickness_m
-        expected_liner_mass = (
-            math.pi
-            * (chamber_radius_m**2 - liner_inner_radius_m**2)
-            * motor.chamber_length
-            * casing.liner_density_kg_m3
-        )
         throat_radius_m = math.sqrt(motor.nozzle_throat_area / math.pi)
         exit_radius_m = math.sqrt(motor.nozzle_exit_area / math.pi)
-        convergent_slant_m = (
-            chamber_radius_m - throat_radius_m
-        ) / math.sin(CONVERGENT_HALF_ANGLE_RAD)
-        divergent_slant_m = (
-            exit_radius_m - throat_radius_m
-        ) / math.sin(motor.nozzle_angle)
-        expected_nozzle_mass = (
+        casing_volume_m3 = (
             math.pi
-            * (
-                (chamber_radius_m + throat_radius_m) * convergent_slant_m
-                + (throat_radius_m + exit_radius_m) * divergent_slant_m
-            )
-            * nozzle.wall_thickness_m
-            * nozzle.density_kg_m3
+            * ((chamber_radius_m + casing_wall_m) ** 2 - chamber_radius_m**2)
+            * motor.chamber_length
         )
-        assert features.liner_mass_kg == pytest.approx(expected_liner_mass)
-        assert features.nozzle_mass_kg == pytest.approx(expected_nozzle_mass)
-        assert features.dry_mass_kg == pytest.approx(
-            features.casing_mass_kg
-            + features.liner_mass_kg
-            + features.nozzle_mass_kg
+        bulkhead_thickness_m = casing_wall_m * casing.bulkhead_fraction
+        bulkhead_volume_m3 = (
+            2.0
+            * (math.pi / 4.0)
+            * (2.0 * chamber_radius_m) ** 2
+            * bulkhead_thickness_m
+        )
+        assert features.casing_mass_kg == pytest.approx(
+            (casing_volume_m3 + bulkhead_volume_m3) * casing.density_kg_m3
+        )
+
+        div_delta_m = exit_radius_m - throat_radius_m
+        div_length_m = div_delta_m / math.tan(motor.nozzle_angle)
+        div_area_m2 = math.pi * (throat_radius_m + exit_radius_m) * math.hypot(
+            div_length_m, div_delta_m
+        )
+        conv_delta_m = chamber_radius_m - throat_radius_m
+        conv_length_m = conv_delta_m / math.tan(math.radians(45.0))
+        conv_area_m2 = math.pi * (chamber_radius_m + throat_radius_m) * math.hypot(
+            conv_length_m, conv_delta_m
+        )
+        expected_nozzle_wall_m = max(
+            casing_wall_m * nozzle.wall_thickness_factor,
+            nozzle.min_wall_thickness_m,
+        )
+        assert features.nozzle_mass_kg == pytest.approx(
+            (conv_area_m2 + div_area_m2)
+            * expected_nozzle_wall_m
+            * nozzle.density_kg_m3
         )
         assert features.motor_final_mass_kg == pytest.approx(features.dry_mass_kg)
         assert features.motor_initial_mass_kg == pytest.approx(
@@ -445,37 +457,17 @@ class TestStructuralFeatures:
         )
         assert features.liner_mass_kg == 0.0
 
-    def test_none_divergent_angle_uses_separate_15_degree_mass_fallback(
+    def test_none_divergent_angle_is_rejected(
         self, tubular_grain, motor
     ):
         motor.nozzle_angle = None
-        features = compute_structural_features(
-            motor,
-            chamber_pressure_pa=3.5e6,
-            grain=tubular_grain,
-            propellant_mass_kg=1.0,
-        )
-        chamber_radius_m = math.sqrt(motor.chamber_area / math.pi)
-        throat_radius_m = math.sqrt(motor.nozzle_throat_area / math.pi)
-        exit_radius_m = math.sqrt(motor.nozzle_exit_area / math.pi)
-        expected_divergent_slant_m = (
-            exit_radius_m - throat_radius_m
-        ) / math.sin(DIVERGENT_HALF_ANGLE_RAD)
-        expected_convergent_slant_m = (
-            chamber_radius_m - throat_radius_m
-        ) / math.sin(CONVERGENT_HALF_ANGLE_RAD)
-        expected_nozzle_mass = (
-            math.pi
-            * (
-                (chamber_radius_m + throat_radius_m) * expected_convergent_slant_m
-                + (throat_radius_m + exit_radius_m) * expected_divergent_slant_m
+        with pytest.raises(ValueError, match="nozzle_angle"):
+            compute_structural_features(
+                motor,
+                chamber_pressure_pa=3.5e6,
+                grain=tubular_grain,
+                propellant_mass_kg=1.0,
             )
-            * 0.005
-            * 1800.0
-        )
-        assert DIVERGENT_HALF_ANGLE_RAD == pytest.approx(math.radians(15.0))
-        assert DIVERGENT_HALF_ANGLE_RAD != CONVERGENT_HALF_ANGLE_RAD
-        assert features.nozzle_mass_kg == pytest.approx(expected_nozzle_mass)
 
     @pytest.mark.parametrize(
         "angle",
@@ -555,8 +547,10 @@ class TestStructuralFeatures:
             motor,
             kndx_propellant,
             casing_wall_thickness_m=wall,
+            casing_material=CasingMaterial(),
+            nozzle_material=NozzleMaterial(),
         )
-        assert features.casing_mass_kg == pytest.approx(geometry.dry_mass_kg)
+        assert features.casing_mass_kg == pytest.approx(geometry.casing_mass_kg)
 
     @pytest.mark.parametrize("strength_factor", [0.0, -1.0, 1e-3])
     def test_strength_factor_matches_canonical_lower_bound(
@@ -606,14 +600,16 @@ class TestStructuralFeatures:
             grain=tubular_grain,
             propellant_mass_kg=1.0,
         )
+        casing = CasingMaterial(density_kg_m3=density)
         geometry = geometry_from_components(
             tubular_grain,
             motor,
             kndx_propellant,
             casing_wall_thickness_m=0.005,
-            casing_density_kg_m3=density,
+            casing_material=casing,
+            nozzle_material=NozzleMaterial(),
         )
-        assert features.casing_mass_kg == pytest.approx(geometry.dry_mass_kg)
+        assert features.casing_mass_kg == pytest.approx(geometry.casing_mass_kg)
 
     @pytest.mark.parametrize(
         "material",
@@ -639,14 +635,25 @@ class TestStructuralFeatures:
         with pytest.raises(ValueError, match="overflow deve ser um número finito"):
             _finite_value("overflow", 10**10000)
 
-    @pytest.mark.parametrize("wall", [0.0, -1.0, math.nan, math.inf])
-    def test_invalid_nozzle_wall_thickness_is_rejected(
-        self, motor, tubular_grain, wall
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("wall_thickness_factor", 0.0),
+            ("wall_thickness_factor", -1.0),
+            ("wall_thickness_factor", math.nan),
+            ("wall_thickness_factor", math.inf),
+            ("min_wall_thickness_m", -1.0),
+            ("min_wall_thickness_m", math.nan),
+            ("min_wall_thickness_m", math.inf),
+        ],
+    )
+    def test_invalid_nozzle_wall_geometry_parameters_are_rejected(
+        self, motor, tubular_grain, field, value
     ):
-        with pytest.raises(ValueError, match="nozzle_material.wall_thickness_m"):
+        with pytest.raises(ValueError, match="nozzle_material"):
             compute_structural_features(
                 motor,
-                nozzle_material=NozzleMaterial(wall_thickness_m=wall),
+                nozzle_material=NozzleMaterial(**{field: value}),
                 chamber_pressure_pa=3.5e6,
                 grain=tubular_grain,
                 propellant_mass_kg=1.0,
