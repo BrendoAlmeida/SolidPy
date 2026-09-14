@@ -100,6 +100,7 @@ class NozzleMaterial:
     ablation_rate_scale: float = 1.0
     ablation_pressure_exponent: float = 0.42
     ablation_mass_flux_exponent: float = 0.32
+    wall_thickness_m: float = 0.005
 
 
 def geometry_from_components(

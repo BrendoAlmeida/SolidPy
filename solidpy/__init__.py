@@ -86,8 +86,13 @@ from .TwoPhaseFlow import (
 # PINN-lite surrogate). No extra dependencies beyond core (numpy only).
 from .surrogate_physics import (
     BurnAreaCurve,
+    CONVERGENT_HALF_ANGLE_RAD,
+    DIVERGENT_HALF_ANGLE_RAD,
     SurrogateStaticFeatures,
+    SurrogateStructuralFeatures,
     compute_burn_area_curve,
     compute_static_features,
+    compute_structural_features,
     static_features_to_dict,
+    structural_features_to_dict,
 )
