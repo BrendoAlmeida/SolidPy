@@ -59,6 +59,7 @@ from .Robustness import (
 )
 from .Multiphysics import (
     CasingMaterial,
+    DEFAULT_BULKHEAD_FRACTION,
     DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
     MotorGeometry,
     NozzleMaterial,
@@ -92,6 +93,7 @@ from .surrogate_physics import (
     compute_burn_area_curve,
     compute_static_features,
     compute_structural_features,
+    compute_structural_features_vectorized,
     static_features_to_dict,
     structural_features_to_dict,
 )

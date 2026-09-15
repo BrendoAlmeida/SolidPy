@@ -8,6 +8,7 @@ from scipy import sparse
 
 from solidpy import (
     CasingMaterial,
+    DEFAULT_BULKHEAD_FRACTION,
     DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
     Environment,
     Grain,
@@ -20,6 +21,199 @@ from solidpy import (
     simulate_advanced_physics,
     simulate_thermal_ablation,
 )
+from solidpy.Multiphysics import (
+    _casing_mass_with_bulkheads_kg,
+    _casing_mass_with_bulkheads_kg_vectorized,
+    _liner_mass_kg,
+    _liner_mass_kg_vectorized,
+    _nozzle_mass_kg,
+    _nozzle_mass_kg_vectorized,
+)
+
+
+def test_bulkhead_fraction_default_is_public_and_canonical():
+    assert DEFAULT_BULKHEAD_FRACTION == 1.35
+    assert CasingMaterial().bulkhead_fraction == DEFAULT_BULKHEAD_FRACTION
+
+
+def test_vectorized_mass_helpers_match_scalar_helpers():
+    radius = np.array([0.037, 0.041, 0.045])
+    wall = np.array([0.004, 0.005, 0.006])
+    length = np.array([0.14, 0.16, 0.18])
+    density = np.array([7850.0, 7800.0, 8050.0])
+    fraction = np.array([1.35, 1.2, 1.5])
+    casing_vector = _casing_mass_with_bulkheads_kg_vectorized(
+        radius, wall, length, density, fraction
+    )
+    casing_scalar = np.array([
+        _casing_mass_with_bulkheads_kg(
+            r, w, l, CasingMaterial(density_kg_m3=d, bulkhead_fraction=f)
+        )
+        for r, w, l, d, f in zip(radius, wall, length, density, fraction)
+    ])
+    np.testing.assert_allclose(casing_vector, casing_scalar)
+
+    liner_thickness = np.array([0.001, 0.0, -0.001])
+    liner_density = np.array([1100.0, 0.0, 1200.0])
+    liner_vector = _liner_mass_kg_vectorized(
+        radius, length, liner_thickness, liner_density
+    )
+    liner_scalar = np.array([
+        _liner_mass_kg(
+            r,
+            l,
+            CasingMaterial(
+                liner_thickness_m=t,
+                liner_density_kg_m3=d,
+            ),
+        )
+        for r, l, t, d in zip(radius, length, liner_thickness, liner_density)
+    ])
+    np.testing.assert_allclose(liner_vector, liner_scalar)
+
+    throat = np.array([0.008, 0.009, 0.010])
+    exit_radius = np.array([0.018, 0.020, 0.023])
+    angles = np.array([math.radians(12.0), math.radians(15.0), math.radians(18.0)])
+    nozzle_density = np.array([1800.0, 1750.0, 1900.0])
+    factors = np.array([1.15, 1.1, 1.3])
+    minimum_walls = np.array([0.004, 0.003, 0.005])
+    nozzle_vector = _nozzle_mass_kg_vectorized(
+        radius,
+        throat,
+        exit_radius,
+        angles,
+        wall,
+        nozzle_density,
+        factors,
+        minimum_walls,
+    )
+    nozzle_scalar = np.array([
+        _nozzle_mass_kg(
+            r,
+            t,
+            e,
+            a,
+            w,
+            NozzleMaterial(
+                density_kg_m3=d,
+                wall_thickness_factor=f,
+                min_wall_thickness_m=m,
+            ),
+        )
+        for r, t, e, a, w, d, f, m in zip(
+            radius,
+            throat,
+            exit_radius,
+            angles,
+            wall,
+            nozzle_density,
+            factors,
+            minimum_walls,
+        )
+    ])
+    np.testing.assert_allclose(nozzle_vector, nozzle_scalar)
+
+
+def test_vectorized_mass_helpers_broadcast_scalars_and_return_zero_dim_arrays():
+    result = _casing_mass_with_bulkheads_kg_vectorized(
+        np.array([0.037, 0.040, 0.043]),
+        0.004,
+        0.14,
+        7850.0,
+        DEFAULT_BULKHEAD_FRACTION,
+    )
+    assert result.shape == (3,)
+    scalar_result = _liner_mass_kg_vectorized(0.037, 0.14, 0.001, 1100.0)
+    assert scalar_result.shape == ()
+    assert isinstance(scalar_result, np.ndarray)
+
+
+def test_vectorized_liner_ignores_invalid_density_when_inactive():
+    result = _liner_mass_kg_vectorized(
+        np.array([0.037, 0.040]),
+        np.array([0.14, 0.16]),
+        np.array([0.0, -1e308]),
+        np.array([math.nan, math.inf]),
+    )
+
+    assert result.shape == (2,)
+    np.testing.assert_array_equal(result, np.zeros(2))
+
+
+def test_vectorized_nozzle_mass_accepts_degenerate_nozzle():
+    result = _nozzle_mass_kg_vectorized(
+        0.037,
+        0.008,
+        0.008,
+        math.radians(15.0),
+        0.004,
+        1800.0,
+        1.15,
+        0.004,
+    )
+    expected = _nozzle_mass_kg(
+        0.037,
+        0.008,
+        0.008,
+        math.radians(15.0),
+        0.004,
+        NozzleMaterial(
+            density_kg_m3=1800.0,
+            wall_thickness_factor=1.15,
+            min_wall_thickness_m=0.004,
+        ),
+    )
+
+    assert result.shape == ()
+    assert float(result) == pytest.approx(expected)
+    with pytest.raises(ValueError, match="exit_radius_m"):
+        _nozzle_mass_kg_vectorized(
+            0.037,
+            0.008,
+            0.007,
+            math.radians(15.0),
+            0.004,
+            1800.0,
+            1.15,
+            0.004,
+        )
+
+
+@pytest.mark.parametrize(
+    "angle",
+    [0.0, -1.0, math.pi / 2.0, math.nan, math.inf],
+)
+def test_vectorized_nozzle_mass_rejects_invalid_angles(angle):
+    with pytest.raises(ValueError, match="divergent_half_angle_rad"):
+        _nozzle_mass_kg_vectorized(
+            0.037,
+            0.008,
+            0.018,
+            angle,
+            0.004,
+            1800.0,
+            1.15,
+            0.004,
+        )
+
+
+def test_vectorized_mass_helpers_reject_shape_mismatch_and_overflow():
+    with pytest.raises(ValueError, match="broadcastable"):
+        _casing_mass_with_bulkheads_kg_vectorized(
+            np.ones(2),
+            np.ones(3),
+            0.14,
+            7850.0,
+            1.35,
+        )
+    with pytest.raises(ValueError):
+        _casing_mass_with_bulkheads_kg_vectorized(
+            0.037,
+            1e308,
+            1e308,
+            7850.0,
+            1.35,
+        )
 
 
 def make_motor_stack():

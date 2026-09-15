@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
+
+StructuralFeatureValue = Union[float, np.ndarray]
+StructuralFeatureDictValue = Union[float, np.ndarray, list]
 
 try:
     from .Burn import Burn
@@ -29,8 +32,16 @@ try:
         CasingMaterial,
         NozzleMaterial,
         _casing_mass_with_bulkheads_kg,
+        _casing_mass_with_bulkheads_kg_vectorized,
         _liner_mass_kg,
+        _liner_mass_kg_vectorized,
         _nozzle_mass_kg,
+        _nozzle_mass_kg_vectorized,
+        _vector_broadcast_float_arrays,
+        _validate_vector_finite,
+        _validate_vector_nonnegative,
+        _validate_vector_positive,
+        _vector_result,
     )
     from .Propellant import Propellant
 except ImportError:
@@ -41,8 +52,16 @@ except ImportError:
         CasingMaterial,
         NozzleMaterial,
         _casing_mass_with_bulkheads_kg,
+        _casing_mass_with_bulkheads_kg_vectorized,
         _liner_mass_kg,
+        _liner_mass_kg_vectorized,
         _nozzle_mass_kg,
+        _nozzle_mass_kg_vectorized,
+        _vector_broadcast_float_arrays,
+        _validate_vector_finite,
+        _validate_vector_nonnegative,
+        _validate_vector_positive,
+        _vector_result,
     )
     from Propellant import Propellant
 
@@ -185,17 +204,17 @@ class SurrogateStructuralFeatures:
         ``burst_pressure_pa / max(chamber_pressure_pa, 1)``.
         Fonte: ``Multiphysics.py::simulate_structural_response``.
     """
-    casing_mass_kg: float
-    liner_mass_kg: float
-    nozzle_mass_kg: float
-    dry_mass_kg: float
-    motor_initial_mass_kg: float
-    motor_final_mass_kg: float
-    structural_mass_ratio: float
-    port_throat_ratio: float
-    von_mises_at_reference_pa: float
-    burst_pressure_pa: float
-    burst_safety_factor_at_reference_pa: float
+    casing_mass_kg: StructuralFeatureValue
+    liner_mass_kg: StructuralFeatureValue
+    nozzle_mass_kg: StructuralFeatureValue
+    dry_mass_kg: StructuralFeatureValue
+    motor_initial_mass_kg: StructuralFeatureValue
+    motor_final_mass_kg: StructuralFeatureValue
+    structural_mass_ratio: StructuralFeatureValue
+    port_throat_ratio: StructuralFeatureValue
+    von_mises_at_reference_pa: StructuralFeatureValue
+    burst_pressure_pa: StructuralFeatureValue
+    burst_safety_factor_at_reference_pa: StructuralFeatureValue
 
 
 @dataclass(frozen=True)
@@ -747,6 +766,232 @@ def compute_structural_features(
     )
 
 
+def compute_structural_features_vectorized(
+    *,
+    chamber_radius_m: StructuralFeatureValue,
+    throat_radius_m: StructuralFeatureValue,
+    exit_radius_m: StructuralFeatureValue,
+    chamber_length_m: StructuralFeatureValue,
+    casing_wall_thickness_m: StructuralFeatureValue,
+    casing_density_kg_m3: StructuralFeatureValue,
+    bulkhead_fraction: StructuralFeatureValue,
+    liner_thickness_m: StructuralFeatureValue,
+    liner_density_kg_m3: StructuralFeatureValue,
+    nozzle_density_kg_m3: StructuralFeatureValue,
+    nozzle_wall_thickness_factor: StructuralFeatureValue,
+    nozzle_min_wall_thickness_m: StructuralFeatureValue,
+    divergent_half_angle_rad: StructuralFeatureValue,
+    chamber_pressure_pa: StructuralFeatureValue,
+    port_area_m2: StructuralFeatureValue,
+    propellant_mass_kg: StructuralFeatureValue,
+    ultimate_strength_mpa: StructuralFeatureValue,
+    casing_strength_factor: StructuralFeatureValue = 1.0,
+) -> SurrogateStructuralFeatures:
+    """Calcula features estruturais para um lote com broadcasting NumPy.
+
+    Todos os argumentos aceitam escalares ou ``numpy.ndarray`` broadcastable;
+    a conversão interna usa ``float64``. O retorno é um
+    :class:`SurrogateStructuralFeatures` cujos onze campos são arrays NumPy
+    com o shape broadcastado; entradas escalares produzem arrays 0-D. As
+    fórmulas, clamps e validações físicas correspondem ao caminho escalar
+    :func:`compute_structural_features`, sem integração de ODE. O liner é
+    validado somente nas posições com espessura positiva, e um bocal com raio
+    de saída igual ao da garganta continua sendo rejeitado neste caminho
+    superior, tal como no caminho escalar.
+    """
+    if divergent_half_angle_rad is None:
+        raise ValueError(
+            "divergent_half_angle_rad deve ser finito e estar em (0, pi/2)"
+        )
+    (
+        chamber_radius,
+        throat_radius,
+        exit_radius,
+        chamber_length,
+        casing_wall,
+        casing_density,
+        bulkhead_fraction,
+        liner_thickness,
+        liner_density,
+        nozzle_density,
+        nozzle_wall_factor,
+        nozzle_min_wall,
+        divergent_angle,
+        chamber_pressure,
+        port_area,
+        propellant_mass,
+        ultimate_strength,
+        strength_factor,
+    ) = _vector_broadcast_float_arrays(
+        chamber_radius_m,
+        throat_radius_m,
+        exit_radius_m,
+        chamber_length_m,
+        casing_wall_thickness_m,
+        casing_density_kg_m3,
+        bulkhead_fraction,
+        liner_thickness_m,
+        liner_density_kg_m3,
+        nozzle_density_kg_m3,
+        nozzle_wall_thickness_factor,
+        nozzle_min_wall_thickness_m,
+        divergent_half_angle_rad,
+        chamber_pressure_pa,
+        port_area_m2,
+        propellant_mass_kg,
+        ultimate_strength_mpa,
+        casing_strength_factor,
+    )
+
+    _validate_vector_positive("chamber_radius_m", chamber_radius)
+    _validate_vector_positive("throat_radius_m", throat_radius)
+    _validate_vector_positive("exit_radius_m", exit_radius)
+    if np.any(chamber_radius <= throat_radius):
+        raise ValueError("chamber_radius_m deve ser maior que throat_radius_m")
+    if np.any(exit_radius <= throat_radius):
+        raise ValueError("exit_radius_m deve ser maior que throat_radius_m")
+    _validate_vector_positive("chamber_length_m", chamber_length)
+    _validate_vector_finite("casing_wall_thickness_m", casing_wall)
+    _validate_vector_nonnegative("casing_density_kg_m3", casing_density)
+    _validate_vector_positive("bulkhead_fraction", bulkhead_fraction)
+    _validate_vector_finite("liner_thickness_m", liner_thickness)
+    liner_active = liner_thickness > 0.0
+    if np.any(liner_active & (liner_thickness >= chamber_radius)):
+        raise ValueError("liner_thickness_m deve ser menor que chamber_radius_m")
+    if np.any(liner_active & ~np.isfinite(liner_density)):
+        raise ValueError(
+            "liner_density_kg_m3 deve conter valores finitos quando o liner está ativo"
+        )
+    if np.any(liner_active & (liner_density <= 0.0)):
+        raise ValueError(
+            "liner_density_kg_m3 deve ser maior que zero quando o liner está ativo"
+        )
+    _validate_vector_positive("nozzle_density_kg_m3", nozzle_density)
+    _validate_vector_positive(
+        "nozzle_wall_thickness_factor", nozzle_wall_factor
+    )
+    _validate_vector_nonnegative(
+        "nozzle_min_wall_thickness_m", nozzle_min_wall
+    )
+    _validate_vector_finite("divergent_half_angle_rad", divergent_angle)
+    if np.any((divergent_angle <= 0.0) | (divergent_angle >= np.pi / 2.0)):
+        raise ValueError("divergent_half_angle_rad deve estar em (0, pi/2)")
+    _validate_vector_nonnegative("chamber_pressure_pa", chamber_pressure)
+    _validate_vector_nonnegative("port_area_m2", port_area)
+    _validate_vector_nonnegative("propellant_mass_kg", propellant_mass)
+    _validate_vector_positive("ultimate_strength_mpa", ultimate_strength)
+    _validate_vector_finite("casing_strength_factor", strength_factor)
+    strength_factor = np.maximum(strength_factor, 0.01)
+    casing_wall = np.maximum(casing_wall, 1e-5)
+
+    casing_mass = _casing_mass_with_bulkheads_kg_vectorized(
+        chamber_radius,
+        casing_wall,
+        chamber_length,
+        casing_density,
+        bulkhead_fraction,
+    )
+    liner_mass = _liner_mass_kg_vectorized(
+        chamber_radius,
+        chamber_length,
+        liner_thickness,
+        liner_density,
+    )
+    nozzle_mass = _nozzle_mass_kg_vectorized(
+        chamber_radius,
+        throat_radius,
+        exit_radius,
+        divergent_angle,
+        casing_wall,
+        nozzle_density,
+        nozzle_wall_factor,
+        nozzle_min_wall,
+    )
+
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            dry_mass = casing_mass + liner_mass + nozzle_mass
+            initial_mass = dry_mass + propellant_mass
+            final_mass = dry_mass
+            structural_ratio = np.where(
+                initial_mass > 0.0, dry_mass / initial_mass, 0.0
+            )
+            port_throat_ratio = port_area / (np.pi * throat_radius**2)
+
+            inner_radius = np.maximum(chamber_radius, 1e-5)
+            outer_radius = inner_radius + casing_wall
+            inner_radius_sq = inner_radius**2
+            outer_radius_sq = outer_radius**2
+            lame_branch = casing_wall / np.maximum(inner_radius, 1e-9) > 0.1
+            lame_hoop = (
+                chamber_pressure
+                * inner_radius_sq
+                * (outer_radius_sq + inner_radius_sq)
+                / np.maximum(outer_radius_sq - inner_radius_sq, 1e-9)
+                / np.maximum(inner_radius_sq, 1e-9)
+            )
+            lame_axial = chamber_pressure * inner_radius_sq / np.maximum(
+                outer_radius_sq - inner_radius_sq, 1e-9
+            )
+            barlow_hoop = chamber_pressure * inner_radius / casing_wall
+            barlow_axial = chamber_pressure * inner_radius / (2.0 * casing_wall)
+            hoop = np.where(lame_branch, lame_hoop, barlow_hoop)
+            axial = np.where(lame_branch, lame_axial, barlow_axial)
+            radial = -chamber_pressure
+            stress_invariant = 0.5 * (
+                (hoop - radial) ** 2
+                + (radial - axial) ** 2
+                + (axial - hoop) ** 2
+            )
+            von_mises = np.sqrt(np.maximum(stress_invariant, 0.0))
+
+            ultimate_pa = ultimate_strength * 1e6 * strength_factor
+            burst_pressure = (
+                (2.0 / np.sqrt(3.0))
+                * ultimate_pa
+                * np.log(np.maximum(outer_radius / np.maximum(inner_radius, 1e-9), 1.0))
+            )
+            burst_safety_factor = burst_pressure / np.maximum(chamber_pressure, 1.0)
+    except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "cálculo vetorizado das features estruturais excede o intervalo numérico"
+        ) from exc
+
+    results = (
+        ("casing_mass_kg", casing_mass),
+        ("liner_mass_kg", liner_mass),
+        ("nozzle_mass_kg", nozzle_mass),
+        ("dry_mass_kg", dry_mass),
+        ("motor_initial_mass_kg", initial_mass),
+        ("motor_final_mass_kg", final_mass),
+        ("structural_mass_ratio", structural_ratio),
+        ("port_throat_ratio", port_throat_ratio),
+        ("von_mises_at_reference_pa", von_mises),
+        ("burst_pressure_pa", burst_pressure),
+        ("burst_safety_factor_at_reference_pa", burst_safety_factor),
+    )
+    for name, result in results:
+        _vector_result(name, result)
+        if np.any(result < 0.0):
+            raise ValueError(f"{name} não pode conter valores negativos")
+    if np.any(initial_mass <= 0.0):
+        raise ValueError("motor_initial_mass_kg deve ser maior que zero")
+
+    return SurrogateStructuralFeatures(
+        casing_mass_kg=np.asarray(casing_mass),
+        liner_mass_kg=np.asarray(liner_mass),
+        nozzle_mass_kg=np.asarray(nozzle_mass),
+        dry_mass_kg=np.asarray(dry_mass),
+        motor_initial_mass_kg=np.asarray(initial_mass),
+        motor_final_mass_kg=np.asarray(final_mass),
+        structural_mass_ratio=np.asarray(structural_ratio),
+        port_throat_ratio=np.asarray(port_throat_ratio),
+        von_mises_at_reference_pa=np.asarray(von_mises),
+        burst_pressure_pa=np.asarray(burst_pressure),
+        burst_safety_factor_at_reference_pa=np.asarray(burst_safety_factor),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Curva A_b(w) — assinatura geométrica do grão
 # ---------------------------------------------------------------------------
@@ -863,20 +1108,73 @@ def static_features_to_dict(feats: SurrogateStaticFeatures) -> dict[str, float]:
     }
 
 
-def structural_features_to_dict(feats: SurrogateStructuralFeatures) -> dict[str, float]:
-    """Converte SurrogateStructuralFeatures para dict plano para datasets."""
+def _structural_feature_value_to_python(
+    value: StructuralFeatureValue,
+    *,
+    json_compatible: bool = False,
+) -> StructuralFeatureDictValue:
+    """Converte escalares e arrays 0-D em ``float`` sem achatar lotes.
+
+    Quando ``json_compatible`` é ``True``, arrays com dimensões são convertidos
+    para listas Python; o padrão preserva ``numpy.ndarray`` para consumidores
+    de lotes e Parquet.
+    """
+    array = np.asarray(value)
+    if array.ndim == 0:
+        return float(array)
+    if json_compatible:
+        return array.tolist()
+    return array
+
+
+def structural_features_to_dict(
+    feats: SurrogateStructuralFeatures,
+    *,
+    json_compatible: bool = False,
+) -> dict[str, StructuralFeatureDictValue]:
+    """Converte features estruturais escalares ou vetorizadas em dict plano.
+
+    Valores escalares, inclusive arrays NumPy 0-D produzidos por
+    :func:`compute_structural_features_vectorized` com entradas escalares,
+    tornam-se ``float``. Arrays com uma ou mais dimensões permanecem
+    ``numpy.ndarray`` no shape broadcastado, para que lotes não sejam
+    convertidos acidentalmente em escalares. Com ``json_compatible=True``,
+    esses arrays tornam-se listas Python aninhadas, adequadas para
+    ``json.dumps``.
+    """
     return {
-        "surrogate.casing_mass_kg": float(feats.casing_mass_kg),
-        "surrogate.liner_mass_kg": float(feats.liner_mass_kg),
-        "surrogate.nozzle_mass_kg": float(feats.nozzle_mass_kg),
-        "surrogate.dry_mass_kg": float(feats.dry_mass_kg),
-        "surrogate.motor_initial_mass_kg": float(feats.motor_initial_mass_kg),
-        "surrogate.motor_final_mass_kg": float(feats.motor_final_mass_kg),
-        "surrogate.structural_mass_ratio": float(feats.structural_mass_ratio),
-        "surrogate.port_throat_ratio": float(feats.port_throat_ratio),
-        "surrogate.von_mises_at_reference_pa": float(feats.von_mises_at_reference_pa),
-        "surrogate.burst_pressure_pa": float(feats.burst_pressure_pa),
-        "surrogate.burst_safety_factor_at_reference_pa": float(
-            feats.burst_safety_factor_at_reference_pa
+        "surrogate.casing_mass_kg": _structural_feature_value_to_python(
+            feats.casing_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.liner_mass_kg": _structural_feature_value_to_python(
+            feats.liner_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.nozzle_mass_kg": _structural_feature_value_to_python(
+            feats.nozzle_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.dry_mass_kg": _structural_feature_value_to_python(
+            feats.dry_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.motor_initial_mass_kg": _structural_feature_value_to_python(
+            feats.motor_initial_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.motor_final_mass_kg": _structural_feature_value_to_python(
+            feats.motor_final_mass_kg, json_compatible=json_compatible
+        ),
+        "surrogate.structural_mass_ratio": _structural_feature_value_to_python(
+            feats.structural_mass_ratio, json_compatible=json_compatible
+        ),
+        "surrogate.port_throat_ratio": _structural_feature_value_to_python(
+            feats.port_throat_ratio, json_compatible=json_compatible
+        ),
+        "surrogate.von_mises_at_reference_pa": _structural_feature_value_to_python(
+            feats.von_mises_at_reference_pa, json_compatible=json_compatible
+        ),
+        "surrogate.burst_pressure_pa": _structural_feature_value_to_python(
+            feats.burst_pressure_pa, json_compatible=json_compatible
+        ),
+        "surrogate.burst_safety_factor_at_reference_pa": _structural_feature_value_to_python(
+            feats.burst_safety_factor_at_reference_pa,
+            json_compatible=json_compatible,
         ),
     }

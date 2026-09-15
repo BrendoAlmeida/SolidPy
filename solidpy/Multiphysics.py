@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import numpy as np
 from scipy import sparse
@@ -22,6 +22,8 @@ G0_M_S2 = 9.80665
 SEA_LEVEL_DENSITY_KG_M3 = 1.225
 SPEED_OF_SOUND_M_S = 343.0  # sea-level reference; use _isa_speed_of_sound() for altitude
 DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG = 45.0
+DEFAULT_BULKHEAD_FRACTION: float = 1.35
+VectorizedValue = Union[float, np.ndarray]
 
 
 def _isa_speed_of_sound(altitude_m):
@@ -87,7 +89,7 @@ class CasingMaterial:
     liner_density_kg_m3: float = 1100.0
     liner_cp_j_kgk: float = 1600.0
     ultimate_strength_mpa: Optional[float] = None
-    bulkhead_fraction: float = 1.35
+    bulkhead_fraction: float = DEFAULT_BULKHEAD_FRACTION
 
     @property
     def resolved_allowable_stress_mpa(self):
@@ -211,6 +213,247 @@ def _nozzle_mass_kg(
     return (
         div_area + conv_area
     ) * nozzle_wall_thickness_m * nozzle_material.density_kg_m3
+
+
+def _vector_broadcast_float_arrays(*values: Any) -> tuple[np.ndarray, ...]:
+    """Converte valores numéricos e aplica broadcasting com erro controlado."""
+    try:
+        arrays = tuple(np.asarray(value, dtype=float) for value in values)
+        return tuple(np.broadcast_arrays(*arrays))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "os argumentos vetorizados devem ser números ou arrays "
+            "com shapes broadcastable"
+        ) from exc
+
+
+def _validate_vector_finite(name: str, value: np.ndarray) -> None:
+    if not np.all(np.isfinite(value)):
+        raise ValueError(f"{name} deve conter apenas valores finitos")
+
+
+def _validate_vector_nonnegative(name: str, value: np.ndarray) -> None:
+    _validate_vector_finite(name, value)
+    if np.any(value < 0.0):
+        raise ValueError(f"{name} deve conter valores maiores ou iguais a zero")
+
+
+def _validate_vector_positive(name: str, value: np.ndarray) -> None:
+    _validate_vector_finite(name, value)
+    if np.any(value <= 0.0):
+        raise ValueError(f"{name} deve conter valores maiores que zero")
+
+
+def _vector_result(name: str, value: np.ndarray) -> np.ndarray:
+    if not np.all(np.isfinite(value)):
+        raise ValueError(f"{name} não pode conter NaN ou infinito")
+    return np.asarray(value)
+
+
+def _casing_mass_with_bulkheads_kg_vectorized(
+    motor_inner_radius_m: VectorizedValue,
+    casing_wall_thickness_m: VectorizedValue,
+    chamber_length_m: VectorizedValue,
+    casing_density_kg_m3: VectorizedValue,
+    bulkhead_fraction: VectorizedValue,
+) -> np.ndarray:
+    """Versão vetorizada da massa do casing com seus dois bulkheads.
+
+    Todos os argumentos aceitam escalares ou arrays convertíveis para
+    ``float64`` e precisam ser broadcastable entre si. O retorno é um
+    ``np.ndarray`` com o shape broadcastado; entradas escalares produzem um
+    array 0-D. A espessura do casing segue o clamp canônico
+    ``max(valor, 1e-5)``. Raios, comprimento, densidade e fração de bulkhead
+    precisam ser finitos e positivos (densidade pode ser zero); overflow e
+    resultados não finitos geram ``ValueError``.
+    """
+    radius, wall, length, density, fraction = _vector_broadcast_float_arrays(
+        motor_inner_radius_m,
+        casing_wall_thickness_m,
+        chamber_length_m,
+        casing_density_kg_m3,
+        bulkhead_fraction,
+    )
+    _validate_vector_positive("motor_inner_radius_m", radius)
+    _validate_vector_finite("casing_wall_thickness_m", wall)
+    _validate_vector_positive("chamber_length_m", length)
+    _validate_vector_nonnegative("casing_density_kg_m3", density)
+    _validate_vector_positive("bulkhead_fraction", fraction)
+    wall = np.maximum(wall, 1e-5)
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            casing_volume = (
+                np.pi
+                * np.maximum((radius + wall) ** 2 - radius**2, 0.0)
+                * length
+            )
+            bulkhead_thickness = wall * fraction
+            bulkhead_volume = (
+                2.0
+                * (np.pi / 4.0)
+                * (2.0 * radius) ** 2
+                * bulkhead_thickness
+            )
+            result = (casing_volume + bulkhead_volume) * density
+    except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError("cálculo vetorizado da massa do casing excede o intervalo") from exc
+    return _vector_result("casing_mass_kg", result)
+
+
+def _liner_mass_kg_vectorized(
+    motor_inner_radius_m: VectorizedValue,
+    chamber_length_m: VectorizedValue,
+    liner_thickness_m: VectorizedValue,
+    liner_density_kg_m3: VectorizedValue,
+) -> np.ndarray:
+    """Calcula a massa do liner com broadcasting NumPy em ``float64``.
+
+    Os quatro argumentos aceitam escalares ou arrays broadcastable. O retorno
+    é um ``np.ndarray`` com o shape broadcastado, inclusive um array 0-D para
+    entradas escalares. Raios, comprimento e espessura precisam ser finitos;
+    raio e comprimento também precisam ser positivos. Uma espessura não
+    positiva desativa o liner e retorna exatamente zero sem avaliar a fórmula
+    naquela posição. A densidade é validada como finita e positiva somente
+    onde o liner está ativo; valores inválidos em posições inativas são
+    ignorados. Overflow ou resultados não finitos geram ``ValueError``.
+    """
+    radius, length, thickness, density = _vector_broadcast_float_arrays(
+        motor_inner_radius_m,
+        chamber_length_m,
+        liner_thickness_m,
+        liner_density_kg_m3,
+    )
+    _validate_vector_positive("motor_inner_radius_m", radius)
+    _validate_vector_positive("chamber_length_m", length)
+    _validate_vector_finite("liner_thickness_m", thickness)
+    active = thickness > 0.0
+    if np.any(active & (thickness >= radius)):
+        raise ValueError("liner_thickness_m deve ser menor que o raio da câmara")
+    if np.any(active & ~np.isfinite(density)):
+        raise ValueError(
+            "liner_density_kg_m3 deve conter valores finitos quando o liner está ativo"
+        )
+    if np.any(active & (density <= 0.0)):
+        raise ValueError(
+            "liner_density_kg_m3 deve ser maior que zero quando o liner está ativo"
+        )
+    result = np.zeros_like(radius, dtype=float)
+    active_indices = np.flatnonzero(active)
+    if active_indices.size == 0:
+        return _vector_result("liner_mass_kg", result)
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            radius_flat = radius.reshape(-1)
+            length_flat = length.reshape(-1)
+            thickness_flat = thickness.reshape(-1)
+            density_flat = density.reshape(-1)
+            active_radius = radius_flat[active_indices]
+            active_length = length_flat[active_indices]
+            active_thickness = thickness_flat[active_indices]
+            active_density = density_flat[active_indices]
+            liner_inner_diameter = np.maximum(
+                2.0 * active_radius - 2.0 * active_thickness,
+                0.0,
+            )
+            liner_volume = (
+                (np.pi / 4.0)
+                * np.maximum(
+                    (2.0 * active_radius) ** 2 - liner_inner_diameter**2,
+                    0.0,
+                )
+                * active_length
+            )
+            result_flat = result.reshape(-1)
+            result_flat[active_indices] = liner_volume * active_density
+    except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError("cálculo vetorizado da massa do liner excede o intervalo") from exc
+    return _vector_result("liner_mass_kg", result)
+
+
+def _nozzle_mass_kg_vectorized(
+    motor_inner_radius_m: VectorizedValue,
+    throat_radius_m: VectorizedValue,
+    exit_radius_m: VectorizedValue,
+    divergent_half_angle_rad: VectorizedValue,
+    casing_wall_thickness_m: VectorizedValue,
+    nozzle_density_kg_m3: VectorizedValue,
+    wall_thickness_factor: VectorizedValue,
+    min_wall_thickness_m: VectorizedValue,
+) -> np.ndarray:
+    """Calcula a massa da tubeira com broadcasting NumPy em ``float64``.
+
+    Os argumentos aceitam escalares ou arrays broadcastable e o retorno é um
+    ``np.ndarray`` com o shape broadcastado, inclusive 0-D para entradas
+    escalares. Raios, espessuras, densidade e fatores seguem as validações do
+    helper escalar. O semiângulo divergente precisa ser finito e estar em
+    ``(0, pi/2)``. ``exit_radius_m == throat_radius_m`` é um bocal degenerado
+    válido: a contribuição divergente é exatamente zero; valores de saída
+    menores que a garganta continuam sendo rejeitados. Overflow e resultados
+    não finitos geram ``ValueError``.
+    """
+    if divergent_half_angle_rad is None:
+        raise ValueError(
+            "divergent_half_angle_rad deve ser finito e estar em (0, pi/2)"
+        )
+    (
+        chamber_radius,
+        throat_radius,
+        exit_radius,
+        angle,
+        casing_wall,
+        density,
+        factor,
+        minimum_wall,
+    ) = _vector_broadcast_float_arrays(
+        motor_inner_radius_m,
+        throat_radius_m,
+        exit_radius_m,
+        divergent_half_angle_rad,
+        casing_wall_thickness_m,
+        nozzle_density_kg_m3,
+        wall_thickness_factor,
+        min_wall_thickness_m,
+    )
+    _validate_vector_positive("motor_inner_radius_m", chamber_radius)
+    _validate_vector_positive("throat_radius_m", throat_radius)
+    _validate_vector_positive("exit_radius_m", exit_radius)
+    if np.any(chamber_radius <= throat_radius):
+        raise ValueError("motor_inner_radius_m deve ser maior que throat_radius_m")
+    if np.any(exit_radius < throat_radius):
+        raise ValueError("exit_radius_m não pode ser menor que throat_radius_m")
+    _validate_vector_finite("divergent_half_angle_rad", angle)
+    if np.any((angle <= 0.0) | (angle >= np.pi / 2.0)):
+        raise ValueError("divergent_half_angle_rad deve estar em (0, pi/2)")
+    _validate_vector_finite("casing_wall_thickness_m", casing_wall)
+    _validate_vector_positive("nozzle_density_kg_m3", density)
+    _validate_vector_positive("wall_thickness_factor", factor)
+    _validate_vector_nonnegative("min_wall_thickness_m", minimum_wall)
+    casing_wall = np.maximum(casing_wall, 1e-5)
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            nozzle_wall = np.maximum(casing_wall * factor, minimum_wall)
+            div_delta = np.maximum(exit_radius - throat_radius, 0.0)
+            div_len = div_delta / np.tan(angle)
+            div_area = np.where(
+                div_delta == 0.0,
+                0.0,
+                np.pi
+                * (throat_radius + exit_radius)
+                * np.hypot(div_len, div_delta),
+            )
+            conv_delta = np.maximum(chamber_radius - throat_radius, 0.0)
+            conv_len = conv_delta / np.tan(
+                math.radians(DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG)
+            )
+            conv_area = (
+                np.pi
+                * (chamber_radius + throat_radius)
+                * np.hypot(conv_len, conv_delta)
+            )
+            result = (div_area + conv_area) * nozzle_wall * density
+    except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError("cálculo vetorizado da massa da tubeira excede o intervalo") from exc
+    return _vector_result("nozzle_mass_kg", result)
 
 
 def geometry_from_components(

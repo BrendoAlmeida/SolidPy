@@ -7,6 +7,7 @@ Verifica que:
      não-monotônicas (pico inicial) para star.
   4. static_features_to_dict é serializável.
 """
+import json
 import math
 import numpy as np
 import pytest
@@ -27,6 +28,7 @@ from solidpy.surrogate_physics import (
     compute_burn_area_curve,
     compute_static_features,
     compute_structural_features,
+    compute_structural_features_vectorized,
     static_features_to_dict,
     structural_features_to_dict,
 )
@@ -409,6 +411,90 @@ class TestStructuralFeatures:
         assert values["surrogate.dry_mass_kg"] == pytest.approx(features.dry_mass_kg)
         assert "surrogate.burst_safety_factor_at_reference_pa" in values
 
+    def test_vectorized_structural_features_to_dict_preserves_batch_arrays(
+        self, tubular_grain, motor
+    ):
+        features = compute_structural_features_vectorized(
+            chamber_radius_m=np.array([0.037, 0.038]),
+            throat_radius_m=np.array([0.008, 0.0085]),
+            exit_radius_m=np.array([0.018, 0.019]),
+            chamber_length_m=0.14,
+            casing_wall_thickness_m=0.004,
+            casing_density_kg_m3=7850.0,
+            bulkhead_fraction=1.35,
+            liner_thickness_m=0.001,
+            liner_density_kg_m3=1100.0,
+            nozzle_density_kg_m3=1800.0,
+            nozzle_wall_thickness_factor=1.15,
+            nozzle_min_wall_thickness_m=0.004,
+            divergent_half_angle_rad=motor.nozzle_angle,
+            chamber_pressure_pa=3.5e6,
+            port_area_m2=tubular_grain.evaluate_port_area(0.0),
+            propellant_mass_kg=1.0,
+            ultimate_strength_mpa=620.0,
+        )
+
+        values = structural_features_to_dict(features)
+        assert isinstance(values["surrogate.dry_mass_kg"], np.ndarray)
+        assert values["surrogate.dry_mass_kg"].shape == (2,)
+
+        json_values = structural_features_to_dict(features, json_compatible=True)
+        json.dumps(json_values)
+        assert isinstance(json_values["surrogate.dry_mass_kg"], list)
+
+    def test_vectorized_structural_features_scalar_inputs_return_float64_arrays(
+        self, tubular_grain, motor
+    ):
+        features = compute_structural_features_vectorized(
+            chamber_radius_m= np.float32(0.037),
+            throat_radius_m=np.float32(0.008),
+            exit_radius_m=np.float32(0.018),
+            chamber_length_m=np.int64(0) + 14 / 100,
+            casing_wall_thickness_m=np.float32(0.004),
+            casing_density_kg_m3=np.int64(7850),
+            bulkhead_fraction=np.float32(1.35),
+            liner_thickness_m=np.float32(0.001),
+            liner_density_kg_m3=np.int64(1100),
+            nozzle_density_kg_m3=np.int64(1800),
+            nozzle_wall_thickness_factor=np.float32(1.15),
+            nozzle_min_wall_thickness_m=np.float32(0.004),
+            divergent_half_angle_rad=np.float32(motor.nozzle_angle),
+            chamber_pressure_pa=np.int64(3_500_000),
+            port_area_m2=np.float32(tubular_grain.evaluate_port_area(0.0)),
+            propellant_mass_kg=np.int64(1),
+            ultimate_strength_mpa=np.int64(620),
+        )
+
+        assert features.dry_mass_kg.shape == ()
+        assert features.dry_mass_kg.dtype == np.float64
+        scalar_values = structural_features_to_dict(features)
+        assert isinstance(scalar_values["surrogate.dry_mass_kg"], float)
+
+    def test_vectorized_structural_features_ignores_invalid_inactive_liner_density(
+        self, tubular_grain, motor
+    ):
+        features = compute_structural_features_vectorized(
+            chamber_radius_m=0.037,
+            throat_radius_m=0.008,
+            exit_radius_m=0.018,
+            chamber_length_m=0.14,
+            casing_wall_thickness_m=0.004,
+            casing_density_kg_m3=7850.0,
+            bulkhead_fraction=1.35,
+            liner_thickness_m=np.array([0.0, -1e308]),
+            liner_density_kg_m3=np.array([np.nan, np.inf]),
+            nozzle_density_kg_m3=1800.0,
+            nozzle_wall_thickness_factor=1.15,
+            nozzle_min_wall_thickness_m=0.004,
+            divergent_half_angle_rad=motor.nozzle_angle,
+            chamber_pressure_pa=3.5e6,
+            port_area_m2=tubular_grain.evaluate_port_area(0.0),
+            propellant_mass_kg=1.0,
+            ultimate_strength_mpa=620.0,
+        )
+
+        np.testing.assert_array_equal(features.liner_mass_kg, np.zeros(2))
+
     def test_missing_propellant_mass_source_is_rejected(self, tubular_grain, motor):
         with pytest.raises(ValueError, match="massa de propelente desconhecida"):
             compute_structural_features(
@@ -671,6 +757,189 @@ class TestStructuralFeatures:
                 grain=tubular_grain,
                 propellant_mass_kg=1.0,
             )
+
+    def test_vectorized_features_match_scalar_features_for_heterogeneous_batch(
+        self, motor, tubular_grain
+    ):
+        chamber_radius = math.sqrt(motor.chamber_area / math.pi)
+        throat_radius = math.sqrt(motor.nozzle_throat_area / math.pi)
+        exit_radius = math.sqrt(motor.nozzle_exit_area / math.pi)
+        n = 3
+        casing_density = np.array([7850.0, 7800.0, 8050.0])
+        bulkhead_fraction = np.array([1.35, 1.2, 1.5])
+        liner_thickness = np.array([0.001, 0.0015, 0.002])
+        liner_density = np.array([1050.0, 1100.0, 1200.0])
+        nozzle_density = np.array([1800.0, 1750.0, 1900.0])
+        wall_factor = np.array([1.15, 1.0, 1.3])
+        minimum_wall = np.array([0.004, 0.003, 0.005])
+        pressure = np.array([3.0e6, 3.5e6, 4.0e6])
+        propellant_mass = np.array([1.0, 1.2, 1.4])
+        ultimate_strength = np.array([620.0, 700.0, 550.0])
+        strength_factor = np.array([1.0, 0.8, 1.2])
+
+        vector = compute_structural_features_vectorized(
+            chamber_radius_m=np.full(n, chamber_radius),
+            throat_radius_m=throat_radius,
+            exit_radius_m=exit_radius,
+            chamber_length_m=motor.chamber_length,
+            casing_wall_thickness_m=0.004,
+            casing_density_kg_m3=casing_density,
+            bulkhead_fraction=bulkhead_fraction,
+            liner_thickness_m=liner_thickness,
+            liner_density_kg_m3=liner_density,
+            nozzle_density_kg_m3=nozzle_density,
+            nozzle_wall_thickness_factor=wall_factor,
+            nozzle_min_wall_thickness_m=minimum_wall,
+            divergent_half_angle_rad=motor.nozzle_angle,
+            chamber_pressure_pa=pressure,
+            port_area_m2=tubular_grain.evaluate_port_area(0.0),
+            propellant_mass_kg=propellant_mass,
+            ultimate_strength_mpa=ultimate_strength,
+            casing_strength_factor=strength_factor,
+        )
+
+        scalar_features = [
+            compute_structural_features(
+                motor,
+                CasingMaterial(
+                    density_kg_m3=casing_density[i],
+                    bulkhead_fraction=bulkhead_fraction[i],
+                    liner_thickness_m=liner_thickness[i],
+                    liner_density_kg_m3=liner_density[i],
+                    ultimate_strength_mpa=ultimate_strength[i],
+                ),
+                NozzleMaterial(
+                    density_kg_m3=nozzle_density[i],
+                    wall_thickness_factor=wall_factor[i],
+                    min_wall_thickness_m=minimum_wall[i],
+                ),
+                chamber_pressure_pa=pressure[i],
+                casing_wall_thickness_m=0.004,
+                grain=tubular_grain,
+                propellant_mass_kg=propellant_mass[i],
+                casing_strength_factor=strength_factor[i],
+            )
+            for i in range(n)
+        ]
+        for field_name in (
+            "casing_mass_kg",
+            "liner_mass_kg",
+            "nozzle_mass_kg",
+            "dry_mass_kg",
+            "motor_initial_mass_kg",
+            "motor_final_mass_kg",
+            "structural_mass_ratio",
+            "port_throat_ratio",
+            "von_mises_at_reference_pa",
+            "burst_pressure_pa",
+            "burst_safety_factor_at_reference_pa",
+        ):
+            expected = np.array([getattr(item, field_name) for item in scalar_features])
+            np.testing.assert_allclose(getattr(vector, field_name), expected)
+
+    def test_vectorized_features_broadcasts_all_inputs_and_returns_arrays(
+        self, motor, tubular_grain
+    ):
+        radius = math.sqrt(motor.chamber_area / math.pi)
+        features = compute_structural_features_vectorized(
+            chamber_radius_m=np.array([[radius], [radius * 1.01]]),
+            throat_radius_m=np.array([0.008, 0.0085, 0.009]),
+            exit_radius_m=0.018,
+            chamber_length_m=0.14,
+            casing_wall_thickness_m=0.004,
+            casing_density_kg_m3=7850.0,
+            bulkhead_fraction=1.35,
+            liner_thickness_m=0.001,
+            liner_density_kg_m3=1100.0,
+            nozzle_density_kg_m3=1800.0,
+            nozzle_wall_thickness_factor=1.15,
+            nozzle_min_wall_thickness_m=0.004,
+            divergent_half_angle_rad=motor.nozzle_angle,
+            chamber_pressure_pa=3.5e6,
+            port_area_m2=tubular_grain.evaluate_port_area(0.0),
+            propellant_mass_kg=1.0,
+            ultimate_strength_mpa=620.0,
+        )
+        assert features.dry_mass_kg.shape == (2, 3)
+        assert all(
+            isinstance(getattr(features, field_name), np.ndarray)
+            for field_name in (
+                "casing_mass_kg",
+                "liner_mass_kg",
+                "nozzle_mass_kg",
+                "dry_mass_kg",
+                "motor_initial_mass_kg",
+                "motor_final_mass_kg",
+                "structural_mass_ratio",
+                "port_throat_ratio",
+                "von_mises_at_reference_pa",
+                "burst_pressure_pa",
+                "burst_safety_factor_at_reference_pa",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "bad_angle",
+        [None, 0.0, math.pi / 2.0, math.nan, math.inf],
+    )
+    def test_vectorized_features_rejects_invalid_angle(
+        self, motor, tubular_grain, bad_angle
+    ):
+        with pytest.raises(ValueError, match="divergent_half_angle_rad"):
+            compute_structural_features_vectorized(
+                chamber_radius_m=0.037,
+                throat_radius_m=0.008,
+                exit_radius_m=0.018,
+                chamber_length_m=0.14,
+                casing_wall_thickness_m=0.004,
+                casing_density_kg_m3=7850.0,
+                bulkhead_fraction=1.35,
+                liner_thickness_m=0.001,
+                liner_density_kg_m3=1100.0,
+                nozzle_density_kg_m3=1800.0,
+                nozzle_wall_thickness_factor=1.15,
+                nozzle_min_wall_thickness_m=0.004,
+                divergent_half_angle_rad=bad_angle,
+                chamber_pressure_pa=3.5e6,
+                port_area_m2=tubular_grain.evaluate_port_area(0.0),
+                propellant_mass_kg=1.0,
+                ultimate_strength_mpa=620.0,
+            )
+
+    def test_vectorized_features_rejects_shape_mismatch_and_overflow(
+        self, tubular_grain
+    ):
+        kwargs = dict(
+            chamber_radius_m=np.ones(2) * 0.037,
+            throat_radius_m=np.ones(3) * 0.008,
+            exit_radius_m=0.018,
+            chamber_length_m=0.14,
+            casing_wall_thickness_m=0.004,
+            casing_density_kg_m3=7850.0,
+            bulkhead_fraction=1.35,
+            liner_thickness_m=0.001,
+            liner_density_kg_m3=1100.0,
+            nozzle_density_kg_m3=1800.0,
+            nozzle_wall_thickness_factor=1.15,
+            nozzle_min_wall_thickness_m=0.004,
+            divergent_half_angle_rad=math.radians(15.0),
+            chamber_pressure_pa=3.5e6,
+            port_area_m2=tubular_grain.evaluate_port_area(0.0),
+            propellant_mass_kg=1.0,
+            ultimate_strength_mpa=620.0,
+        )
+        with pytest.raises(ValueError, match="broadcastable"):
+            compute_structural_features_vectorized(**kwargs)
+        kwargs["casing_wall_thickness_m"] = 1e308
+        kwargs["chamber_length_m"] = 1e308
+        kwargs["chamber_radius_m"] = 1e-3
+        kwargs["throat_radius_m"] = 1e-4
+        kwargs["exit_radius_m"] = 2e-4
+        kwargs["chamber_pressure_pa"] = 1e308
+        kwargs["chamber_radius_m"] = np.full(1, 1e-3)
+        kwargs["throat_radius_m"] = 1e-4
+        with pytest.raises(ValueError):
+            compute_structural_features_vectorized(**kwargs)
 
 
 # ---------------------------------------------------------------------------
