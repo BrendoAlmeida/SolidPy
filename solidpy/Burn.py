@@ -5,6 +5,7 @@ _copyright_ = "MIT"
 _license_ = ""
 
 import math
+from numbers import Real
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -39,6 +40,7 @@ class Burn:
         environment=None,
         *,
         eta_c: float = 1.0,
+        eta_Cf: float = 1.0,
         discharge_coefficient: float = 1.0,
     ):
         """Initialise a burn simulation.
@@ -48,20 +50,11 @@ class Burn:
             motor:       Motor object.
             propellant:  Propellant object.
             environment: Environment object (defaults to sea-level standard).
-            eta_c:       Combustion efficiency factor (0 < eta_c <= 1).
-                         Applied as T_0_ef = eta_c**2 * T_0 inside
-                         _parameters_at_pressure, matching the HTML convention
-                         (c* ∝ sqrt(T_0)). Propagates to both chamber pressure
-                         via the energy balance (Pmax) and thrust/Isp via
-                         c*/Ve — previously it only scaled thrust and Pmax was
-                         inconsistent with the reference HTML simulator.
-                         Default 1.0 preserves backward-compatibility.
-            discharge_coefficient: Nozzle discharge coefficient (0 < Cd <= 1).
-                          Scales the actual mass flow vs the ideal isentropic
-                          value; propagates to thrust because evaluate_thrust
-                          uses mdot_out * Ve + pressure thrust (F = λ·Cd·ṁ·Ve +
-                          (Pe-Pamb)·Ae), keeping mass flow and thrust coupled.
-                          Default 1.0 preserves backward-compatibility.
+            eta_c: Combustion efficiency, applied as T_0_eff = eta_c**2 * T_0.
+            eta_Cf: Efficiency applied once to total reported thrust.
+            discharge_coefficient: Nozzle mass-flow and momentum coefficient.
+
+        Efficiencies must be finite real numbers in (0, 1].
         """
         if environment is None:
             environment = Environment()
@@ -69,14 +62,35 @@ class Burn:
         self.grain = grain
         self.propellant = propellant
         self.environment = environment
-        self.eta_c = float(eta_c)
-        self.discharge_coefficient = float(discharge_coefficient)
+        self.eta_c = self._validate_efficiency("eta_c", eta_c)
+        self.eta_Cf = self._validate_efficiency("eta_Cf", eta_Cf)
+        self.discharge_coefficient = self._validate_efficiency(
+            "discharge_coefficient", discharge_coefficient
+        )
 
         self.gravity = environment.gravity
         self.environment_pressure = environment.atmospheric_pressure
 
         self.parameters = self.set_parameters()
         self._exit_mach_cache = {}
+
+    @staticmethod
+    def _validate_efficiency(name, value):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{name} must be a finite real number in (0, 1]")
+        value = float(value)
+        if not math.isfinite(value) or not 0.0 < value <= 1.0:
+            raise ValueError(f"{name} must be a finite real number in (0, 1]")
+        return value
+
+    @property
+    def applied_efficiencies(self):
+        """Return the resolved efficiency values used by the burn model."""
+        return {
+            "eta_c": self.eta_c,
+            "eta_Cf": self.eta_Cf,
+            "discharge_coefficient": self.discharge_coefficient,
+        }
 
     def set_parameters(self):
         parameters = (
@@ -94,13 +108,7 @@ class Burn:
             if chamber_pressure is None
             else max(float(chamber_pressure), 0.0)
         )
-        # eta_c models combustion efficiency as an effective flame temperature
-        # T_0_ef = eta_c**2 * T_0, matching the HTML simulator convention.
-        # This is the physically complete path: c* ∝ sqrt(T_0), mdot ∝ 1/sqrt(T_0),
-        # Ve ∝ sqrt(T_0), so eta_c propagates to pressure (energy balance -> Pmax)
-        # AND thrust/Isp via the same mechanism — instead of the previous
-        # thrust-only fudge factor, which left Pmax inconsistent with the HTML.
-        # Ref: RELATORIO_COMPARACAO.md §2.1; simulador_balistica_interna_v7.html §tubeira.
+        # c* scales with sqrt(T_0), so eta_c enters through effective temperature.
         t0_eff = self.propellant.Tc_at_pressure(pressure) * (self.eta_c ** 2)
         return (
             t0_eff,  # T_0 (effective)
@@ -346,104 +354,52 @@ class Burn:
         return 0.5 * (1.0 + math.cos(float(angle)))
 
     def evaluate_Cf(self, chamber_pressure):
-        """Calculation of the engine's thrust coefficient.
-
-        Source:
-        Rogers, RasAero: The Solid Rocket Motor - Part 4 - Departures
-        from Ideal Performance for Conical Nozzles and Bell Nozzles,
-        page 28, eq.(9). High Power Rocketry.
-
-        Args:
-            chamber_pressure (float): current chamber pressure
-
-        Returns:
-            (float): the motor's thrust coefficient for
-            a given chamber pressure
-        """
-        lambda_div = self._nozzle_divergence_factor()
-
+        """Return reported thrust divided by chamber pressure and throat area."""
         if chamber_pressure <= self.environment_pressure:
             self.Cf = 0.0
-            return self.Cf
-        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
-        if not self.is_nozzle_choked(chamber_pressure):
-            thrust = self.evaluate_nozzle_mass_flow(
-                chamber_pressure
-            ) * self.evaluate_exit_velocity(chamber_pressure)
-            self.Cf = lambda_div * thrust / (chamber_pressure * self.motor.nozzle_throat_area)
-            return self.Cf
-
-        self.Cf = lambda_div * (
-            math.sqrt(
-                (2 * k**2 / (k - 1))
-                * math.pow(2 / (k + 1), (k + 1) / (k - 1))
-                * (
-                    1
-                    - math.pow(
-                        self.evaluate_exit_pressure(chamber_pressure)
-                        / chamber_pressure,
-                        (k - 1) / k,
-                    )
-                )
+        else:
+            self.Cf = self.evaluate_thrust(chamber_pressure) / (
+                chamber_pressure * self.motor.nozzle_throat_area
             )
-            + (
-                (
-                    self.evaluate_exit_pressure(chamber_pressure)
-                    - self.environment_pressure
-                )
-                / chamber_pressure
-            )
-            * self.motor.expansion_ratio
-        )
         return self.Cf
 
-    def evaluate_thrust(self, chamber_pressure):
-        """Calculation of engine's thrust.
+    def evaluate_thrust_components(self, chamber_pressure):
+        """Return momentum, pressure, and reported total thrust in newtons.
 
-        Decomposes Cf into momentum and pressure-thrust terms so the nozzle
-        discharge coefficient (Cd) couples mass flow and momentum thrust:
-        only the momentum part is reduced by Cd — pressure thrust arises
-        from the exit-plane pressure differential and is independent of
-        mass flow. This avoids the silent decoupling warned about in
-        RELATORIO_COMPARACAO.md §2.2: when Cd was applied to mdot only (for
-        the energy balance), thrust reported via the analytical Cf·Pc·At
-        never reflected that reduction. Now both the mass flow (used by
-        solve_burn) and the reported thrust move together.
-
-        F = Cd * lambda * Cf_momentum * Pc * At + (Pe - P_amb) * Ae
-          = Cd * (Cf_total - Cf_pressure) * Pc * At + (Pe - P_amb) * Ae
-          = Cd * lambda * Cf * Pc * At + (1 - Cd) * (Pe - P_amb) * Ae
-
-        eta_c is already applied as T_0_ef in _parameters_at_pressure, so
-        it propagates consistently via c*/Ve/Pmax; no explicit eta_c
-        multiplication here (that would double-count it).
-
-        Args:
-            chamber_pressure (float): current chamber pressure
-
-        Returns:
-            float: motor's thrust for a given chamber pressure
+        Ideal momentum includes conical divergence once. The discharge
+        coefficient scales momentum only; eta_Cf scales the summed thrust.
+        Combustion efficiency enters through the effective gas temperature.
         """
         if chamber_pressure <= self.environment_pressure:
-            self.thrust = 0.0
-            return self.thrust
-        _, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
-        lambda_div = self._nozzle_divergence_factor()
-        exit_pressure = self.evaluate_exit_pressure(chamber_pressure)
-        # Momentum thrust — reduced by Cd (real mass flow < ideal).
-        # Cf_momentum (dimensionless form of mdot * Ve / (Pc * At)).
-        Cf_full = self.evaluate_Cf(chamber_pressure)
-        cf_pressure = (exit_pressure - self.environment_pressure
-                       ) / chamber_pressure * self.motor.expansion_ratio
-        cf_momentum = Cf_full - cf_pressure
-        momentum_thrust = self.discharge_coefficient * cf_momentum * (
-            chamber_pressure * self.motor.nozzle_throat_area
+            return {
+                "momentum_ideal_n": 0.0,
+                "momentum_n": 0.0,
+                "pressure_n": 0.0,
+                "total_n": 0.0,
+            }
+        ideal_mass_flow = (
+            self.evaluate_nozzle_mass_flow(chamber_pressure)
+            / self.discharge_coefficient
         )
-        # Pressure thrust — NOT reduced by Cd (it's an exit-plane effect,
-        # not a flow-rate effect).
-        pressure_thrust = (exit_pressure - self.environment_pressure
-                           ) * self.motor.nozzle_exit_area
-        self.thrust = lambda_div * momentum_thrust + pressure_thrust
+        ideal_momentum = (
+            self._nozzle_divergence_factor()
+            * ideal_mass_flow
+            * self.evaluate_exit_velocity(chamber_pressure)
+        )
+        momentum = self.discharge_coefficient * ideal_momentum
+        pressure = (
+            self.evaluate_exit_pressure(chamber_pressure) - self.environment_pressure
+        ) * self.motor.nozzle_exit_area
+        return {
+            "momentum_ideal_n": ideal_momentum,
+            "momentum_n": momentum,
+            "pressure_n": pressure,
+            "total_n": self.eta_Cf * (momentum + pressure),
+        }
+
+    def evaluate_thrust(self, chamber_pressure):
+        """Return thrust with discharge and total-thrust efficiencies applied."""
+        self.thrust = self.evaluate_thrust_components(chamber_pressure)["total_n"]
         return self.thrust
 
     def evaluate_total_impulse(self, thrust_list, time_list):
@@ -541,6 +497,7 @@ class BurnSimulation(Burn):
         tail_off_method="numerical",
         *,
         eta_c: float = 1.0,
+        eta_Cf: float = 1.0,
         discharge_coefficient: float = 1.0,
     ):
         Burn.__init__(
@@ -550,6 +507,7 @@ class BurnSimulation(Burn):
             propellant,
             environment,
             eta_c=eta_c,
+            eta_Cf=eta_Cf,
             discharge_coefficient=discharge_coefficient,
         )
         self.max_step_size = max_step_size

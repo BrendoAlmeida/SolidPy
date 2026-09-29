@@ -2,7 +2,7 @@
 
 Verifica que:
   1. compute_static_features retorna grandezas fisicamente plausíveis.
-  2. eta_c escala o thrust corretamente em Burn.evaluate_thrust().
+  2. eta_c altera temperatura, vazão e velocidade de saída de forma consistente.
   3. compute_burn_area_curve produz curvas monotônicas para tubular e
      não-monotônicas (pico inicial) para star.
   4. static_features_to_dict é serializável.
@@ -129,15 +129,9 @@ class TestEtaC:
         thrust_90 = burn_90.evaluate_thrust(P)
         assert thrust_ideal == pytest.approx(thrust_90, rel=1e-9)
 
-    def test_eta_c_zero_keeps_thrust_finite(
-        self, tubular_grain, motor, kndx_propellant
-    ):
-        # eta_c=0 collapses T_0 but Cf is still well-defined (pure pressure
-        # ratios). The result is finite; we don't assert zero — that was the
-        # deprecated linear-model assertion.
-        burn = Burn(tubular_grain, motor, kndx_propellant, eta_c=0.0)
-        result = burn.evaluate_thrust(3.5e6)
-        assert math.isfinite(result)
+    def test_eta_c_zero_is_invalid(self, tubular_grain, motor, kndx_propellant):
+        with pytest.raises(ValueError, match="eta_c"):
+            Burn(tubular_grain, motor, kndx_propellant, eta_c=0.0)
 
 
 # ---------------------------------------------------------------------------
