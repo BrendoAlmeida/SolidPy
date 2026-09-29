@@ -40,6 +40,7 @@ from .Grain import Grain
 from .Motor import Motor
 from .Propellant import Propellant, build_cea_properties
 from .Burn import Burn, BurnSimulation
+from .AxialFlow import evaluate_axial_mass_flux, compare_axial_diagnostics
 from .BurnEmpirical import BurnEmpirical
 from .Environment import Environment
 from .Rail import Rail
@@ -84,8 +85,7 @@ from .TwoPhaseFlow import (
     estimate_two_phase_isp_loss,
 )
 
-# Physics export surface for external ML pipelines (e.g. MotorTransformer's
-# PINN-lite surrogate). No extra dependencies beyond core (numpy only).
+# Physics feature exports use the core NumPy dependency.
 from .surrogate_physics import (
     BurnAreaCurve,
     SurrogateStaticFeatures,

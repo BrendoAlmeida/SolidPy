@@ -152,6 +152,41 @@ and `max_axial_mass_flux_grain_index`. Temporal/spatial convergence is recorded.
 Until thresholds are calibrated, axial flux is diagnostic and does not reject
 physical validity or modify the erosive-burning law.
 
+`evaluate_axial_mass_flux(motor, result["history"], stations_per_grain=5,
+nozzle_direction="negative", flow_arrangement="single_outlet")` evaluates
+the independent `source_accumulation_single_outlet_v1` backend. The station
+count must be an integer >=2; `positive` reverses the outlet direction.
+Split-flow arrangements are rejected. Stations run from upstream toward the
+outlet and retain input grain indices and reproducible station IDs. Positions
+move with regressing end faces; inhibited faces keep their original coordinates.
+After a grain exhausts axially or radially, its station cross-section uses the
+chamber area rather than a remaining bore restriction.
+
+Lateral gas generation is distributed uniformly over each instantaneous grain
+length. Burning end faces contribute two equal point sources in proportion to
+their share of the canonical burn area. Endpoint stations include the
+outlet-side trace of each face source. Igniter gas enters at the closed upstream
+end. The diagnostic declares that spatial gas accumulation and drainage are
+unmodeled: its source-throughput profile can differ from nozzle discharge
+during pressurization and is zero during source-free blowdown, even while the
+nozzle still ejects stored gas. It is not a transient spatial flow solution.
+
+The diagnostic returns `time_s` with shape `(time,)` and `positions_m`,
+`port_area_m2`, `mdot_axial_kg_s`, and `mass_flux_kg_m2_s` with shape `(time, stations)`, plus
+station metadata, source decomposition, assumptions, and `metrics`. Its maximum
+records time/station array indices, station ID, position, and input grain index.
+Status remains `uncalibrated_diagnostic`; convergence starts `not_evaluated`.
+
+`compare_axial_diagnostics(coarse, refined)` reports measured temporal peak
+deltas and profile errors at matching stations on their common time interval.
+Peak deltas use each entire sampled history. Temporal interpolation retains
+sampling error near source discontinuities. Spatial peak errors compare sampled
+maxima with outlet endpoint maxima: for this backend the interior source profile
+is affine, its port area is constant within each grain, and sources are
+nonnegative, so endpoint sampling captures the exact spatial maximum. Both
+station counts and the numerical scale floor accompany the report. No calibrated
+acceptance threshold or physical validity gate is applied.
+
 ## Mass, structure, and robustness
 
 Dry mass sums modeled casing, liner, and nozzle components; initial motor mass
