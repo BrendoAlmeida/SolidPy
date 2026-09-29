@@ -203,6 +203,15 @@ def build_detailed_ballistics(
         if max_time_points is not None:
             count = min(count, max(int(max_time_points), 2))
         time_s = np.linspace(float(raw_time[0]), float(raw_time[-1]), count)
+        burnout_times = simulation.result["metrics"]["grain_burnout_times_s"]
+        available = list(range(1, count - 1))
+        for event_time in sorted({float(t) for t in burnout_times if t is not None}):
+            if not available or not raw_time[0] < event_time < raw_time[-1]:
+                continue
+            index = min(available, key=lambda i: abs(time_s[i] - event_time))
+            time_s[index] = event_time
+            available.remove(index)
+        time_s.sort()
         chamber_pressure_pa = _linear_endpoint_clamped(time_s, raw_time, raw_pressure)
         free_volume_m3 = _linear_endpoint_clamped(time_s, raw_time, raw_free_volume)
         regressed_length_m = _linear_endpoint_clamped(time_s, raw_time, raw_regression)

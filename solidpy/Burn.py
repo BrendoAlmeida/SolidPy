@@ -5,6 +5,11 @@ _copyright_ = "MIT"
 _license_ = ""
 
 import math
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+from types import SimpleNamespace
 from numbers import Real
 import numpy as np
 import matplotlib.pyplot as plt
@@ -83,6 +88,15 @@ class Burn:
             raise ValueError(f"{name} must be a finite real number in (0, 1]")
         return value
 
+    @staticmethod
+    def _validate_temperature(value):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("chamber_temperature must be a finite positive real number")
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("chamber_temperature must be a finite positive real number")
+        return value
+
     @property
     def applied_efficiencies(self):
         """Return the resolved efficiency values used by the burn model."""
@@ -118,7 +132,7 @@ class Burn:
             self.motor.nozzle_throat_area,  # A_t
         )
 
-    def evaluate_nozzle_mass_flow(self, chamber_pressure):
+    def evaluate_nozzle_mass_flow(self, chamber_pressure, *, chamber_temperature=None):
         """Calculation of total nozzle mass flow.
 
         Source:
@@ -130,10 +144,14 @@ class Burn:
         Returns:
             float: nozzle mass flow for the specified chamber pressure
         """
+        if chamber_temperature is not None:
+            self._validate_temperature(chamber_temperature)
         if chamber_pressure <= self.environment_pressure:
             return 0.0
 
         T_0, R, _, k, A_t = self._parameters_at_pressure(chamber_pressure)
+        if chamber_temperature is not None:
+            T_0 = self._validate_temperature(chamber_temperature)
         pressure_ratio = self.environment_pressure / chamber_pressure
         critical_pressure_ratio = math.pow(2 / (k + 1), k / (k - 1))
 
@@ -278,7 +296,7 @@ class Burn:
         )
         return self.exit_pressure
 
-    def evaluate_exit_temperature(self, chamber_pressure=None):
+    def evaluate_exit_temperature(self, chamber_pressure=None, *, chamber_temperature=None):
         """Calculation of fluid temperature at nozzle exit.
 
         Source:
@@ -288,6 +306,8 @@ class Burn:
             float: exit temperature
         """
         T_0, _, _, k, _ = self._parameters_at_pressure(chamber_pressure)
+        if chamber_temperature is not None:
+            T_0 = self._validate_temperature(chamber_temperature)
         if chamber_pressure is not None and not self.is_nozzle_choked(
             chamber_pressure
         ):
@@ -304,7 +324,7 @@ class Burn:
         )
         return self.exit_temperature
 
-    def evaluate_exit_velocity(self, chamber_pressure=None):
+    def evaluate_exit_velocity(self, chamber_pressure=None, *, chamber_temperature=None):
         """Calculation of fluid velocity at nozzle exit.
 
         Source:
@@ -314,6 +334,8 @@ class Burn:
             float: exit velocity
         """
         T_0, R, _, k, _ = self._parameters_at_pressure(chamber_pressure)
+        if chamber_temperature is not None:
+            T_0 = self._validate_temperature(chamber_temperature)
         if chamber_pressure is not None and not self.is_nozzle_choked(
             chamber_pressure
         ):
@@ -338,7 +360,7 @@ class Burn:
             return self.exit_velocity
 
         self.exit_velocity = self.evaluate_exit_mach(chamber_pressure) * math.sqrt(
-            k * R * self.evaluate_exit_temperature(chamber_pressure)
+            k * R * self.evaluate_exit_temperature(chamber_pressure, chamber_temperature=chamber_temperature)
         )
         return self.exit_velocity
 
@@ -353,23 +375,27 @@ class Burn:
             return 1.0
         return 0.5 * (1.0 + math.cos(float(angle)))
 
-    def evaluate_Cf(self, chamber_pressure):
+    def evaluate_Cf(self, chamber_pressure, *, chamber_temperature=None):
         """Return reported thrust divided by chamber pressure and throat area."""
+        if chamber_temperature is not None:
+            self._validate_temperature(chamber_temperature)
         if chamber_pressure <= self.environment_pressure:
             self.Cf = 0.0
         else:
-            self.Cf = self.evaluate_thrust(chamber_pressure) / (
+            self.Cf = self.evaluate_thrust(chamber_pressure, chamber_temperature=chamber_temperature) / (
                 chamber_pressure * self.motor.nozzle_throat_area
             )
         return self.Cf
 
-    def evaluate_thrust_components(self, chamber_pressure):
+    def evaluate_thrust_components(self, chamber_pressure, *, chamber_temperature=None):
         """Return momentum, pressure, and reported total thrust in newtons.
 
         Ideal momentum includes conical divergence once. The discharge
         coefficient scales momentum only; eta_Cf scales the summed thrust.
         Combustion efficiency enters through the effective gas temperature.
         """
+        if chamber_temperature is not None:
+            self._validate_temperature(chamber_temperature)
         if chamber_pressure <= self.environment_pressure:
             return {
                 "momentum_ideal_n": 0.0,
@@ -378,13 +404,13 @@ class Burn:
                 "total_n": 0.0,
             }
         ideal_mass_flow = (
-            self.evaluate_nozzle_mass_flow(chamber_pressure)
+            self.evaluate_nozzle_mass_flow(chamber_pressure, chamber_temperature=chamber_temperature)
             / self.discharge_coefficient
         )
         ideal_momentum = (
             self._nozzle_divergence_factor()
             * ideal_mass_flow
-            * self.evaluate_exit_velocity(chamber_pressure)
+            * self.evaluate_exit_velocity(chamber_pressure, chamber_temperature=chamber_temperature)
         )
         momentum = self.discharge_coefficient * ideal_momentum
         pressure = (
@@ -397,9 +423,9 @@ class Burn:
             "total_n": self.eta_Cf * (momentum + pressure),
         }
 
-    def evaluate_thrust(self, chamber_pressure):
+    def evaluate_thrust(self, chamber_pressure, *, chamber_temperature=None):
         """Return thrust with discharge and total-thrust efficiencies applied."""
-        self.thrust = self.evaluate_thrust_components(chamber_pressure)["total_n"]
+        self.thrust = self.evaluate_thrust_components(chamber_pressure, chamber_temperature=chamber_temperature)["total_n"]
         return self.thrust
 
     def evaluate_total_impulse(self, thrust_list, time_list):
@@ -415,6 +441,8 @@ class Burn:
             float: the total impulse correspondent to the integral of
             the given values
         """
+        if len(time_list) < 2:
+            return 0.0
         total_impulse = cumulative_trapezoid(thrust_list, time_list)[-1]
         return total_impulse
 
@@ -499,6 +527,10 @@ class BurnSimulation(Burn):
         eta_c: float = 1.0,
         eta_Cf: float = 1.0,
         discharge_coefficient: float = 1.0,
+        rtol: float = 1e-8,
+        atol: float = 1e-10,
+        burn_timeout_s: float = 100.0,
+        tail_off_timeout_s: float = 100.0,
     ):
         Burn.__init__(
             self,
@@ -510,23 +542,41 @@ class BurnSimulation(Burn):
             eta_Cf=eta_Cf,
             discharge_coefficient=discharge_coefficient,
         )
-        self.max_step_size = max_step_size
+        self.max_step_size = self._positive_setting("max_step_size", max_step_size)
+        self.rtol = self._positive_setting("rtol", rtol)
+        self.atol = self._positive_setting("atol", atol)
+        self.burn_timeout_s = self._positive_setting("burn_timeout_s", burn_timeout_s)
+        self.tail_off_timeout_s = self._positive_setting("tail_off_timeout_s", tail_off_timeout_s)
         self.igniter_mass_flow = igniter_mass_flow
-        self.igniter_burn_time = max(float(igniter_burn_time), 0.0)
+        self.igniter_burn_time = self._nonnegative_setting("igniter_burn_time", igniter_burn_time)
         self.igniter_temperature = (
-            propellant.combustion_temperature
+            self._parameters_at_pressure(self.environment_pressure)[0]
             if igniter_temperature is None
-            else float(igniter_temperature)
+            else igniter_temperature
         )
+        self.igniter_temperature = self._positive_setting("igniter_temperature", self.igniter_temperature)
         self.burn_area_activation = burn_area_activation
-        self.ignition_ramp_time = max(float(ignition_ramp_time), 0.0)
+        self.ignition_ramp_time = self._nonnegative_setting("ignition_ramp_time", ignition_ramp_time)
         self.tail_off_method = str(tail_off_method).lower()
+        if self.tail_off_method not in {"numerical", "analytical"}:
+            raise ValueError("tail_off_method must be numerical or analytical")
+        self._burnout_times = [None] * len(self.motor.grains)
+        for name, value in (("propellant_density", propellant.density),
+                            ("gas_constant", propellant.products_constant),
+                            ("combustion_temperature", propellant.combustion_temperature)):
+            self._positive_setting(name, value)
+        self._positive_setting("effective_combustion_temperature", self._parameters_at_pressure(self.environment_pressure)[0])
+        if not math.isfinite(propellant.specific_heat_ratio) or propellant.specific_heat_ratio <= 1.0:
+            raise ValueError("specific_heat_ratio must be finite and greater than one")
+        self._validate_source_profiles()
+        self._termination_reason = "burn_timeout"
 
         self.grain_burn_solution = self.evaluate_grain_burn_solution()
         self.tail_off_solution = (
             self.evaluate_tail_off_solution() if tail_off_evaluation else None
         )
         self.total_burn_solution = self.evaluate_complete_solution()
+        self.result = self._build_result(tail_off_evaluation)
 
     """Solver required functions"""
 
@@ -542,9 +592,14 @@ class BurnSimulation(Burn):
         if source is None:
             return 0.0
         if callable(source):
-            return max(float(source(time)), 0.0)
+            if self.igniter_burn_time > 0 and time >= self.igniter_burn_time:
+                return 0.0
+            value = float(source(time))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError("igniter_mass_flow callable must return finite non-negative values")
+            return value
         if np.isscalar(source):
-            if self.igniter_burn_time <= 0.0 or time > self.igniter_burn_time:
+            if self.igniter_burn_time <= 0.0 or time >= self.igniter_burn_time:
                 return 0.0
             return max(float(source), 0.0)
 
@@ -556,7 +611,7 @@ class BurnSimulation(Burn):
 
         profile_time = profile[:, 0]
         profile_mass_flow = profile[:, 1]
-        if time < profile_time[0] or time > profile_time[-1]:
+        if time < profile_time[0] or time >= profile_time[-1]:
             return 0.0
         return max(float(np.interp(time, profile_time, profile_mass_flow)), 0.0)
 
@@ -580,6 +635,8 @@ class BurnSimulation(Burn):
                 activation = source(time, regressed_length)
             except TypeError:
                 activation = source(time)
+            if not math.isfinite(float(activation)):
+                raise ValueError("burn_area_activation callable must return finite values")
             return min(max(float(activation), 0.0), 1.0)
         if np.isscalar(source):
             return min(max(float(source), 0.0), 1.0)
@@ -599,347 +656,488 @@ class BurnSimulation(Burn):
         activation = np.interp(time, profile_time, profile_activation)
         return min(max(float(activation), 0.0), 1.0)
 
+    @staticmethod
+    def _positive_setting(name, value):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{name} must be a finite positive real number")
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be a finite positive real number")
+        return value
+
+    @staticmethod
+    def _nonnegative_setting(name, value):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{name} must be a finite non-negative real number")
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be a finite non-negative real number")
+        return value
+
+    def _validate_source_profiles(self):
+        if not math.isfinite(self.igniter_burn_time):
+            raise ValueError("igniter_burn_time must be finite")
+        if not math.isfinite(self.ignition_ramp_time):
+            raise ValueError("ignition_ramp_time must be finite")
+        for name in ("igniter_mass_flow", "burn_area_activation"):
+            source = getattr(self, name)
+            if source is None or callable(source):
+                continue
+            if np.isscalar(source):
+                value = self._nonnegative_setting(name, source)
+                if name == "burn_area_activation" and value > 1.0:
+                    raise ValueError("burn_area_activation must not exceed 1")
+                continue
+            profile = np.asarray(source, dtype=float)
+            if (profile.ndim != 2 or profile.shape[1] != 2 or len(profile) < 2
+                    or not np.all(np.isfinite(profile)) or np.any(np.diff(profile[:, 0]) <= 0)
+                    or np.any(profile < 0)):
+                raise ValueError(f"{name} table must have increasing non-negative time and finite non-negative values")
+            if name == "burn_area_activation" and np.any(profile[:, 1] > 1.0):
+                raise ValueError("burn_area_activation must not exceed 1")
+
+    def _source_end_time(self):
+        source = self.igniter_mass_flow
+        if source is None:
+            return 0.0
+        if callable(source) or np.isscalar(source):
+            return self.igniter_burn_time
+        return float(np.asarray(source)[-1, 0])
+
+    def _source_breakpoints(self, start, stop):
+        points = [stop]
+        for name in ("igniter_mass_flow", "burn_area_activation"):
+            source = getattr(self, name)
+            if source is not None and not callable(source) and not np.isscalar(source):
+                points.extend(np.asarray(source, dtype=float)[:, 0])
+        points.extend([self._source_end_time(), self.ignition_ramp_time])
+        return sorted(set(float(t) for t in points if start < t <= stop))
+
+    def _state_quantities(self, time, state, active=None):
+        n = len(self.motor.grains)
+        regressions = np.asarray(state[2:2 + n])
+        remaining = sum(g.calculate_remaining_volume(r) for g, r in zip(self.motor.grains, regressions))
+        volume = self.motor.chamber_volume - remaining
+        gas_mass = max(float(state[0]), np.finfo(float).tiny)
+        thermal_inventory = max(float(state[1]), np.finfo(float).tiny)
+        temperature = thermal_inventory / gas_mass
+        pressure = self.propellant.products_constant * thermal_inventory / volume
+        pressure_for_rate = max(pressure, self.environment_pressure)
+        if active is None:
+            active = regressions < np.asarray([g.burnout_regression_m for g in self.motor.grains])
+        areas = np.asarray([
+            g.evaluate_burn_area(min(max(float(r), 0.0), np.nextafter(g.burnout_regression_m, 0.0)))
+            if is_active else 0.0
+            for g, r, is_active in zip(self.motor.grains, regressions, active)
+        ])
+        activation = self.evaluate_burn_area_activation(time, float(np.mean(regressions)))
+        port_area = np.mean([g.evaluate_port_area(r) for g, r in zip(self.motor.grains, regressions)])
+        nozzle_flow = self.evaluate_nozzle_mass_flow(pressure, chamber_temperature=temperature)
+        port_mass_flux = 0.5 * nozzle_flow / max(float(port_area), 1e-9)
+        burn_rate = self.propellant.evaluate_burn_rate(pressure_for_rate, port_mass_flux) if np.any(active) else 0.0
+        regression_rates = np.asarray(active, dtype=float) * burn_rate * activation
+        if not math.isfinite(float(burn_rate)) or burn_rate < 0:
+            raise ValueError("propellant burn rate must be finite and non-negative")
+        generated_grains = self.propellant.density * areas * regression_rates
+        igniter_flow = self.evaluate_igniter_mass_flow(time)
+        components = self.evaluate_thrust_components(pressure, chamber_temperature=temperature)
+        return {
+            "pressure": pressure, "volume": volume, "temperature": temperature,
+            "regressions": regressions, "regression_rates": regression_rates,
+            "areas": areas * activation, "generated_grains": generated_grains,
+            "generated": float(np.sum(generated_grains)), "igniter": igniter_flow,
+            "nozzle": nozzle_flow, "components": components,
+        }
+
+    def _conservative_rhs(self, time, state, active):
+        q = self._state_quantities(time, state, active)
+        source_temperature = self._parameters_at_pressure(q["pressure"])[0]
+        mass_rate = q["generated"] + q["igniter"] - q["nozzle"]
+        thermal_rate = (q["generated"] * source_temperature
+                        + q["igniter"] * self.igniter_temperature
+                        - q["nozzle"] * q["temperature"])
+        unscaled_thrust = q["components"]["momentum_n"] + q["components"]["pressure_n"]
+        return [mass_rate, thermal_rate, *q["regression_rates"],
+                q["generated"], q["igniter"], q["nozzle"], unscaled_thrust,
+                q["pressure"] * self.motor.nozzle_throat_area]
+
     def vector_field(self, time, state_variables):
-        """Vector field for the ODE state [P, V, r_0, r_1, ..., r_{n-1}].
+        """Return derivatives for the legacy pressure, volume, regression state.
 
-        Each grain carries its own regression distance r_i so grains with
-        different geometries can burn out independently. All grains share
-        the same pressure-dependent burn rate (same propellant).
-
-        Args:
-            time (float): current time
-            state_variables (sequence): [chamber_pressure, free_volume,
-                r_grain_0, r_grain_1, ..., r_grain_{n-1}]
-
-        Returns:
-            list: time-derivatives of each state variable
+        The canonical solver separately integrates gas mass and a prescribed
+        source-temperature mixing inventory. This compatibility entry point
+        assumes the effective combustion temperature at the supplied state.
         """
-        n_grains = len(self.motor.grains)
-        chamber_pressure = state_variables[0]
-        # Solve_ivp (RK45/DOP853) may probe negative chamber pressures
-        # during rejected trial steps; without a floor, evaluate_burn_rate
-        # raises ValueError: math domain error (math.pow(negative**fraction)).
-        # This is the same guard the HTML applies at html_physics.js:173
-        # (Pnew = P5 < Pamb ? Pamb : P5). 6-8 of 180 test designs crashed here.
-        chamber_pressure = max(float(chamber_pressure), self.environment_pressure)
-        free_volume = state_variables[1]
-        per_grain_regression = list(state_variables[2:2 + n_grains])
+        n = len(self.motor.grains)
+        pressure = max(float(state_variables[0]), self.environment_pressure)
+        volume = float(state_variables[1])
+        temperature, gas_constant, density, _, _ = self._parameters_at_pressure(pressure)
+        regressions = state_variables[2:2 + n]
+        geometric_volume = self.motor.chamber_volume - sum(g.calculate_remaining_volume(r) for g, r in zip(self.motor.grains, regressions))
+        mass = pressure * geometric_volume / (gas_constant * temperature)
+        state = [mass, mass * temperature, *state_variables[2:2 + n], *([0.0] * 5)]
+        q = self._state_quantities(time, state)
+        dv_dt = q["generated"] / density
+        thermal_rate = (q["generated"] * temperature + q["igniter"] * self.igniter_temperature
+                        - q["nozzle"] * temperature)
+        dp_dt = (gas_constant * thermal_rate - pressure * dv_dt) / volume
+        return [dp_dt, dv_dt, *q["regression_rates"]]
 
-        T_0, R, rho_g, _, _ = self._parameters_at_pressure(chamber_pressure)
-        rho_0 = chamber_pressure / (R * T_0)
-        nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
-        igniter_mass_flow = self.evaluate_igniter_mass_flow(time)
+    @staticmethod
+    def _join_segments(segments):
+        times, states = [], []
+        for segment in segments:
+            start = 1 if times else 0
+            times.extend(segment.t[start:])
+            states.extend(segment.y[:, start:].T)
+        return np.asarray(times), np.asarray(states).T
 
-        # Representative regression for activation/area calls that expect scalar.
-        mean_regression = sum(per_grain_regression) / max(n_grains, 1)
-        geometric_burn_area = self.compute_total_burn_area(per_grain_regression)
-        burn_area = geometric_burn_area * self.evaluate_burn_area_activation(
-            time, mean_regression
-        )
+    def _integrate_stage(self, start, stop, state, active, cutoff=None, *, stop_after_burnout=True):
+        segments = []
+        success = True
+        reached_cutoff = False
+        for boundary in self._source_breakpoints(start, stop):
+            while start < boundary:
+                events = []
+                grain_event_indices = []
+                for index in np.flatnonzero(active):
+                    def burnout(time, y, index=index):
+                        return y[2 + index] - self.motor.grains[index].burnout_regression_m
+                    burnout.terminal = True
+                    burnout.direction = 1
+                    events.append(burnout)
+                    grain_event_indices.append(index)
+                if cutoff is not None:
+                    def end_blowdown(time, y):
+                        return self._state_quantities(time, y, active)["pressure"] - cutoff
+                    end_blowdown.terminal = True
+                    end_blowdown.direction = -1
+                    events.append(end_blowdown)
+                def rhs(time, y):
+                    source_time = np.nextafter(boundary, -np.inf) if time >= boundary else time
+                    return self._conservative_rhs(source_time, y, active)
+                raw = solve_ivp(
+                    rhs, (start, boundary), state, method="DOP853", events=events or None,
+                    max_step=self.max_step_size, rtol=self.rtol, atol=self.atol,
+                )
+                segments.append(raw)
+                state = raw.y[:, -1].copy()
+                previous = start
+                start = float(raw.t[-1])
+                if not raw.success:
+                    success = False
+                    break
+                if raw.status == 1:
+                    if cutoff is not None and len(raw.t_events[-1]):
+                        reached_cutoff = True
+                        break
+                    tolerance = 64 * np.finfo(float).eps
+                    for index in grain_event_indices:
+                        depth = self.motor.grains[index].burnout_regression_m
+                        if state[2 + index] >= depth * (1 - tolerance):
+                            state[2 + index] = depth
+                            active[index] = False
+                            self._burnout_times[index] = start
+                    raw.y[:, -1] = state
+                    if stop_after_burnout and not np.any(active):
+                        break
+                if start <= previous and np.any(active):
+                    success = False
+                    break
+            if not success or reached_cutoff or (stop_after_burnout and not np.any(active)):
+                break
+        if not segments:
+            segments = [SimpleNamespace(t=np.asarray([start]), y=np.asarray(state)[:, None])]
+        times, states = self._join_segments(segments)
+        return SimpleNamespace(t=times, y=states, success=success, reached_cutoff=reached_cutoff)
 
-        # Port mass flux G for the Lenoir-Robillard erosive model.
-        # Use the mean port area across all grains; star grains include slot area.
-        total_port_area = sum(
-            g.evaluate_port_area(r)
-            for g, r in zip(self.motor.grains, per_grain_regression)
-        )
-        port_area = total_port_area / max(n_grains, 1)
-        # 0D spatial-average correction: assume mass flux grows linearly from
-        # zero at the bulkhead to ṁ_nozzle/A_port at the nozzle entrance.
-        port_mass_flux = 0.5 * nozzle_mass_flow / max(port_area, 1e-9)
-
-        burn_rate = self.propellant.evaluate_burn_rate(chamber_pressure, port_mass_flux)
-
-        dp_dt = (
-            (
-                burn_area * burn_rate * (rho_g - rho_0)
-                + igniter_mass_flow * self.igniter_temperature / T_0
-                - nozzle_mass_flow
-            )
-            * R
-            * T_0
-            / free_volume
-        )
-        dv_dt = burn_area * burn_rate
-        # Each grain regresses at the same burn rate (same propellant, same P).
-        dr_dt = [burn_rate] * n_grains
-
-        return [dp_dt, dv_dt] + dr_dt
+    def _public_solution(self, raw):
+        quantities = [self._state_quantities(t, y) for t, y in zip(raw.t, raw.y.T)]
+        regression = raw.y[2:2 + len(self.motor.grains)]
+        temperatures = np.asarray([q["temperature"] for q in quantities])
+        pressure = np.asarray([q["pressure"] for q in quantities])
+        volume = np.asarray([q["volume"] for q in quantities])
+        return [raw.t, pressure, volume, np.mean(regression, axis=0),
+                *self.process_solution(pressure, temperatures)]
 
     def solve_burn(self):
-        """Initial conditions setting and solver instantiation.
-
-        State vector: [chamber_pressure, free_volume, r_0, r_1, ..., r_{n-1}]
-        where r_i is the regression distance for each grain.
-
-        Returns:
-            object: solution object from solve_ivp
-        """
-        n_grains = len(self.motor.grains)
-        state_variables = (
-            [self.environment_pressure, self.motor.free_volume]
-            + [0.0] * n_grains
-        )
-
-        def end_burn_propellant(time, state_variables):
-            free_volume = state_variables[1]
-            per_grain_regression = list(state_variables[2:2 + n_grains])
-            if (self.motor.chamber_volume - free_volume < 1e-6) or (
-                self.compute_total_burn_area(per_grain_regression) <= 0.0
-            ):
-                return 0
-            return 1
-
-        end_burn_propellant.terminal = True
-
-        solution = solve_ivp(
-            self.vector_field,
-            (0.0, 100.0),
-            state_variables,
-            method="DOP853",
-            events=end_burn_propellant,
-            max_step=max(float(self.max_step_size), 1e-6),
-            atol=1e-8,
-            rtol=1e-10,
-        )
-
-        return solution
+        """Integrate source burning with independent terminal grain events."""
+        self._burnout_times = [None] * len(self.motor.grains)
+        temperature, gas_constant, _, _, _ = self._parameters_at_pressure(self.environment_pressure)
+        mass = self.environment_pressure * self.motor.free_volume / (gas_constant * temperature)
+        n = len(self.motor.grains)
+        initial = [mass, mass * temperature, *([0.0] * n), *([0.0] * 5)]
+        self.initial_gas_temperature_k = temperature
+        self._gas_mass_initial = mass
+        self._burn_raw = self._integrate_stage(0.0, self.burn_timeout_s, initial, np.ones(n, dtype=bool))
+        if not self._burn_raw.success:
+            self._termination_reason = "solver_failure"
+        elif all(t is not None for t in self._burnout_times):
+            self._termination_reason = "propellant_burnout"
+        else:
+            self._termination_reason = "burn_timeout"
+        public = self._public_solution(self._burn_raw)
+        return SimpleNamespace(t=self._burn_raw.t, y=np.vstack(public[1:3] + list(self._burn_raw.y[2:2 + n])),
+                               success=self._burn_raw.success, conservative_state=self._burn_raw.y)
 
     def solve_tail_off_regime(self):
-        """Evaluate the chamber gas depressurization after total grain burn.
-
-        Returns:
-            list: solution of the tail off regime, grouping time steps
-            and chamber pressure
-        """
         if self.tail_off_method == "analytical":
             return self.solve_analytical_tail_off_regime()
-        if self.tail_off_method != "numerical":
-            raise ValueError("tail_off_method must be 'numerical' or 'analytical'")
         return self.solve_numerical_tail_off_regime()
 
     def solve_analytical_tail_off_regime(self):
-        """Evaluate the original choked-flow analytical tail-off model."""
-
-        # Set initial values at the end of grain burn simulation
-        (
-            self.initial_tail_off_time,
-            self.initial_tail_off_chamber_pressure,
-            self.initial_tail_off_free_volume,
-        ) = (
-            self.grain_burn_solution[0][-1],
-            self.grain_burn_solution[1][-1],
-            self.grain_burn_solution[2][-1],
-        )
-
-        T_0, R, _, _, A_t = self._parameters_at_pressure(
-            self.initial_tail_off_chamber_pressure
-        )
-        cstar = self.propellant.get_cstar(self.initial_tail_off_chamber_pressure)
-
-        # Analytical solution to the fluid behavior after grain burn
-        self.evaluate_tail_off_chamber_pressure = (
-            lambda time: self.initial_tail_off_chamber_pressure
-            * math.exp(
-                -R
-                * T_0
-                * A_t
-                / (self.initial_tail_off_free_volume * cstar)
-                * (time - self.initial_tail_off_time)
-            )
-        )
-
-        # Keep the same time pacing for uniform union with burn solution
-        time_steps = np.linspace(
-            self.initial_tail_off_time,
-            100.0,
-            int((100.0 - self.initial_tail_off_time) / self.max_step_size),
-        )
-
-        tail_off_time = []
-        tail_off_chamber_pressure = []
-        tail_off_free_volume = []
-        tail_off_regressed_length = []
-
-        for time in time_steps:
-            chamber_pressure = self.evaluate_tail_off_chamber_pressure(time)
-            if chamber_pressure / self.environment_pressure > 1.0001:
-                tail_off_time.append(time)
-                tail_off_chamber_pressure.append(chamber_pressure)
-                tail_off_free_volume.append(self.motor.chamber_volume)
-                tail_off_regressed_length.append(
-                    self.grain_burn_solution[3][-1]
-                )
-            else:
-                break
-
-        self.tail_off_solution = [
-            tail_off_time,
-            tail_off_chamber_pressure,
-            tail_off_free_volume,
-            tail_off_regressed_length,
-        ]
-
-        return self.tail_off_solution
+        """Retain a sampled isothermal exponential approximation for legacy use."""
+        start = float(self._burn_raw.t[-1])
+        state = self._burn_raw.y[:, -1]
+        q = self._state_quantities(start, state)
+        coefficient = (self.propellant.products_constant * q["temperature"] * self.motor.nozzle_throat_area
+                       * self.discharge_coefficient / (self.propellant.get_cstar(q["pressure"]) * self.eta_c))
+        peak = max(self.grain_burn_solution[1])
+        cutoff = self.environment_pressure + 0.01 * max(peak - self.environment_pressure, 0.0)
+        duration = min(self.tail_off_timeout_s, max(q["volume"] / coefficient * math.log(max(q["pressure"] / max(cutoff, 1.0), 1.0)), 0.0))
+        time = (np.linspace(start, start + duration, max(2, int(math.ceil(duration / self.max_step_size)) + 1))
+                if duration > 0 else np.asarray([start]))
+        pressure = q["pressure"] * np.exp(-coefficient * (time - start) / q["volume"])
+        mass = pressure * q["volume"] / (self.propellant.products_constant * q["temperature"])
+        states = np.repeat(state[:, None], len(time), axis=1)
+        states[0] = mass
+        states[1] = mass * q["temperature"]
+        offset = 2 + len(self.motor.grains)
+        states[offset + 2] += state[0] - mass
+        components = [self.evaluate_thrust_components(p, chamber_temperature=q["temperature"]) for p in pressure]
+        thrust = [c["momentum_n"] + c["pressure_n"] for c in components]
+        states[offset + 3] += cumulative_trapezoid(thrust, time, initial=0.0)
+        states[offset + 4] += cumulative_trapezoid(pressure * self.motor.nozzle_throat_area, time, initial=0.0)
+        self._tail_raw = SimpleNamespace(t=time, y=states, success=True, reached_cutoff=False)
+        self._termination_reason = "analytical_approximation"
+        return self._public_solution(self._tail_raw)[:4]
 
     def solve_numerical_tail_off_regime(self):
-        """Numerically integrate post-burn chamber blowdown."""
-        initial_time = self.grain_burn_solution[0][-1]
-        initial_chamber_pressure = self.grain_burn_solution[1][-1]
-        free_volume = self.motor.chamber_volume
-        regressed_length = self.grain_burn_solution[3][-1]
+        """Continue all gas inventories until the 1% peak gauge-pressure event."""
+        start = float(self._burn_raw.t[-1])
+        state = self._burn_raw.y[:, -1].copy()
+        if self._termination_reason != "propellant_burnout":
+            self._tail_raw = SimpleNamespace(t=np.asarray([start]), y=state[:, None], success=False)
+            return self._public_solution(self._tail_raw)[:4]
+        stop = start + self.tail_off_timeout_s
+        active = np.zeros(len(self.motor.grains), dtype=bool)
+        source_end = self._source_end_time()
+        segments = [self._burn_raw]
+        if source_end > start:
+            before = self._integrate_stage(start, min(source_end, stop), state, active, stop_after_burnout=False)
+            segments.append(before)
+            start, state = float(before.t[-1]), before.y[:, -1]
+            if not before.success:
+                self._termination_reason = "solver_failure"
+                self._tail_raw = before
+                return self._public_solution(before)[:4]
+        reference_peak = max(self._state_quantities(t, y)["pressure"] for raw in segments for t, y in zip(raw.t, raw.y.T))
+        self._blowdown_reference_peak = reference_peak
+        cutoff = self.environment_pressure + 0.01 * max(reference_peak - self.environment_pressure, 0.0)
+        self._blowdown_cutoff_pressure = cutoff
+        if start >= stop:
+            after = SimpleNamespace(t=np.asarray([start]), y=state[:, None], success=True, reached_cutoff=False)
+        elif self._state_quantities(start, state)["pressure"] <= cutoff:
+            after = SimpleNamespace(t=np.asarray([start]), y=state[:, None], success=True, reached_cutoff=True)
+        else:
+            after = self._integrate_stage(start, stop, state, active, cutoff=cutoff)
+        tails = segments[1:] + [after]
+        time, states = self._join_segments(tails)
+        self._tail_raw = SimpleNamespace(t=time, y=states, success=after.success, reached_cutoff=after.reached_cutoff)
+        self._termination_reason = ("completed" if after.reached_cutoff else "blowdown_timeout") if after.success else "solver_failure"
+        if callable(self.igniter_mass_flow) and self.igniter_burn_time <= 0:
+            self._termination_reason = "unknown_igniter_duration"
+        return self._public_solution(self._tail_raw)[:4]
 
-        if initial_chamber_pressure <= self.environment_pressure * 1.0001:
-            self.tail_off_solution = [
-                [initial_time],
-                [initial_chamber_pressure],
-                [free_volume],
-                [regressed_length],
-            ]
-            return self.tail_off_solution
-
-        def tail_off_vector(time, state_variables):
-            chamber_pressure = max(float(state_variables[0]), self.environment_pressure)
-            T_0, R, _, _, _ = self._parameters_at_pressure(chamber_pressure)
-            nozzle_mass_flow = self.evaluate_nozzle_mass_flow(chamber_pressure)
-            return [-nozzle_mass_flow * R * T_0 / free_volume]
-
-        def end_tail_off(time, state_variables):
-            return state_variables[0] - self.environment_pressure * 1.0001
-
-        end_tail_off.terminal = True
-        end_tail_off.direction = -1
-
-        solution = solve_ivp(
-            tail_off_vector,
-            (initial_time, 100.0),
-            [initial_chamber_pressure],
-            method="DOP853",
-            events=end_tail_off,
-            max_step=max(float(self.max_step_size), 1e-6),
-            atol=1e-8,
-            rtol=1e-10,
-        )
-
-        tail_off_time = solution.t
-        tail_off_chamber_pressure = solution.y[0]
-        tail_off_free_volume = np.full_like(tail_off_time, free_volume, dtype=float)
-        tail_off_regressed_length = np.full_like(
-            tail_off_time, regressed_length, dtype=float
-        )
-
-        self.tail_off_solution = [
-            tail_off_time,
-            tail_off_chamber_pressure,
-            tail_off_free_volume,
-            tail_off_regressed_length,
-        ]
-
-        return self.tail_off_solution
-
-    def process_solution(self, chamber_pressure_list):
-        """Iteration through the solve_ivp solution in order to compute
-        notable burn characteristics besides the state variables, such as thrust,
-        exit pressure and exit velocity.
-
-        Args:
-            chamber_pressure_list (list): chamber pressure solution
-            evaluated by solve_ivp
-
-        Returns:
-            tuple: thrust, exit pressure and exit velocity lists
-        """
-        thrust_list = []
-        exit_velocity_list = []
-        exit_pressure_list = []
-
-        for chamber_pressure in chamber_pressure_list:
-            thrust_list.append(self.evaluate_thrust(chamber_pressure))
-            exit_velocity_list.append(self.evaluate_exit_velocity(chamber_pressure))
-            exit_pressure_list.append(self.evaluate_exit_pressure(chamber_pressure))
-
-        return thrust_list, exit_pressure_list, exit_velocity_list
+    def process_solution(self, chamber_pressure_list, temperatures=None):
+        if temperatures is None:
+            temperatures = [None] * len(chamber_pressure_list)
+        thrust, exit_pressure, exit_velocity = [], [], []
+        for pressure, temperature in zip(chamber_pressure_list, temperatures):
+            thrust.append(self.evaluate_thrust(pressure, chamber_temperature=temperature))
+            exit_pressure.append(self.evaluate_exit_pressure(pressure))
+            exit_velocity.append(self.evaluate_exit_velocity(pressure, chamber_temperature=temperature))
+        return thrust, exit_pressure, exit_velocity
 
     def evaluate_grain_burn_solution(self):
-        """Adapts solve_ivp results to a simple matrix containing each
-        burn characteristic.
-
-        The returned list layout is:
-          [time, chamber_pressure, free_volume, regressed_length,
-           thrust, exit_pressure, exit_velocity]
-
-        regressed_length is the mean across all grains for backward
-        compatibility. Per-grain regressions are stored in
-        self.per_grain_regression_burn.
-
-        Returns:
-            list: list containing the solution and added burn computations
-        """
-        n_grains = len(self.motor.grains)
-        raw = self.solve_burn()
-
-        # Per-grain regressions: rows 2..2+n_grains of ODE solution.
-        per_grain = [raw.y[2 + i] for i in range(n_grains)]
-        self.per_grain_regression_burn = per_grain
-
-        # Mean regression for downstream backward-compatible output.
-        mean_regression = np.mean(np.vstack(per_grain), axis=0)
-
-        grain_burn_solution = [
-            raw.t,
-            raw.y[0],
-            raw.y[1],
-            mean_regression,
-            *self.process_solution(raw.y[0]),
-        ]
-
-        return grain_burn_solution
+        self.solve_burn()
+        self.per_grain_regression_burn = list(self._burn_raw.y[2:2 + len(self.motor.grains)])
+        return self._public_solution(self._burn_raw)
 
     def evaluate_tail_off_solution(self):
-        """Adapts solve_ivp results to a simple matrix containing each
-        burn characteristic.
-
-        Returns:
-            list: list containing the solution and added burn computations
-        """
-        tail_off_solution = self.solve_tail_off_regime()
-        tail_off_solution = [
-            *tail_off_solution,
-            *self.process_solution(tail_off_solution[1]),
-        ]
-
-        return tail_off_solution
+        self.solve_tail_off_regime()
+        return self._public_solution(self._tail_raw)
 
     def evaluate_complete_solution(self):
-        """Groups both grain burn and tail-off solutions after processing.
+        if self.tail_off_solution is None:
+            return list(self.grain_burn_solution)
+        return [np.concatenate((burn, tail[1:])) for burn, tail in zip(self.grain_burn_solution, self.tail_off_solution)]
 
-        Returns:
-            matrix: contains tail-off and grain burn regime
-        """
-        grain_solution = self.grain_burn_solution
-        tail_off_solution = self.tail_off_solution
-        total_burn_solution = []
+    @staticmethod
+    def _flow_interval(time, flow):
+        indices = np.flatnonzero(flow > 0.0)
+        if not len(indices):
+            return 0.0, 0.0
+        start = float(time[max(int(indices[0]) - 1, 0)])
+        end = float(time[min(int(indices[-1]) + 1, len(time) - 1)])
+        return start, end
 
-        if tail_off_solution:
-            tail_off_start = 0
-            if (
-                len(grain_solution[0]) > 0
-                and len(tail_off_solution[0]) > 0
-                and tail_off_solution[0][0] <= grain_solution[0][-1]
-            ):
-                tail_off_start = 1
+    def _build_result(self, tail_off_evaluation):
+        raws = [self._burn_raw] + ([self._tail_raw] if self.tail_off_solution is not None else [])
+        time, states = self._join_segments(raws)
+        quantities = [self._state_quantities(t, y) for t, y in zip(time, states.T)]
+        def series(key):
+            return np.asarray([q[key] for q in quantities], dtype=float)
+        components = [q["components"] for q in quantities]
+        n = len(self.motor.grains)
+        offset = 2 + n
+        history = {
+            "time_s": time, "chamber_pressure_pa": series("pressure"),
+            "free_volume_m3": series("volume"), "regression_m": states[2:offset].T,
+            "regression_rate_m_s": series("regression_rates"),
+            "burn_area_m2": np.sum(series("areas"), axis=1),
+            "burn_area_grains_m2": series("areas"),
+            "mdot_generated_kg_s": series("generated"),
+            "mdot_generated_grains_kg_s": series("generated_grains"),
+            "mdot_igniter_kg_s": series("igniter"), "mdot_nozzle_kg_s": series("nozzle"),
+            "gas_mass_kg": states[0], "gas_temperature_k": series("temperature"),
+            "thrust_n": np.asarray([c["total_n"] for c in components]),
+            "momentum_ideal_n": np.asarray([c["momentum_ideal_n"] for c in components]),
+            "momentum_n": np.asarray([c["momentum_n"] for c in components]),
+            "pressure_n": np.asarray([c["pressure_n"] for c in components]),
+            "exit_pressure_pa": np.asarray([self.evaluate_exit_pressure(p) for p in series("pressure")]),
+            "exit_velocity_m_s": np.asarray([self.evaluate_exit_velocity(p, chamber_temperature=t) for p, t in zip(series("pressure"), series("temperature"))]),
+            "generated_mass_integral_kg": states[offset],
+            "igniter_mass_integral_kg": states[offset + 1],
+            "nozzle_mass_integral_kg": states[offset + 2],
+            "impulse_integral_ns": states[offset + 3] * self.eta_Cf,
+            "pressure_throat_integral_ns": states[offset + 4],
+        }
+        solid_remaining = sum(g.calculate_remaining_volume(r) for g, r in zip(self.motor.grains, history["regression_m"][-1]))
+        consumed = self.propellant.density * (self.motor.propellant_volume - solid_remaining)
+        generated, igniter, nozzle = (float(states[offset + i, -1]) for i in range(3))
+        residual = consumed + igniter - nozzle - (states[0, -1] - states[0, 0])
+        burn_start, burn_end = self._flow_interval(time, history["mdot_generated_kg_s"])
+        if all(t is not None for t in self._burnout_times):
+            burn_end = max(self._burnout_times)
+        nozzle_start, nozzle_end = self._flow_interval(time, history["mdot_nozzle_kg_s"])
+        burn_duration, nozzle_duration = burn_end - burn_start, nozzle_end - nozzle_start
+        metrics = {
+            "propellant_mass_consumed_kg": float(consumed), "integrated_generated_mass_kg": generated,
+            "generated_mass_integral_kg": generated,
+            "propellant_mass_initial_kg": float(self.motor.propellant_volume * self.propellant.density),
+            "propellant_mass_remaining_kg": float(solid_remaining * self.propellant.density),
+            "propellant_burn_start_s": burn_start, "propellant_burn_end_s": burn_end,
+            "propellant_burn_duration_s": burn_duration,
+            "nozzle_flow_start_s": nozzle_start, "nozzle_flow_end_s": nozzle_end,
+            "nozzle_flow_duration_s": nozzle_duration,
+            "mass_flow_avg_generated_kg_s": generated / burn_duration if burn_duration > 0 else 0.0,
+            "max_generated_mass_flow_kg_s": float(np.max(history["mdot_generated_kg_s"])),
+            "mass_flow_avg_nozzle_kg_s": nozzle / nozzle_duration if nozzle_duration > 0 else 0.0,
+            "max_nozzle_mass_flow_kg_s": float(np.max(history["mdot_nozzle_kg_s"])),
+            "nozzle_mass_integral_kg": nozzle, "igniter_mass_injected_kg": igniter,
+            "gas_mass_initial_kg": float(states[0, 0]), "gas_mass_cutoff_kg": float(states[0, -1]),
+            "other_declared_outflows_kg": 0.0, "mass_balance_residual_kg": float(residual),
+            "mass_flow_balance_error_pct": float(100 * abs(residual) / max(consumed + igniter, 1e-15)),
+            "total_impulse_ns": float(history["impulse_integral_ns"][-1]),
+            "peak_chamber_pressure_pa": float(np.max(history["chamber_pressure_pa"])),
+            "peak_thrust_n": float(np.max(history["thrust_n"])),
+            "pressure_throat_integral_ns": float(history["pressure_throat_integral_ns"][-1]),
+            "grain_burnout_times_s": tuple(self._burnout_times),
+        }
+        cea_used = self.propellant.cea_formulation is not None or self.propellant._cea_obj is not None
+        scalar = not cea_used and self.propellant._thermo_table is None
+        reason = self._termination_reason
+        if not tail_off_evaluation and reason == "propellant_burnout":
+            reason = "tail_off_omitted"
+        numerical_completed = reason == "completed"
+        if not scalar:
+            reason = "unsupported_thermochemistry"
+        resolved = {
+            "combustion_temperature_k": float(self.propellant.combustion_temperature),
+            "gas_constant_j_kg_k": float(self.propellant.products_constant),
+            "propellant_density_kg_m3": float(self.propellant.density),
+            "specific_heat_ratio": float(self.propellant.specific_heat_ratio),
+            "initial_gas_temperature_k": self.initial_gas_temperature_k,
+            "igniter_temperature_k": self.igniter_temperature,
+            "connected_chamber_volume_m3": self.motor.chamber_volume,
+            "physical_chamber_length_m": self.motor.chamber_length,
+            "grain_geometry_models": [g.geometry_model for g in self.motor.grains],
+            "grain_geometry": [
+                {"outer_radius_m": g.outer_radius, "inner_radius_m": g.initial_inner_radius,
+                 "height_m": g.initial_height, "ends_inhibited": g.ends_burn,
+                 "geometry": g.geometry, "n_points": g.n_points, "epsilon_rad": g.epsilon,
+                 "slot_fraction": g.slot_fraction}
+                for g in self.motor.grains
+            ],
+            "nozzle_throat_area_m2": self.motor.nozzle_throat_area,
+            "nozzle_exit_area_m2": self.motor.nozzle_exit_area,
+            "nozzle_angle_rad": self.motor.nozzle_angle,
+            "ambient_pressure_pa": self.environment_pressure,
+            "burn_rate_a": getattr(self.propellant, "burn_rate_a", None),
+            "burn_rate_n": getattr(self.propellant, "burn_rate_n", None),
+            "erosive_burning_coefficient": getattr(self.propellant, "erosive_burning_coefficient", 0.0),
+            "erosive_alpha": getattr(self.propellant, "erosive_alpha", 35.0),
+            "efficiencies": self.applied_efficiencies,
+            "igniter_burn_time_s": self.igniter_burn_time,
+            "ignition_ramp_time_s": self.ignition_ramp_time,
 
-            for grain_parameter, tail_off_parameter in zip(
-                grain_solution, tail_off_solution
-            ):
-                total_burn_solution.append(
-                    np.append(grain_parameter, tail_off_parameter[tail_off_start:])
-                )
-        else:
-            for grain_parameter in grain_solution:
-                total_burn_solution.append(grain_parameter)
-
-        return total_burn_solution
+        }
+        interpolator = self.propellant._burn_rate_interpolator
+        if interpolator is not None:
+            resolved["burn_rate_pressure_table_mpa"] = interpolator.x.tolist()
+            resolved["burn_rate_table_mm_s"] = interpolator.y.tolist()
+        for name in ("igniter_mass_flow", "burn_area_activation"):
+            source = getattr(self, name)
+            if callable(source):
+                resolved[name] = {"type": "callable", "identity": getattr(source, "__qualname__", type(source).__qualname__),
+                                  "module": getattr(source, "__module__", None), "support_s": self.igniter_burn_time if name == "igniter_mass_flow" else None}
+            elif source is None:
+                resolved[name] = None
+            elif np.isscalar(source):
+                resolved[name] = float(source)
+            else:
+                resolved[name] = np.asarray(source).tolist()
+        source_hash = hashlib.sha256()
+        source_hash.update(json.dumps(resolved, sort_keys=True, default=float).encode())
+        for filename in ("Burn.py", "Grain.py", "Propellant.py"):
+            source_hash.update((Path(__file__).parent / filename).read_bytes())
+        try:
+            checkout_root = Path(__file__).resolve().parent.parent
+            git_root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=Path(__file__).parent,
+                                      capture_output=True, text=True, timeout=1, check=True).stdout.strip()
+            git_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout_root,
+                                      capture_output=True, text=True, timeout=1, check=True).stdout.strip()
+                       if Path(git_root).resolve() == checkout_root else None)
+        except (OSError, subprocess.SubprocessError):
+            git_sha = None
+        return {
+            "history": history, "metrics": metrics,
+            "status": {"completed": numerical_completed and scalar, "termination_reason": reason,
+                       "numerical_blowdown_completed": numerical_completed,
+                       "scalar_contract_supported": scalar,
+                       "burnout_completed": all(t is not None for t in self._burnout_times),
+                       "blowdown_cutoff_pressure_pa": getattr(self, "_blowdown_cutoff_pressure", None),
+                       "blowdown_reference_peak_pressure_pa": getattr(self, "_blowdown_reference_peak", None)},
+            "efficiencies": {**self.applied_efficiencies, "efficiency_semantics": "native_split"},
+            "provenance": {
+                "eta_c_applied": self.eta_c, "eta_cf_applied": self.eta_Cf,
+                "discharge_coefficient_applied": self.discharge_coefficient,
+                "efficiency_semantics": "native_split", "cea_used": cea_used,
+                "thermochemistry_source": "cea_legacy" if cea_used else ("scalar" if scalar else "pressure_table_legacy"),
+                "physics_provider_hash": source_hash.hexdigest(), "solidpy_git_sha": git_sha,
+                "solidpy_git_sha_status": "available" if git_sha else "unavailable",
+                "resolved_inputs": resolved,
+                "gas_temperature_model": "prescribed_source_temperature_mixing_v1",
+                "activation_model": "uniform_front_rate_scaling_v1",
+                "flow_interval_method": "adaptive_positive_source_bracket",
+                "integration_method": "adaptive_ode_quadrature",
+                "solver_settings": {"method": "DOP853", "rtol": self.rtol, "atol": self.atol,
+                                    "max_step_size_s": self.max_step_size,
+                                    "burn_timeout_s": self.burn_timeout_s, "tail_off_timeout_s": self.tail_off_timeout_s,
+                                    "tail_off_method": self.tail_off_method},
+            },
+        }
 
 
 class BurnExport(Export):

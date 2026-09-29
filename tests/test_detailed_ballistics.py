@@ -253,3 +253,13 @@ def test_detailed_ballistics_converges_with_explicit_precision_tolerance():
     coarse_cg = np.interp(fine["time_s"], coarse["time_s"], coarse["motor_center_of_mass_position_m"])
     np.testing.assert_allclose(coarse_mass, fine["propellant_mass_kg"], rtol=1e-2, atol=3e-3)
     np.testing.assert_allclose(coarse_cg, fine["motor_center_of_mass_position_m"], rtol=1e-2, atol=3e-3)
+
+
+def test_display_grid_preserves_burnout_without_exceeding_point_limit():
+    result = run_detailed_ballistics(
+        *make_motor_stack(), max_step_size=0.03, max_time_points=8,
+    )
+    assert len(result["time_s"]) <= 8
+    burnout_times = result["simulation"].result["metrics"]["grain_burnout_times_s"]
+    for event_time in burnout_times:
+        assert np.any(result["time_s"] == event_time)

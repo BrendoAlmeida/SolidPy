@@ -84,7 +84,18 @@ Momentum and pressure thrust arrays retain the public component decomposition.
 Per-grain regression and axial profiles share the history time coordinate.
 Interpolation for display or export does not replace canonical integrals.
 Gas inventory follows mass continuity, including igniter injection at a different
-temperature: its energy contribution does not change its injected mass.
+temperature: its temperature contribution does not change its injected mass.
+The scalar solver integrates gas mass `m` and the thermal mixing inventory `m*T`,
+with `d(m*T)/dt = mdot_generated*T_combustion_effective + mdot_igniter*T_igniter
+- mdot_nozzle*T_gas` and `P*V = m*R*T_gas`. This is the prescribed source-temperature
+mixing approximation `prescribed_source_temperature_mixing_v1`; it does not
+include expansion work, wall heat loss, or a complete chamber energy equation.
+Gas leaving the nozzle uses the actual mixed temperature. Initially, gas is at
+the effective combustion temperature, recorded as `initial_gas_temperature_k`.
+For identical source temperatures this reduces to the legacy isothermal model.
+Activation uses `uniform_front_rate_scaling_v1`: the flame activation fraction
+scales regression speed uniformly, and gas generation follows that same front.
+Burned grains retain their terminal regression and generate no further gas.
 
 `result["metrics"]` records `propellant_mass_consumed_kg`,
 `propellant_burn_duration_s`, `nozzle_flow_duration_s`,
@@ -94,6 +105,16 @@ temperature: its energy contribution does not change its injected mass.
 `gas_mass_cutoff_kg`, `mass_balance_residual_kg`, and `mass_flow_balance_error_pct`.
 Source/discharge interval endpoints accompany their durations. Averages divide
 the corresponding time integral by interval duration; zero duration gives zero.
+Canonical generated, igniter, nozzle and impulse integrals use adaptive ODE
+quadratures alongside the conserved states (`integration_method="adaptive_ode_quadrature"`).
+Cumulative arrays `generated_mass_integral_kg`, `igniter_mass_integral_kg`,
+`nozzle_mass_integral_kg`, `impulse_integral_ns`, and `pressure_throat_integral_ns`
+make the integrals reproducible on the canonical time coordinate. Instantaneous
+rates use the right-hand value at a source cutoff or burnout event; trapezoids
+of those rate samples can differ slightly at discontinuities. Display interpolation
+never replaces quadratures. `generated_mass_integral_kg` is also a scalar metric;
+`integrated_generated_mass_kg` is its alias. `propellant_mass_consumed_kg` comes
+independently from initial minus remaining geometric solid volume.
 Integration uses the nonuniform time coordinate, not sample arithmetic means.
 
 ```text
@@ -110,7 +131,13 @@ the inventory difference. The model has no other outflow; residual gas is retain
 ## Completion and axial diagnostic
 
 Each grain stops generating gas at its burnout event. Numerical blowdown ends
-when `P_chamber - P_ambient <= 0.01 * (P_peak - P_ambient)`. The final event state
+when `P_chamber - P_ambient <= 0.01 * (P_peak - P_ambient)`. A known igniter
+source remains integrated through its declared end even after propellant burnout;
+the reference peak includes that source phase. A callable igniter requires a
+positive declared `igniter_burn_time` for a completed result; an unknown future
+source duration is explicitly incomplete. `rtol`, `atol`, `burn_timeout_s` and
+`tail_off_timeout_s` are configurable keyword settings; tail timeout is measured
+from propellant burnout. The final event state
 retains gas inventory. `result["status"]` records completion and termination
 reason. Timeout, solver failure, omitted tail-off, or analytical approximation
 is incomplete for numerical acceptance. Igniter flow remains included while active.
