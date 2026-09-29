@@ -40,6 +40,10 @@ Initial free volume subtracts total propellant volume once and must be positive.
 Grains must fit within the chamber radius and physical axial length, including
 separations. Casing, liner, envelope, and buckling calculations use physical
 lengths; the equivalent gas-volume length is not a structural dimension.
+`grain_axial_positions_m` contains each grain's physical start position in input
+order, inferred from its initial height and `grain_separation`. Its origin is
+the nozzle-side stack reference; positive coordinates point away from the nozzle,
+matching the detailed ballistics center-of-mass convention.
 
 ## Canonical result
 
