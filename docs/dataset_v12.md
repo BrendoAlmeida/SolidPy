@@ -45,6 +45,18 @@ order, inferred from its initial height and `grain_separation`. Its origin is
 the nozzle-side stack reference; positive coordinates point away from the nozzle,
 matching the detailed ballistics center-of-mass convention.
 
+## Grain regression geometry
+
+`Grain.calculate_remaining_volume(regression_m)` returns solid volume without
+mutating the grain. `burnout_regression_m` is the smaller of radial web and half
+initial height when end faces burn; inhibited end faces use the radial web.
+The tubular model is `tubular_radial_axial_v1`. The star/slotted-cylinder model
+is `fixed_angle_radial_front_v1`: slot angular boundaries are fixed, radial
+sidewalls are inhibited, and the bore and slot-floor arcs regress. This model
+is an approximation and does not represent isotropic star regression. Burn area
+is the negative derivative of remaining volume, including burning end faces,
+so the geometry cannot generate more propellant mass than its initial volume.
+
 ## Canonical result
 
 `BurnSimulation.result` contains `history`, `metrics`, `status`, `efficiencies`,

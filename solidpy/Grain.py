@@ -4,6 +4,8 @@ _author_ = "Caio Eduardo dos Santos de Souza, João Lemes Gribel Soares, Thais S
 _copyright_ = "MIT"
 _license_ = "x"
 
+import math
+
 import numpy as np
 
 
@@ -32,8 +34,9 @@ class Grain:
             When True the two end (transversal) faces are treated as inhibited
             (e.g. by a liner/spacer) and do not regress: their area contribution
             is set to zero and the grain height stays at ``initial_height``
-            throughout the burn. Only the cylindrical bore (and slot walls, for
-            star grains) keeps regressing. Default False preserves the existing
+            throughout the burn. Only radial burn fronts keep regressing.
+            Star grains use fixed-angle slots with inhibited radial sidewalls.
+            Default False preserves the existing
             BATES-style behaviour where both end faces burn and the grain
             shortens axially.
         """
@@ -55,6 +58,12 @@ class Grain:
         self.n_points = max(int(n_points), 1)
         self.epsilon = float(epsilon)
         self.slot_fraction = min(max(float(slot_fraction), 0.0), 1.0)
+        if geometry == "star" and (
+            not math.isfinite(self.epsilon)
+            or self.epsilon <= 0.0
+            or self.n_points * self.epsilon >= np.pi
+        ):
+            raise ValueError("star slots require finite epsilon > 0 and n_points * epsilon < pi")
         self.evaluate_grain_initial_height(initial_height)
         self.height = self.initial_height
         self.geometry = geometry
@@ -123,23 +132,12 @@ class Grain:
         return burn_area
 
     def calculate_star_geometry(self, regressed_length):
-        """Burn area for the slotted-cylinder (N-arm star) grain at regression w.
+        """Return the fixed-angle radial-front slotted-cylinder geometry.
 
-        The cross-section has a central bore at Ri plus N radial slots of
-        half-angle epsilon extending outward to Rs = Ri + slot_fraction*(Ro-Ri).
-        The outer surface (at Ro) is case-bonded and does not burn.
-
-        Analytical model (Nakka/BurnSim convention):
-          Phase 1 — slot floor not yet at case  (w < Ro - Rs):
-            P_lat = (2π - 2Nε)(Ri+w) + 2N(Rs-Ri) + 2Nε(Rs+w)
-            A_end = π(Ro²-(Ri+w)²) - Nε((Rs+w)²-(Ri+w)²)
-
-          Phase 2 — slot floor at case  (w ≥ Ro - Rs):
-            P_lat = (2π - 2Nε)(Ri+w) + 2N(Ro-(Ri+w))
-            A_end = (π - Nε)(Ro²-(Ri+w)²)
-
-        Returns:
-            tuple: (height, inner_radius, burn_area)
+        ``fixed_angle_radial_front_v1`` keeps slot angular boundaries fixed:
+        radial slot walls are inhibited and only bore and slot-floor arcs
+        regress. This approximation does not model isotropic star regression.
+        Its burn area equals the negative derivative of remaining volume.
         """
         w = max(float(regressed_length), 0.0)
         N = self.n_points
@@ -156,22 +154,18 @@ class Grain:
             height = L0 if self.ends_burn else max(L0 - 2 * w, 0.0)
             return height, min(Ri + w, Ro), 0.0
 
-        # Inhibited end faces keep the grain at full length; only the bore /
-        # slot walls regress. Let h be set first so the burned_through branch
-        # above still uses the classical L0-2*w web-burnout criterion.
+        # Inhibited end faces preserve the initial axial length.
         h = L0 if self.ends_burn else L0 - 2 * w
         r_bore = Ri + w
 
         if w < w_floor:
             # Phase 1: slot floor still within the grain
             r_floor = Rs + w
-            slot_wall = Rs - Ri                                          # constant
-            P_lat = (2 * np.pi - 2 * N * eps) * r_bore + 2 * N * slot_wall + 2 * N * eps * r_floor
+            P_lat = (2 * np.pi - 2 * N * eps) * r_bore + 2 * N * eps * r_floor
             A_end = np.pi * (Ro ** 2 - r_bore ** 2) - N * eps * (r_floor ** 2 - r_bore ** 2)
         else:
             # Phase 2: slot floor merged with outer case
-            slot_wall = max(Ro - r_bore, 0.0)
-            P_lat = (2 * np.pi - 2 * N * eps) * r_bore + 2 * N * slot_wall
+            P_lat = (2 * np.pi - 2 * N * eps) * r_bore
             A_end = (np.pi - N * eps) * (Ro ** 2 - r_bore ** 2)
 
         end_faces_area = 0.0 if self.ends_burn else 2.0 * A_end
@@ -215,17 +209,31 @@ class Grain:
         slot_area = N * eps * max(r_floor ** 2 - r_bore ** 2, 0.0)
         return np.pi * r_bore ** 2 + slot_area
 
+    @property
+    def geometry_model(self):
+        """Identify the regression approximation used by this grain."""
+        return "fixed_angle_radial_front_v1" if self.geometry == "star" else "tubular_radial_axial_v1"
+
+    @property
+    def burnout_regression_m(self):
+        """Regression distance at radial or axial exhaustion, in metres."""
+        web = self.outer_radius - self.initial_inner_radius
+        return web if self.ends_burn else min(web, self.initial_height / 2.0)
+
+    def calculate_remaining_volume(self, regressed_length):
+        """Return remaining solid volume without modifying grain state."""
+        regression = max(float(regressed_length), 0.0)
+        if regression >= self.burnout_regression_m:
+            return 0.0
+        height = self.initial_height if self.ends_burn else self.initial_height - 2.0 * regression
+        solid_area = np.pi * self.outer_radius**2 - self.evaluate_port_area(regression)
+        return max(float(solid_area * height), 0.0)
+
     def evaluate_grain_volume(self):
-        Ri = self.inner_radius
-        Ro = self.outer_radius
-        h = self.height
-        if self.geometry == "star":
-            Rs = self.initial_inner_radius + self.slot_fraction * (Ro - self.initial_inner_radius)
-            slot_area = self.n_points * self.epsilon * (Rs ** 2 - Ri ** 2)
-            self.volume = (np.pi * (Ro ** 2 - Ri ** 2) - slot_area) * h
-        else:
-            self.volume = np.pi * (Ro ** 2 - Ri ** 2) * h
+        regression = self.inner_radius - self.initial_inner_radius
+        self.volume = self.calculate_remaining_volume(regression)
         return self.volume
+
 
 
 # Grao_Leviata = Grain(outer_radius=71.92 / 2000, initial_inner_radius=31.92 / 2000)
