@@ -221,10 +221,11 @@ Optional runtime CEA is deferred: explicit formulation/provider identity and
 hash, pressure coverage, coherent molecular mass or gas constant, and an
 out-of-range policy are required before it is covered by this contract.
 
-Policy `v12_numerical_acceptance_v1` requires completed numerical blowdown and
-mass-balance error <=1%. Coarse/refined runs must agree within 2% for peak
-pressure, thrust, generated flow, and nozzle flow; impulse and integrated
-generated/nozzle mass must agree within 1%. Deltas are
+`evaluate_numerical_acceptance()` applies policy
+`v12_numerical_acceptance_v1` to canonical coarse and refined results. It
+requires completed numerical blowdown and mass-balance error <=1%. Coarse/refined
+runs must agree within 2% for peak pressure, thrust, generated flow, and nozzle
+flow; impulse and integrated generated/nozzle mass must agree within 1%. Deltas are
 `abs(refined-coarse)/max(abs(refined), scale_floor)`; floors are recorded per quantity.
 Regression coverage includes isolated efficiencies and domain boundaries,
 connected frustum volume with physical lengths, nonuniform integration, igniter

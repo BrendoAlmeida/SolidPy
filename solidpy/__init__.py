@@ -41,6 +41,10 @@ from .Motor import Motor
 from .Propellant import Propellant, build_cea_properties
 from .Burn import Burn, BurnSimulation
 from .AxialFlow import evaluate_axial_mass_flux, compare_axial_diagnostics
+from .Acceptance import (
+    V12_NUMERICAL_ACCEPTANCE_POLICY,
+    evaluate_numerical_acceptance,
+)
 from .BurnEmpirical import BurnEmpirical
 from .Environment import Environment
 from .Rail import Rail
