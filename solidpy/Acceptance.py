@@ -61,6 +61,12 @@ def evaluate_numerical_acceptance(
 
     coarse_metrics, coarse_status = _result_parts(coarse_result, "coarse_result")
     refined_metrics, refined_status = _result_parts(refined_result, "refined_result")
+    coarse_provenance = coarse_result.get("provenance")
+    refined_provenance = refined_result.get("provenance")
+    if not isinstance(coarse_provenance, Mapping):
+        coarse_provenance = {}
+    if not isinstance(refined_provenance, Mapping):
+        refined_provenance = {}
     required_complete = all(
         status.get("completed") is True
         and status.get("numerical_blowdown_completed") is True
@@ -113,6 +119,42 @@ def evaluate_numerical_acceptance(
     if missing_balance:
         incomplete_reasons.append("mass_balance_error_missing_or_non_finite")
 
+    provider_hashes = (
+        coarse_provenance.get("physics_provider_hash"),
+        refined_provenance.get("physics_provider_hash"),
+    )
+    if not all(isinstance(value, str) and value for value in provider_hashes):
+        incomplete_reasons.append("physics_provider_hash_missing")
+    elif provider_hashes[0] != provider_hashes[1]:
+        incomplete_reasons.append("physical_inputs_or_provider_mismatch")
+
+    required_provenance = (
+        "eta_c_applied",
+        "eta_cf_applied",
+        "discharge_coefficient_applied",
+        "efficiency_semantics",
+        "cea_used",
+    )
+    if any(
+        key not in provenance
+        for provenance in (coarse_provenance, refined_provenance)
+        for key in required_provenance
+    ):
+        incomplete_reasons.append("required_provenance_missing")
+    else:
+        efficiency_fields = required_provenance[:3]
+        coarse_efficiencies = tuple(coarse_provenance[key] for key in efficiency_fields)
+        refined_efficiencies = tuple(refined_provenance[key] for key in efficiency_fields)
+        if coarse_efficiencies != refined_efficiencies:
+            incomplete_reasons.append("applied_efficiencies_mismatch")
+        if (
+            coarse_provenance["efficiency_semantics"] != "native_split"
+            or refined_provenance["efficiency_semantics"] != "native_split"
+            or coarse_provenance["cea_used"] is not False
+            or refined_provenance["cea_used"] is not False
+        ):
+            incomplete_reasons.append("unsupported_v12_physics_semantics")
+
     if incomplete_reasons:
         status = "incomplete"
         passed = False
@@ -134,4 +176,14 @@ def evaluate_numerical_acceptance(
         "convergence": convergence,
         "missing_metrics": missing_metrics,
         "incomplete_reasons": incomplete_reasons,
+        "provenance": {
+            "coarse": {
+                "physics_provider_hash": coarse_provenance.get("physics_provider_hash"),
+                "solidpy_git_sha": coarse_provenance.get("solidpy_git_sha"),
+            },
+            "refined": {
+                "physics_provider_hash": refined_provenance.get("physics_provider_hash"),
+                "solidpy_git_sha": refined_provenance.get("solidpy_git_sha"),
+            },
+        },
     }

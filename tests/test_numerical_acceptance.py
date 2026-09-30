@@ -12,6 +12,15 @@ def _result(scale=1.0, *, completed=True, mass_balance=0.2):
             "completed": completed,
             "numerical_blowdown_completed": completed,
         },
+        "provenance": {
+            "eta_c_applied": 1.0,
+            "eta_cf_applied": 1.0,
+            "discharge_coefficient_applied": 1.0,
+            "efficiency_semantics": "native_split",
+            "cea_used": False,
+            "physics_provider_hash": "provider-a",
+            "solidpy_git_sha": "commit-a",
+        },
         "metrics": {
             "peak_chamber_pressure_pa": 5e6 * scale,
             "peak_thrust_n": 5000.0 * scale,
@@ -63,6 +72,18 @@ def test_v12_numerical_acceptance_requires_numerical_blowdown():
 
     assert report["status"] == "incomplete"
     assert "numerical_blowdown_not_completed" in report["incomplete_reasons"]
+
+
+def test_v12_numerical_acceptance_rejects_incomparable_provenance():
+    refined = _result()
+    refined["provenance"]["physics_provider_hash"] = "different-inputs"
+    refined["provenance"]["eta_cf_applied"] = 0.9
+
+    report = evaluate_numerical_acceptance(_result(), refined)
+
+    assert report["status"] == "incomplete"
+    assert "physical_inputs_or_provider_mismatch" in report["incomplete_reasons"]
+    assert "applied_efficiencies_mismatch" in report["incomplete_reasons"]
 
 
 def test_v12_numerical_acceptance_validates_policy_and_scale_floors():

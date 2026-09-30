@@ -3,7 +3,15 @@ import math
 import numpy as np
 import pytest
 
-from solidpy import Burn, BurnSimulation, Environment, Grain, Motor, Propellant
+from solidpy import (
+    Burn,
+    BurnSimulation,
+    Environment,
+    Grain,
+    Motor,
+    Propellant,
+    evaluate_numerical_acceptance,
+)
 
 
 def make_stack(geometry="tubular", grains=None):
@@ -108,6 +116,17 @@ def test_nonuniform_time_integral_is_not_a_sample_mean():
     assert integral == pytest.approx(10.0)
     assert integral / 2.0 != pytest.approx(np.mean(thrust))
     assert burn.evaluate_total_impulse([3.0], [0.0]) == 0.0
+
+
+def test_numerical_acceptance_passes_for_coarse_and_refined_solver_runs():
+    coarse = BurnSimulation(*make_stack(), max_step_size=0.03).result
+    refined = BurnSimulation(*make_stack(), max_step_size=0.015).result
+
+    report = evaluate_numerical_acceptance(coarse, refined)
+
+    assert report["status"] == "passed"
+    assert report["passed"] is True
+    assert all(item["passed"] for item in report["convergence"].values())
 
 
 @pytest.mark.parametrize("parameters,reason", [
