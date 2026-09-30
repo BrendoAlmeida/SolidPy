@@ -38,8 +38,20 @@ control volume; omission preserves `chamber_area * chamber_length`.
 `pi * length / 3 * (R_inlet**2 + R_inlet*R_throat + R_throat**2)` to volume.
 Initial free volume subtracts total propellant volume once and must be positive.
 Grains must fit within the chamber radius and physical axial length, including
-separations. Casing, liner, envelope, and buckling calculations use physical
-lengths; the equivalent gas-volume length is not a structural dimension.
+separations. Body, liner, and envelope lengths remain independent from an
+equivalent gas-volume length. Structural relations that depend on axial length
+use the casing-body length.
+`geometry_from_components()` accepts keyword-only `casing_body_length_m`,
+`liner_length_m`, and `motor_total_length_m`. Their defaults are the active
+`motor.chamber_length`, that same active length, and the casing-body length,
+respectively. The constraints are `liner_length <= active_length <=
+casing_body_length <= motor_total_length`; all four lengths must be finite and
+positive. `MotorGeometry.motor_length_m` denotes casing-body length for
+structural calculations, while `fill_length_m` retains active chamber length.
+`connected_chamber_volume_m3` stores the gas control volume independently.
+The casing first-mode frequency uses `motor_length_m` and therefore the
+casing-body length. The current local shell buckling-pressure relation depends
+on radius, wall thickness, material, and pressure; it has no axial-length term.
 `grain_axial_positions_m` contains each grain's physical start position in input
 order, inferred from its initial height and `grain_separation`. Its origin is
 the nozzle-side stack reference; positive coordinates point away from the nozzle,
@@ -64,6 +76,12 @@ and `provenance`. Its adaptive history includes burnout and numerical blowdown.
 `evaluate_complete_solution()` and `total_burn_solution` retain the seven-array
 layout: time, pressure, free volume, mean regression, thrust, exit pressure,
 and exit velocity.
+
+`run_detailed_ballistics()` returns schema version 5.0. Its display arrays may be
+resampled, while `canonical_result` retains the adaptive histories, quadratures,
+metrics, completion status, and provenance used for numerical evaluation.
+Detailed mass-flow summaries and impulse values are taken from that canonical
+result; display resampling does not redefine them.
 
 `result["history"]` contains aligned arrays on strictly increasing `time_s`:
 
@@ -189,8 +207,28 @@ acceptance threshold or physical validity gate is applied.
 
 ## Mass, structure, and robustness
 
-Dry mass sums modeled casing, liner, and nozzle components; initial motor mass
-adds initial propellant mass. Results identify modeled and omitted components.
+The casing mass uses the cylindrical shell over the casing-body length plus two
+bulkheads. For inner radius `r`, wall thickness `t`, density `rho`, body length
+`L`, and bulkhead fraction `f`, its mass is
+`[pi*((r+t)^2-r^2)*L + 2*pi*r^2*t*f]*rho`. Liner mass uses its physical length:
+`pi*(r^2-(r-t_liner)^2)*L_liner*rho_liner`; a nonpositive liner thickness
+produces zero liner mass. Nozzle mass uses only the lateral areas of its
+convergent and divergent conical walls multiplied by nozzle wall thickness and
+density. For radii `r_i`, `r_t`, and `r_e`, the convergent angle is fixed at
+45 degrees and the divergent angle is `motor.nozzle_angle`:
+`A_conv = pi*(r_i+r_t)*hypot((r_i-r_t)/tan(45°), r_i-r_t)` and
+`A_div = pi*(r_t+r_e)*hypot((r_e-r_t)/tan(alpha), r_e-r_t)`. Nozzle mass is
+`(A_conv+A_div)*max(t_casing*wall_thickness_factor, min_wall_thickness)*rho`.
+It does not add a cylindrical length or connected-gas volume.
+
+With casing and nozzle materials supplied, dry mass is the sum of all three
+modeled component masses, and initial motor mass adds initial propellant mass.
+When the component scope is partial, `motor_initial_mass_kg` is `null` and
+`mass_scope`, `modeled_mass_components`, `omitted_mass_components`,
+`dry_mass_source`, and `motor_initial_mass_status` identify why. An explicit
+`dry_mass_kg` override is retained as an explicit scope and permits the initial
+mass sum. Surrogate structural results expose the three physical lengths and
+the modeled/omitted component scope; the envelope length is metadata only.
 Physical closures, lengths, and material volumes are counted without overlap.
 `simulate_structural_response()` is the canonical kernel for triaxial von Mises,
 the ultimate-strength burst estimate, buckling, strain, and closure-fastener
@@ -207,9 +245,14 @@ and stresses are `None`, serialized as `null`. Missing required structural
 properties cause an error or explicit model failure.
 `thermal_service_margin` is the dimensionless maximum service-temperature
 margin; legacy `thermoelastic_margin` is its alias, not a thermal-stress result.
-Nominal outputs remain separate from scenario/ensemble outputs. Robustness
-records `robustness_policy_id`, scenario IDs/factors, provider/hash, and status;
+Nominal outputs remain separate from scenario/ensemble outputs. Detailed
+robustness returns `robustness_policy_id="solidpy_robustness_ensemble_v1"` and
+records scenario IDs/factors, provider hashes, and status;
 ensemble worst-case margins do not overwrite nominal results.
+`StructuralMonteCarlo` records the same ensemble separation with
+`robustness_policy_id="structural_monte_carlo_v1"`; its provenance hash covers
+the structural implementation and resolved material, geometry, and sampling
+configuration.
 
 ## Provenance and acceptance
 
@@ -227,6 +270,12 @@ requires completed numerical blowdown and mass-balance error <=1%. Coarse/refine
 runs must agree within 2% for peak pressure, thrust, generated flow, and nozzle
 flow; impulse and integrated generated/nozzle mass must agree within 1%. Deltas are
 `abs(refined-coarse)/max(abs(refined), scale_floor)`; floors are recorded per quantity.
+The pair must also share a provider hash and applied efficiencies, use
+`efficiency_semantics="native_split"`, and report `cea_used=false`; otherwise the
+evaluation is incomplete.
+Default floors are 1 Pa for peak pressure, 1e-3 N for peak thrust, 1e-9 kg/s
+for flow peaks, 1e-3 N·s for impulse, and 1e-9 kg for integrated masses.
+Callers may provide positive finite overrides through `scale_floors`.
 Regression coverage includes isolated efficiencies and domain boundaries,
 connected frustum volume with physical lengths, nonuniform integration, igniter
 mass/energy, burnout/blowdown and residual inventory, incomplete termination,
