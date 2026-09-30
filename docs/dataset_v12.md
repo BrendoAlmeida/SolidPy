@@ -193,13 +193,18 @@ Dry mass sums modeled casing, liner, and nozzle components; initial motor mass
 adds initial propellant mass. Results identify modeled and omitted components.
 Physical closures, lengths, and material volumes are counted without overlap.
 `simulate_structural_response()` is the canonical kernel for triaxial von Mises,
-Tresca/burst, buckling, strain, and closure-fastener responses. Public burst
-calculations share strength and safety-factor conventions; the
+the ultimate-strength burst estimate, buckling, strain, and closure-fastener
+responses. `casing_burst_pressure_pa()` is the shared scalar/vector formula;
+its result uses the casing's resolved ultimate strength and the configured
+strength factor, and its safety factor divides burst pressure by peak chamber
+pressure. Public burst calculations share this convention; the
 `casing_burst_pressure_mpa` alias refers to canonical `burst_pressure_mpa`.
 
 `closure_bolt_status` is `configured`, `not_configured`, or `model_not_available`.
-Applicability explains absent factors/stresses (`None`, serialized as `null`).
-Missing required structural properties cause an error or explicit model failure.
+`closure_bolt_applicability` is `applicable`, `not_applicable`, or `not_modeled`;
+`closure_bolt_reason` explains an absent configuration. Unavailable bolt factors
+and stresses are `None`, serialized as `null`. Missing required structural
+properties cause an error or explicit model failure.
 `thermal_service_margin` is the dimensionless maximum service-temperature
 margin; legacy `thermoelastic_margin` is its alias, not a thermal-stress result.
 Nominal outputs remain separate from scenario/ensemble outputs. Robustness

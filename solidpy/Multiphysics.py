@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from numbers import Integral, Real
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -248,6 +249,79 @@ def _vector_result(name: str, value: np.ndarray) -> np.ndarray:
     if not np.all(np.isfinite(value)):
         raise ValueError(f"{name} não pode conter NaN ou infinito")
     return np.asarray(value)
+
+
+def casing_burst_pressure_pa(
+    inner_radius_m, wall_thickness_m, ultimate_strength_mpa, *, casing_strength_factor=1.0,
+):
+    """Return ``(2/sqrt(3))*Su*strength_factor*log(ro/ri)`` in pascals.
+
+    Inputs must be finite and positive and may be broadcastable arrays.
+    Scalar inputs return a float. Strength is ultimate strength; callers form
+    the burst safety factor by dividing by ``max(pressure_pa, 1)``.
+    """
+    values = (inner_radius_m, wall_thickness_m, ultimate_strength_mpa, casing_strength_factor)
+    for name, value in zip(
+        ("inner_radius_m", "wall_thickness_m", "ultimate_strength_mpa", "casing_strength_factor"), values,
+    ):
+        raw = np.asarray(value)
+        if raw.dtype.kind not in "iuf":
+            raise ValueError(f"{name} must contain finite positive real numbers")
+    radius, wall, ultimate, factor = _vector_broadcast_float_arrays(*values)
+    for name, value in zip(
+        ("inner_radius_m", "wall_thickness_m", "ultimate_strength_mpa", "casing_strength_factor"),
+        (radius, wall, ultimate, factor),
+    ):
+        _validate_vector_positive(name, value)
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            pressure = (2.0 / np.sqrt(3.0)) * (ultimate * 1e6 * factor) * np.log1p(wall / radius)
+    except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError("casing burst pressure calculation exceeds the numeric range") from exc
+    pressure = _vector_result("burst_pressure_pa", pressure)
+    return float(pressure) if pressure.ndim == 0 else pressure
+
+
+def _structural_number(name, value, *, positive=False):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite real number")
+    value = float(value)
+    if not math.isfinite(value) or (positive and value <= 0.0):
+        raise ValueError(f"{name} must be finite" + (" and positive" if positive else ""))
+    return value
+
+
+def _require_casing_material(material):
+    if material is None:
+        raise ValueError("casing_material is required for structural analysis")
+    for name in ("density_kg_m3", "modulus_gpa", "yield_strength_mpa",
+                 "resolved_allowable_stress_mpa", "resolved_ultimate_strength_mpa"):
+        _structural_number(f"casing_material.{name}", getattr(material, name), positive=True)
+    poisson = _structural_number("casing_material.poisson_ratio", material.poisson_ratio)
+    if not -1.0 < poisson < 0.5:
+        raise ValueError("casing_material.poisson_ratio must be between -1 and 0.5")
+    _structural_number("casing_material.max_service_temp_c", material.max_service_temp_c)
+    if material.material_family not in {"metal", "composite"}:
+        raise ValueError("casing_material.material_family must be metal or composite")
+    return material
+
+
+def _closure_bolt_configuration(count, diameter, strength, applicable):
+    if not isinstance(applicable, (bool, np.bool_)):
+        raise ValueError("closure_bolts_applicable must be a boolean")
+    if isinstance(count, (bool, np.bool_)) or not isinstance(count, Integral) or count < 0:
+        raise ValueError("bolt_count must be a non-negative integer")
+    diameter = _structural_number("bolt_diameter_m", diameter)
+    strength = _structural_number("bolt_strength_mpa", strength)
+    if diameter < 0 or strength < 0:
+        raise ValueError("bolt_diameter_m and bolt_strength_mpa must be non-negative")
+    if not applicable:
+        return "not_configured", "not_applicable", "closure_bolts_not_applicable"
+    if count == 0:
+        return "not_configured", "not_modeled", "closure_bolts_not_configured"
+    if diameter == 0 or strength == 0:
+        return "model_not_available", "not_modeled", "incomplete_closure_bolt_properties"
+    return "configured", "applicable", None
 
 
 def _casing_mass_with_bulkheads_kg_vectorized(
@@ -1053,9 +1127,19 @@ def simulate_structural_response(
     bolt_count=0,
     bolt_diameter_m=0.0,
     bolt_strength_mpa=0.0,
+    closure_bolts_applicable=True,
 ):
-    """Thin-wall casing stress, deformation, buckling and fatigue proxies."""
-    casing_material = casing_material or CasingMaterial()
+    """Casing stress, deformation, buckling and service-temperature proxies.
+
+    Casing material is required. The legacy strength-factor lower bound of
+    0.01 is retained. ``thermoelastic_margin`` aliases the thermal service
+    margin and does not represent a thermal-stress calculation.
+    """
+    casing_material = _require_casing_material(casing_material)
+    casing_strength_factor = max(_structural_number("casing_strength_factor", casing_strength_factor, positive=True), 0.01)
+    bolt_status, bolt_applicability, bolt_reason = _closure_bolt_configuration(
+        bolt_count, bolt_diameter_m, bolt_strength_mpa, closure_bolts_applicable,
+    )
     time_s = np.asarray(curve["time_s"], dtype=float)
     thrust_n = np.asarray(curve["thrust_n"], dtype=float)
     chamber_pressure_pa = _series(
@@ -1063,10 +1147,16 @@ def simulate_structural_response(
         "chamber_pressure_pa",
         np.zeros_like(time_s),
     )
+    if (time_s.ndim != 1 or not len(time_s) or thrust_n.shape != time_s.shape
+            or chamber_pressure_pa.shape != time_s.shape or np.any(np.diff(time_s) <= 0)
+            or not all(np.all(np.isfinite(v)) for v in (time_s, thrust_n, chamber_pressure_pa))
+            or np.any(chamber_pressure_pa < 0)):
+        raise ValueError("structural curve must contain aligned finite arrays on increasing time_s")
     throat_area = math.pi * (0.5 * max(geometry.throat_diameter_m, 1e-6)) ** 2
 
-    wall = max(geometry.casing_wall_thickness_m, 1e-5)
-    inner_radius = max(geometry.motor_inner_diameter_m / 2.0, 1e-5)
+    wall = max(_structural_number("casing_wall_thickness_m", geometry.casing_wall_thickness_m, positive=True), 1e-5)
+    inner_radius = max(_structural_number("motor_inner_diameter_m", geometry.motor_inner_diameter_m, positive=True) / 2.0, 1e-5)
+    _structural_number("motor_length_m", geometry.motor_length_m, positive=True)
     outer_radius = inner_radius + wall
     modulus_pa = casing_material.modulus_gpa * 1e9
     yield_pa = casing_material.yield_strength_mpa * 1e6 * max(casing_strength_factor, 0.01)
@@ -1075,9 +1165,7 @@ def simulate_structural_response(
     )
     poisson = casing_material.poisson_ratio
 
-    # Select thin-wall (Barlow) or thick-wall (Lamé) depending on t/r ratio.
-    # Lamé is exact for both regimes; thin-wall underestimates σ when t/r > 0.1.
-    # Ref: Lamé (1852); Shigley §3-15.
+    # Preserve the thin-wall transition used by the static structural model.
     ri2 = inner_radius**2
     ro2 = outer_radius**2
     use_lame = (wall / max(inner_radius, 1e-9)) > 0.1
@@ -1088,6 +1176,7 @@ def simulate_structural_response(
     max_strain = 0.0
     max_bulge = 0.0
     pressure_integral = 0.0
+    previous_pressure = 0.0
     max_pressure = 0.0
     for idx in range(len(time_s)):
         pressure = max(float(chamber_pressure_pa[idx]), 0.0)
@@ -1100,13 +1189,7 @@ def simulate_structural_response(
         else:
             hoop = pressure * inner_radius / wall
             axial = pressure * inner_radius / (2.0 * wall)
-        # Radial stress at the inner wall equals the internal pressure with
-        # opposite sign (Lamé boundary condition: sigma_r(r_i) = -P). The
-        # previous biaxial formula (sqrt(sh^2 + sa^2 - sh*sa)) discarded it
-        # and reported an optimistic von Mises, especially for thick walls
-        # (asymptotic ~42% under-estimate as wall -> infinity). Use the exact
-        # triaxial form so FS no longer approves vessels that should fail.
-        # Ref: von Mises (1913); Shigley §3-15.
+        # Inner-wall radial stress closes the triaxial von Mises invariant.
         radial = -pressure
         von_mises = math.sqrt(
             max(
@@ -1131,7 +1214,8 @@ def simulate_structural_response(
         max_bulge = max(max_bulge, bulge)
         max_pressure = max(max_pressure, pressure)
         if idx > 0:
-            pressure_integral += pressure * max(float(time_s[idx] - time_s[idx - 1]), 1e-9)
+            pressure_integral += 0.5 * (previous_pressure + pressure) * float(time_s[idx] - time_s[idx - 1])
+        previous_pressure = pressure
 
     r_mid = (inner_radius + outer_radius) / 2.0
     i_tube = math.pi * r_mid**3 * wall
@@ -1153,43 +1237,28 @@ def simulate_structural_response(
         composite_margin if casing_material.material_family == "composite" else metal_sf
     )
 
-    # Burst pressure per Tresca criterion for a closed-end thick cylinder
-    # under internal pressure. Uses ultimate strength (Su) as the flow limit
-    # instead of the yield strength used above; this is the analytical
-    # limit-load solution for a perfectly plastic material, matching what
-    # the HTML simulator reports as pBurst in structuralAnalysis().
-    # Ref: Tresca; Mendelson §8; simulador_balistica_interna_v7.html (~L1700).
     ultimate_pa = (
         casing_material.resolved_ultimate_strength_mpa * 1e6 * max(casing_strength_factor, 0.01)
     )
-    burst_pressure_pa = (
-        (2.0 / math.sqrt(3.0))
-        * ultimate_pa
-        * math.log(max(outer_radius / max(inner_radius, 1e-9), 1.0))
+    burst_pressure_pa = casing_burst_pressure_pa(
+        inner_radius, wall, casing_material.resolved_ultimate_strength_mpa,
+        casing_strength_factor=casing_strength_factor,
     )
     burst_safety_factor = burst_pressure_pa / max(max_pressure, 1.0)
     yield_pressure_pa = (
         ultimate_pa
         * max(outer_radius**2 - inner_radius**2, 0.0)
-        / max(math.sqrt(3.0) * outer_radius**2, 1.0)
+        / (math.sqrt(3.0) * outer_radius**2)
     )
 
-    # Closure-bolt shear and bearing against the casing wall.
-    # blowF is the axial pull on the forward closure under MEOP; the cross
-    # section used here is the chamber bore (upper bound — no deduction for
-    # the nozzle opening), matching the HTML structuralAnalysis().
-    #   shear: tau_bolt = blowF / (n_bolts · π/4 · d²); τ_ult ≈ 0.6·Su_bolt
-    #   bearing: the load path through the wall itself.
-    #     The wall in bearing is *confined* (the bolt squeezes it against
-    #     the head), so MMPDS/MIL-HDBK-5 allow Fbru ≈ 1.5–1.8·Su once
-    #     edge distance e/D ≥ 2; 1.5·Su is the conservative lower bound.
-    # Ref: simulador_balistica_interna_v7.html (~L1718); MIL-HDBK-5.
+    # Closure force uses the full bore area. Shear and bearing retain the
+    # established ultimate-strength multipliers of 0.6 and 1.5, respectively.
     blow_force_n = max_pressure * math.pi * 0.25 * max(geometry.motor_inner_diameter_m, 0.0) ** 2
-    bolt_shear_sf = float("inf")
-    bolt_bearing_sf = float("inf")
-    bolt_shear_stress_mpa = 0.0
-    bolt_bearing_stress_mpa = 0.0
-    if bolt_count > 0 and bolt_diameter_m > 0.0:
+    bolt_shear_sf = None
+    bolt_bearing_sf = None
+    bolt_shear_stress_mpa = None
+    bolt_bearing_stress_mpa = None
+    if bolt_status == "configured":
         shear_area_m2 = bolt_count * math.pi * 0.25 * bolt_diameter_m**2
         bolt_shear_stress_pa = blow_force_n / max(shear_area_m2, 1e-9)
         bolt_shear_stress_mpa = bolt_shear_stress_pa / 1e6
@@ -1206,15 +1275,18 @@ def simulate_structural_response(
             * max(casing_strength_factor, 0.01)
             / max(bolt_bearing_stress_pa, 1.0)
         )
-    onset_temp_c = 0.6 * casing_material.max_service_temp_c
-    inner_wall_temp_c = thermal["simulation.advanced.thermal.casing_inner_wall_temp_c"]
-    thermoelastic_margin = 1.0 - max(
-        0.0,
-        (inner_wall_temp_c - onset_temp_c)
-        / max(casing_material.max_service_temp_c - onset_temp_c, 1.0),
-    )
+    wall_temperature = (thermal or {}).get("simulation.advanced.thermal.casing_inner_wall_temp_c")
+    thermal_service_margin = None
+    if wall_temperature is not None:
+        inner_wall_temp_c = _structural_number("casing_inner_wall_temp_c", wall_temperature)
+        onset_temp_c = 0.6 * casing_material.max_service_temp_c
+        thermal_service_margin = 1.0 - max(
+            0.0,
+            (inner_wall_temp_c - onset_temp_c)
+            / max(casing_material.max_service_temp_c - onset_temp_c, 1.0),
+        )
 
-    return {
+    result = {
         "simulation.advanced.structural.max_stress_mpa": max_von_mises / 1e6,
         "simulation.advanced.structural.safety_factor": governing_margin,
         "simulation.advanced.structural.metal_equivalent_sf": metal_sf,
@@ -1232,16 +1304,27 @@ def simulate_structural_response(
         "simulation.advanced.structural.low_cycle_fatigue_damage": max_von_mises
         / max(yield_pa, 1.0),
         "simulation.advanced.structural.pressurization_impulse_mpa_s": pressure_integral / 1e6,
-        "simulation.advanced.structural.thermoelastic_margin": thermoelastic_margin,
+        "simulation.advanced.structural.thermal_service_margin": thermal_service_margin,
+        "simulation.advanced.structural.thermoelastic_margin": thermal_service_margin,
+        "simulation.advanced.structural.thermal_service_status": "computed" if thermal_service_margin is not None else "not_modeled",
         "simulation.advanced.structural.burst_pressure_mpa": burst_pressure_pa / 1e6,
+        "simulation.advanced.structural.casing_burst_pressure_mpa": burst_pressure_pa / 1e6,
         "simulation.advanced.structural.burst_safety_factor": burst_safety_factor,
         "simulation.advanced.structural.yield_pressure_mpa": yield_pressure_pa / 1e6,
+        "simulation.advanced.structural.ultimate_elastic_limit_pressure_mpa": yield_pressure_pa / 1e6,
         "simulation.advanced.structural.closure_bolt_blow_force_n": blow_force_n,
         "simulation.advanced.structural.closure_bolt_shear_safety_factor": bolt_shear_sf,
         "simulation.advanced.structural.closure_bolt_bearing_safety_factor": bolt_bearing_sf,
         "simulation.advanced.structural.closure_bolt_shear_stress_mpa": bolt_shear_stress_mpa,
         "simulation.advanced.structural.closure_bolt_bearing_stress_mpa": bolt_bearing_stress_mpa,
+        "simulation.advanced.structural.closure_bolt_status": bolt_status,
+        "simulation.advanced.structural.closure_bolt_applicability": bolt_applicability,
+        "simulation.advanced.structural.closure_bolt_reason": bolt_reason,
     }
+    for name, value in result.items():
+        if isinstance(value, Real) and not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    return result
 
 
 def simulate_cfd_proxies(
@@ -2044,6 +2127,7 @@ def simulate_advanced_physics(
     gamma=None,
 ):
     """Run all advanced components and return a flat metrics dictionary."""
+    casing_material = _require_casing_material(casing_material)
     scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
     gamma_resolved = _resolve_gamma(curve, gamma)
     thermal = simulate_thermal_ablation(
@@ -2112,6 +2196,7 @@ def simulate_advanced_components(
     gamma=None,
 ):
     """Return advanced simulations grouped by component and as a flat bundle."""
+    casing_material = _require_casing_material(casing_material)
     gamma_resolved = _resolve_gamma(curve, gamma)
     thermal = simulate_thermal_ablation(
         geometry,
@@ -2179,7 +2264,7 @@ class StructuralMonteCarlo:
 
     Failure criterion (any criterion below):
 
-    - burst_safety_factor        < 1.0  (casing bulk rupture, Tresca)
+    - burst_safety_factor        < 1.0  (ultimate-strength burst estimate)
     - safety_factor / governing_margin < 1.0  (casing wall yield, von Mises)
     - closure_bolt_shear_sf      < 1.0  (closure bolt shear)
     - closure_bolt_bearing_sf    < 1.0  (closure bolt bearing pressure)
@@ -2196,6 +2281,7 @@ class StructuralMonteCarlo:
         bolt_count=0,
         bolt_diameter_m=0.0,
         bolt_strength_mpa=0.0,
+        closure_bolts_applicable=True,
         casing_strength_factor=1.0,
         thermal=None,
         random_seed=None,
@@ -2206,22 +2292,28 @@ class StructuralMonteCarlo:
                 "ballistics_callable."
             )
         self.geometry = geometry
-        self.casing_material = casing_material or CasingMaterial()
+        self.casing_material = _require_casing_material(casing_material)
         self.peak_pressure_distribution = peak_pressure_distribution
         self.ballistics_callable = ballistics_callable
         self.parameter_sigmas = dict(parameter_sigmas or {})
         self.bolt_count = bolt_count
         self.bolt_diameter_m = bolt_diameter_m
         self.bolt_strength_mpa = bolt_strength_mpa
-        self.casing_strength_factor = casing_strength_factor
-        # ``thermal`` is required by simulate_structural_response for the
-        # thermo-elastic margin. Provide a neutral default so the structural
-        # path does not silently crash when the user has not run a thermal
-        # analysis before the structural Monte Carlo.
-        self.thermal = thermal or {
-            "simulation.advanced.thermal.casing_inner_wall_temp_c": 20.0,
-            "simulation.advanced.thermal.throat_ablation_mm": 0.0,
-        }
+        self.closure_bolts_applicable = closure_bolts_applicable
+        self._bolt_configuration = _closure_bolt_configuration(
+            bolt_count, bolt_diameter_m, bolt_strength_mpa, closure_bolts_applicable,
+        )
+        self.casing_strength_factor = max(_structural_number("casing_strength_factor", casing_strength_factor, positive=True), 0.01)
+        for name, spec in self.parameter_sigmas.items():
+            if isinstance(spec, dict):
+                mean = spec.get("mean", spec.get("nominal", 0.0))
+                sigma = spec.get("sigma", spec.get("std", spec.get("stddev", 0.0)))
+            else:
+                mean, sigma = 0.0, spec
+            _structural_number(f"parameter_sigmas.{name}.mean", mean)
+            if _structural_number(f"parameter_sigmas.{name}.sigma", sigma) < 0:
+                raise ValueError(f"parameter_sigmas.{name}.sigma must be non-negative")
+        self.thermal = thermal
         self.random_seed = random_seed
 
     def _sample_parameters(self, n_iterations, rng):
@@ -2257,8 +2349,10 @@ class StructuralMonteCarlo:
         """Pull peak chamber pressure (Pa) from a curve dict."""
         t = np.asarray(curve.get("time_s", []), dtype=float)
         p = np.asarray(curve.get("chamber_pressure_pa", []), dtype=float)
-        if t.size == 0 or p.size == 0:
-            return 0.0
+        if (t.ndim != 1 or not t.size or p.shape != t.shape
+                or not np.all(np.isfinite(t)) or not np.all(np.isfinite(p))
+                or np.any(np.diff(t) <= 0) or np.any(p < 0)):
+            raise ValueError("ballistics curve requires aligned finite time and pressure arrays")
         return float(np.max(p))
 
     def _run_single(self, sample, pmax_perturb):
@@ -2267,20 +2361,17 @@ class StructuralMonteCarlo:
         Returns (peak_pressure, structural_dict) or None if the iteration
         failed (e.g. ballistics callable raised — treat as a no-vote).
         """
+        self._last_failure = None
         try:
             if self.peak_pressure_distribution is not None:
                 peak_pressure = float(self.peak_pressure_distribution())
             else:
                 curve = self.ballistics_callable(sample)
                 peak_pressure = self._extract_peak_pressure(curve)
-            peak_pressure = max(peak_pressure + pmax_perturb, 0.0)
+            peak_pressure = max(_structural_number("peak_pressure_pa", peak_pressure + pmax_perturb), 0.0)
 
-            # Synthesise a 1-point curve, since every structural metric that
-            # is failure-relevant (max_pressure, max_von_mises, blow_force,
-            # bolt stresses) sees only the peak pressure through the path
-            # we already extracted. Full-pressure-history is consumed only
-            # by the pressurization impulse and the fatigue proxy, neither of
-            # which feeds the standard failure criteria.
+            # Failure criteria use peak pressure; the synthetic history does
+            # not estimate the original curve's pressurization impulse.
             synthetic_curve = {
                 "time_s": np.array([0.0, 0.001, 1.0]),
                 "thrust_n": np.array([0.0, 0.0, 0.0]),
@@ -2296,88 +2387,94 @@ class StructuralMonteCarlo:
                 bolt_count=self.bolt_count,
                 bolt_diameter_m=self.bolt_diameter_m,
                 bolt_strength_mpa=self.bolt_strength_mpa,
+                closure_bolts_applicable=self.closure_bolts_applicable,
             )
             return peak_pressure, structural
-        except Exception:
+        except Exception as exc:
+            self._last_failure = {"type": type(exc).__name__, "message": str(exc)}
             return None
 
     def run(self, n_iterations):
-        """Execute n_iterations samples serially and return a summary dict.
+        """Evaluate structural scenarios without combining them with nominal data.
 
-        Returns a dict with:
-            - failure_probability:        any-criterion <1.0 fraction
-            - failure_probability_casing: governing margin <1.0
-            - failure_probability_burst:  burst_safety_factor <1.0
-            - failure_probability_bolts:  shear OR bearing <1.0
-            - peak_pressure_pa:           list of sampled Pmax (Pa)
-            - burst_sf, governing_sf, bolt_shear_sf, bolt_bearing_sf: lists
-            - samples:                    the perturbed-parameter dicts
-            - n_iterations, n_evaluated
+        Failure probabilities use evaluated scenarios only. Missing bolt models
+        and ensembles with no evaluated samples return nullable probabilities.
+        Every attempted scenario retains its ID, factors and completion status.
         """
+        if (isinstance(n_iterations, (bool, np.bool_))
+                or not isinstance(n_iterations, Integral) or n_iterations < 1):
+            raise ValueError("n_iterations must be a positive integer")
         rng = np.random.default_rng(self.random_seed)
         samples, pmax_perturbs = self._sample_parameters(n_iterations, rng)
-        peak_pressures = []
-        burst_sf_list = []
-        governing_sf_list = []
-        bolt_shear_sf_list = []
-        bolt_bearing_sf_list = []
-        failures_casing = 0
-        failures_burst = 0
-        failures_bolts = 0
-        n_evaluated = 0
-        for sample, pmax_perturb in zip(samples, pmax_perturbs):
+        peak_pressures, burst_sf_list, governing_sf_list = [], [], []
+        bolt_shear_sf_list, bolt_bearing_sf_list = [], []
+        records, evaluated_ids = [], []
+        failures_casing = failures_burst = failures_bolts = failures_any = 0
+        for index, (sample, pmax_perturb) in enumerate(zip(samples, pmax_perturbs)):
+            scenario_id = f"structural_sample_{index:06d}"
+            record = {
+                "scenario_id": scenario_id,
+                "scenario_factors": {**sample, "perturb_peak_pressure_pa": float(pmax_perturb)},
+            }
             result = self._run_single(sample, pmax_perturb)
             if result is None:
+                records.append({**record, "status": "failed", "error": self._last_failure})
                 continue
             peak_pressure, structural = result
-            n_evaluated += 1
+            records.append({**record, "status": "completed", "peak_pressure_pa": peak_pressure,
+                            "structural": structural})
+            evaluated_ids.append(scenario_id)
             peak_pressures.append(peak_pressure)
             burst_sf = structural["simulation.advanced.structural.burst_safety_factor"]
             governing_sf = structural["simulation.advanced.structural.safety_factor"]
-            bolt_shear_sf = structural["simulation.advanced.structural.closure_bolt_shear_safety_factor"]
-            bolt_bearing_sf = structural["simulation.advanced.structural.closure_bolt_bearing_safety_factor"]
+            bolt_shear = structural["simulation.advanced.structural.closure_bolt_shear_safety_factor"]
+            bolt_bearing = structural["simulation.advanced.structural.closure_bolt_bearing_safety_factor"]
             burst_sf_list.append(burst_sf)
             governing_sf_list.append(governing_sf)
-            bolt_shear_sf_list.append(bolt_shear_sf)
-            bolt_bearing_sf_list.append(bolt_bearing_sf)
-            failed_casing = (governing_sf < 1.0) or (burst_sf < 1.0)
+            bolt_shear_sf_list.append(bolt_shear)
+            bolt_bearing_sf_list.append(bolt_bearing)
+            failed_casing = governing_sf < 1.0 or burst_sf < 1.0
             failed_burst = burst_sf < 1.0
-            # ``inf`` SF means bolts were not configured; don't count as failure.
-            bolt_configured = self.bolt_count > 0 and self.bolt_diameter_m > 0.0
-            failed_bolts = (
-                bolt_configured
-                and (bolt_shear_sf < 1.0 or bolt_bearing_sf < 1.0)
-            )
-            if failed_casing:
-                failures_casing += 1
-            if failed_burst:
-                failures_burst += 1
-            if failed_bolts:
-                failures_bolts += 1
-        # Use a proper union rather than summing single-criterion failures
-        # because casing and bolt failures can co-occur on the same sample.
-        failures_any = 0
-        for i in range(n_evaluated):
-            fcasing = (governing_sf_list[i] < 1.0) or (burst_sf_list[i] < 1.0)
-            bolt_configured = self.bolt_count > 0 and self.bolt_diameter_m > 0.0
-            fbolts = (
-                bolt_configured
-                and (bolt_shear_sf_list[i] < 1.0 or bolt_bearing_sf_list[i] < 1.0)
-            )
-            if fcasing or fbolts:
-                failures_any += 1
-        n = max(n_evaluated, 1)
+            failed_bolts = (bolt_shear is not None and bolt_bearing is not None
+                            and (bolt_shear < 1.0 or bolt_bearing < 1.0))
+            failures_casing += int(failed_casing)
+            failures_burst += int(failed_burst)
+            failures_bolts += int(failed_bolts)
+            failures_any += int(failed_casing or failed_bolts)
+        n_evaluated = len(evaluated_ids)
+        def probability(failures):
+            return failures / n_evaluated if n_evaluated else None
+        bolt_status, bolt_applicability, bolt_reason = self._bolt_configuration
         return {
-            "n_iterations": n_iterations,
-            "n_evaluated": n_evaluated,
-            "failure_probability": failures_any / n,
-            "failure_probability_casing": failures_casing / n,
-            "failure_probability_burst": failures_burst / n,
-            "failure_probability_bolts": failures_bolts / n,
-            "peak_pressure_pa": peak_pressures,
-            "burst_safety_factor": burst_sf_list,
+            "robustness_policy_id": "structural_monte_carlo_v1", "result_role": "ensemble",
+            "status": "completed" if n_evaluated == n_iterations else "incomplete",
+            "nominal": None, "scenario_ids": [r["scenario_id"] for r in records],
+            "evaluated_scenario_ids": evaluated_ids, "scenarios": records,
+            "n_iterations": int(n_iterations), "n_evaluated": n_evaluated,
+            "n_failed": int(n_iterations) - n_evaluated,
+            "failure_probability": probability(failures_any),
+            "failure_probability_casing": probability(failures_casing),
+            "failure_probability_burst": probability(failures_burst),
+            "failure_probability_bolts": probability(failures_bolts) if bolt_status == "configured" else None,
+            "closure_bolt_status": bolt_status, "closure_bolt_applicability": bolt_applicability,
+            "closure_bolt_reason": bolt_reason,
+            "peak_pressure_pa": peak_pressures, "burst_safety_factor": burst_sf_list,
             "governing_safety_factor": governing_sf_list,
             "bolt_shear_safety_factor": bolt_shear_sf_list,
-            "bolt_bearing_safety_factor": bolt_bearing_sf_list,
-            "samples": samples,
+            "bolt_bearing_safety_factor": bolt_bearing_sf_list, "samples": samples,
+            "provenance": {
+                "physics_provider": "solidpy_structural_v1",
+                "casing_material": {name: getattr(self.casing_material, name) for name in (
+                    "density_kg_m3", "modulus_gpa", "yield_strength_mpa", "resolved_allowable_stress_mpa",
+                    "resolved_ultimate_strength_mpa", "poisson_ratio", "max_service_temp_c", "material_family",
+                )}, "geometry": asdict(self.geometry),
+                "casing_strength_factor": self.casing_strength_factor,
+                "bolt_count": int(self.bolt_count), "bolt_diameter_m": float(self.bolt_diameter_m),
+                "bolt_strength_mpa": float(self.bolt_strength_mpa),
+                "closure_bolts_applicable": bool(self.closure_bolts_applicable),
+                "thermal_source": "provided" if self.thermal is not None else "not_provided",
+                "thermal_stress_model": "not_modeled", "random_seed": self.random_seed,
+                "parameter_sigmas": self.parameter_sigmas,
+                "pressure_history_model": "peak_pressure_synthetic_curve_v1",
+            },
         }

@@ -1,18 +1,4 @@
-"""surrogate_physics — Exportação de grandezas físicas estáticas para surrogate ML.
-
-Objetivo:
-    Fornecer ao projeto MotorTransformer todas as grandezas que precisam ser
-    reimplementadas em PyTorch para construir as PINN-lite losses do surrogate.
-    A regra é: cada equação aqui representa a "verdade física" que o surrogate
-    deve espelhar.  Se o SolidPy mudar uma equação, este módulo muda junto —
-    e os loss terms do surrogate devem ser atualizados na sequência.
-
-Uso típico no pipeline ML:
-    from solidpy.surrogate_physics import compute_static_features, compute_burn_area_curve
-
-    feats = compute_static_features(grain, motor, propellant, eta_c=design.isp_efficiency)
-    ab_curve = compute_burn_area_curve(grain, n_points=64)
-"""
+"""Static physical features and burn-area curves for numerical surrogates."""
 from __future__ import annotations
 
 import math
@@ -31,6 +17,7 @@ try:
     from .Multiphysics import (
         CasingMaterial,
         NozzleMaterial,
+        casing_burst_pressure_pa,
         _casing_mass_with_bulkheads_kg,
         _casing_mass_with_bulkheads_kg_vectorized,
         _liner_mass_kg,
@@ -51,6 +38,7 @@ except ImportError:
     from Multiphysics import (
         CasingMaterial,
         NozzleMaterial,
+        casing_burst_pressure_pa,
         _casing_mass_with_bulkheads_kg,
         _casing_mass_with_bulkheads_kg_vectorized,
         _liner_mass_kg,
@@ -74,9 +62,7 @@ except ImportError:
 class SurrogateStaticFeatures:
     """Grandezas escalares calculáveis a partir do design ANTES da ODE.
 
-    Todos os valores estão em unidades SI.  Este dataclass é a "planta" do que
-    o módulo ``physics/analytical.py`` do MotorTransformer deve reimplementar
-    em PyTorch para os PINN-lite loss terms.
+    Todos os valores estão em unidades SI.
 
     Atributos
     ---------
@@ -197,8 +183,8 @@ class SurrogateStructuralFeatures:
         quando não. Fonte: ``Multiphysics.py::simulate_structural_response``.
 
     burst_pressure_pa:
-        ``(2/√3) Su ln(r_o/r_i)`` pelo critério de Tresca.
-        Fonte: ``Multiphysics.py::simulate_structural_response``.
+        ``(2/√3) Su ln(r_o/r_i)`` pela convenção de resistência última do núcleo.
+        Fonte: ``Multiphysics.py::casing_burst_pressure_pa``.
 
     burst_safety_factor_at_reference_pa:
         ``burst_pressure_pa / max(chamber_pressure_pa, 1)``.
@@ -266,9 +252,7 @@ def compute_static_features(
 ) -> SurrogateStaticFeatures:
     """Calcula grandezas físicas estáticas a partir do design, sem ODE.
 
-    Estas são as equações que o módulo ``physics/analytical.py`` do
-    MotorTransformer DEVE reimplementar em PyTorch para as PINN-lite losses.
-    Qualquer mudança nesta função deve ser espelhada lá.
+    As propriedades usam a mesma termoquímica e decomposição de empuxo do núcleo.
 
     Parâmetros
     ----------
@@ -279,8 +263,7 @@ def compute_static_features(
     propellant:
         Propelente com termoquímica definida.
     eta_c:
-        Eficiência de combustão.  Passar aqui o valor de ``alpha.isp_efficiency``
-        do vetor de design do MotorTransformer.
+        Eficiência de combustão aplicada à temperatura dos produtos.
     P_ref_pa:
         Pressão de câmara de referência para avaliação de Cf e Isp.
         Default 3,5 MPa (pressão típica de operação nominal).
@@ -712,10 +695,9 @@ def compute_structural_features(
     # below the canonical minimum are clamped above.
     try:
         ultimate_pa = ultimate_strength_mpa * 1e6 * casing_strength_factor
-        burst_pressure_pa = (
-            (2.0 / math.sqrt(3.0))
-            * ultimate_pa
-            * math.log(max(outer_radius_m / max(inner_radius_m, 1e-9), 1.0))
+        burst_pressure_pa = casing_burst_pressure_pa(
+            inner_radius_m, wall_m, ultimate_strength_mpa,
+            casing_strength_factor=casing_strength_factor,
         )
         burst_safety_factor = burst_pressure_pa / max(pressure_pa, 1.0)
     except OverflowError as exc:
@@ -946,10 +928,9 @@ def compute_structural_features_vectorized(
             von_mises = np.sqrt(np.maximum(stress_invariant, 0.0))
 
             ultimate_pa = ultimate_strength * 1e6 * strength_factor
-            burst_pressure = (
-                (2.0 / np.sqrt(3.0))
-                * ultimate_pa
-                * np.log(np.maximum(outer_radius / np.maximum(inner_radius, 1e-9), 1.0))
+            burst_pressure = casing_burst_pressure_pa(
+                inner_radius, casing_wall, ultimate_strength,
+                casing_strength_factor=strength_factor,
             )
             burst_safety_factor = burst_pressure / np.maximum(chamber_pressure, 1.0)
     except (FloatingPointError, OverflowError, ZeroDivisionError) as exc:
@@ -1005,8 +986,7 @@ def compute_burn_area_curve(
 
     Esta curva é a 'assinatura geométrica' que distingue tubular de star de
     hetero.  O surrogate pode usá-la como feature de entrada ou como alvo
-    de uma loss de forma.  No MotorTransformer, ela não precisa de reimplementação
-    em PyTorch — é usada como feature pré-computada no dataset.
+    de uma loss de forma ou como feature pré-computada no dataset.
 
     A regressão w varre de 0 até a espessura total da teia W = r_outer - r_inner.
     Para grãos star, o slot pode atingir a parede antes de w = W; a área retorna

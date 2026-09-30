@@ -640,7 +640,8 @@ class TestStructuralFeatures:
         features = compute_structural_features(
             motor,
             chamber_pressure_pa=pressure_pa,
-            casing_strength_factor=strength_factor,
+            casing_material=CasingMaterial(),
+            casing_strength_factor=max(strength_factor, 0.01),
             casing_wall_thickness_m=0.0,
             grain=tubular_grain,
             propellant_mass_kg=1.0,
@@ -660,7 +661,8 @@ class TestStructuralFeatures:
             geometry,
             curve,
             {"simulation.advanced.thermal.casing_inner_wall_temp_c": 20.0},
-            casing_strength_factor=strength_factor,
+            casing_material=CasingMaterial(),
+            casing_strength_factor=max(strength_factor, 0.01),
         )
         assert features.von_mises_at_reference_pa == pytest.approx(
             transient["simulation.advanced.structural.max_stress_mpa"] * 1e6

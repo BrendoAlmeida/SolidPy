@@ -758,7 +758,7 @@ def test_advanced_components_groups_results():
         casing_wall_thickness_m=0.004,
         dry_mass_kg=3.0,
     )
-    grouped = simulate_advanced_components(geometry, curve)
+    grouped = simulate_advanced_components(geometry, curve, casing_material=CasingMaterial())
 
     for key in ["thermal", "structural", "cfd", "ignition", "flight", "nominal_advanced"]:
         assert key in grouped

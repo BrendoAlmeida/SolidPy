@@ -64,6 +64,7 @@ from .Multiphysics import (
     DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
     MotorGeometry,
     NozzleMaterial,
+    casing_burst_pressure_pa,
     evaluate_barrowman_stability,
     evaluate_cd_by_components,
     geometry_from_components,
