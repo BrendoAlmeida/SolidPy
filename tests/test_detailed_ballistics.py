@@ -87,8 +87,8 @@ def test_detailed_ballistics_returns_internal_series():
     ]:
         assert len(result[key]) == len(time_s)
         assert np.all(np.isfinite(result[key]))
-    assert result["schema_version"] == 4.0
-    assert result["summary"]["simulation.schema_version"] == 4.0
+    assert result["schema_version"] == 5.0
+    assert result["summary"]["simulation.schema_version"] == 5.0
     assert np.all(result["propellant_mass_kg"] >= 0.0)
     assert np.all(result["motor_mass_kg"] >= result["propellant_mass_kg"])
 
@@ -117,6 +117,38 @@ def test_detailed_ballistics_returns_internal_series():
     assert np.all(np.isfinite(result["motor_mass_kg"][-1:]))
     assert result["motor_mass_kg"][-1] == pytest.approx(motor.dry_mass_kg, abs=0.05)
     np.testing.assert_allclose(result["motor_center_of_mass_position_m"][-1], dry_cg, atol=0.05)
+
+
+def test_detailed_ballistics_uses_canonical_histories_and_integrals():
+    result = run_detailed_ballistics(
+        *make_motor_stack(), max_step_size=0.02, max_time_points=80,
+    )
+    canonical = result["canonical_result"]
+    history = canonical["history"]
+    metrics = canonical["metrics"]
+
+    np.testing.assert_allclose(
+        result["mass_generated_kg_s"],
+        np.interp(result["time_s"], history["time_s"], history["mdot_generated_kg_s"]),
+    )
+    np.testing.assert_allclose(
+        result["mass_nozzle_kg_s"],
+        np.interp(result["time_s"], history["time_s"], history["mdot_nozzle_kg_s"]),
+    )
+    assert result["summary"]["simulation.nominal.total_impulse_ns"] == pytest.approx(
+        metrics["total_impulse_ns"]
+    )
+    assert result["summary"]["simulation.nominal.mass_flow_avg_kg_s"] == pytest.approx(
+        metrics["mass_flow_avg_generated_kg_s"]
+    )
+    assert result["summary"]["simulation.nominal.mass_flow_avg_nozzle_kg_s"] == pytest.approx(
+        metrics["mass_flow_avg_nozzle_kg_s"]
+    )
+    assert result["summary"]["simulation.nominal.mass_conservation_error_pct"] == pytest.approx(
+        metrics["mass_flow_balance_error_pct"]
+    )
+    assert result["status"] is canonical["status"]
+    assert result["provenance"] is canonical["provenance"]
 
 
 def test_interpolation_is_linear_and_endpoint_clamped():

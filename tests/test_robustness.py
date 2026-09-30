@@ -60,3 +60,29 @@ def test_robustness_analysis_aggregates_scenarios():
     assert summary["simulation.robustness.total_impulse_p95_ns"] >= summary[
         "simulation.robustness.total_impulse_p05_ns"
     ]
+    assert result["robustness_policy_id"] == "solidpy_robustness_ensemble_v1"
+    assert result["result_role"] == "ensemble"
+    assert result["scenario_ids"] == ["slow", "fast"]
+    assert set(result["provenance"]["physics_provider_hashes"]) == {
+        "nominal", "slow", "fast"
+    }
+    assert result["status"] == "completed"
+
+
+def test_robustness_propagates_resolved_efficiencies_to_each_scenario():
+    result = run_robustness_analysis(
+        *make_motor_stack(),
+        scenarios=[RobustnessScenario("controlled")],
+        max_step_size=0.03,
+        max_time_points=150,
+        eta_c=0.98,
+        eta_Cf=0.91,
+        discharge_coefficient=0.87,
+    )
+
+    for run in [result["nominal"], *result["scenarios"]]:
+        provenance = run["provenance"]
+        assert provenance["eta_c_applied"] == 0.98
+        assert provenance["eta_cf_applied"] == 0.91
+        assert provenance["discharge_coefficient_applied"] == 0.87
+    assert result["scenarios"][0]["scenario_factors"]["scenario_id"] == "controlled"

@@ -12,15 +12,13 @@ import numpy as np
 try:
     from .Burn import BurnSimulation
     from .Environment import Environment
-    from ._numpy_compat import trapezoid as _trapezoid
 except ImportError:
     from Burn import BurnSimulation
     from Environment import Environment
-    from _numpy_compat import trapezoid as _trapezoid
 
 
 STANDARD_GRAVITY = 9.80665
-DETAILED_BALLISTICS_SCHEMA_VERSION = 4.0
+DETAILED_BALLISTICS_SCHEMA_VERSION = 5.0
 
 
 def _deduplicate_time(time, *series):
@@ -32,6 +30,21 @@ def _deduplicate_time(time, *series):
 def _linear_endpoint_clamped(x, xp, fp):
     """Linearly interpolate ``fp`` while clamping outside ``xp`` endpoints."""
     return np.interp(np.asarray(x, dtype=float), np.asarray(xp, dtype=float), np.asarray(fp, dtype=float))
+
+
+def _interpolate_history(time_s, source_time_s, values):
+    """Interpolate a canonical history series onto the detailed display grid."""
+    values = np.asarray(values, dtype=float)
+    if values.ndim == 1:
+        return _linear_endpoint_clamped(time_s, source_time_s, values)
+    if values.ndim == 2:
+        return np.column_stack(
+            [
+                _linear_endpoint_clamped(time_s, source_time_s, values[:, index])
+                for index in range(values.shape[1])
+            ]
+        )
+    raise ValueError("canonical history series must be one- or two-dimensional")
 
 
 def evaluate_nozzle_ablation_rate(
@@ -84,13 +97,19 @@ def _validate_dynamic_series(time_s, propellant_mass_kg, motor_mass_kg, *centers
 
 
 def _evaluate_dynamic_mass_and_cg(motor, propellant, regressions):
+    regressions = np.asarray(regressions, dtype=float)
+    if regressions.ndim == 1:
+        regressions = np.repeat(regressions[:, None], len(motor.grains), axis=1)
+    if regressions.ndim != 2 or regressions.shape[1] != len(motor.grains):
+        raise ValueError("regressions must contain one value per grain and time point")
+
     masses = []
     cgs = []
-    for regression in regressions:
+    for grain_regressions in regressions:
         propellant_mass = 0.0
         moment = 0.0
         stack_start = 0.0
-        for grain in motor.grains:
+        for grain, regression in zip(motor.grains, grain_regressions):
             height, area = _remaining_geometry(grain, regression)
             mass = max(area * height * propellant.density, 0.0)
             propellant_mass += mass
@@ -171,31 +190,40 @@ def build_detailed_ballistics(
     interpolation with endpoint clamping outside the raw time domain; no
     extrapolation is performed.
     """
-    raw_time = np.asarray(simulation.total_burn_solution[0], dtype=float)
-    raw_pressure = np.asarray(simulation.total_burn_solution[1], dtype=float)
-    raw_free_volume = np.asarray(simulation.total_burn_solution[2], dtype=float)
-    raw_regression = np.asarray(simulation.total_burn_solution[3], dtype=float)
-    raw_thrust = np.asarray(simulation.total_burn_solution[4], dtype=float)
-    raw_exit_pressure = np.asarray(simulation.total_burn_solution[5], dtype=float)
-    raw_exit_velocity = np.asarray(simulation.total_burn_solution[6], dtype=float)
-
-    raw_time, deduped = _deduplicate_time(
-        raw_time,
-        raw_pressure,
-        raw_free_volume,
-        raw_regression,
-        raw_thrust,
-        raw_exit_pressure,
-        raw_exit_velocity,
+    canonical_result = simulation.result
+    canonical_history = canonical_result["history"]
+    canonical_metrics = canonical_result["metrics"]
+    canonical_status = canonical_result["status"]
+    raw_time = np.asarray(canonical_history["time_s"], dtype=float)
+    raw_pressure = np.asarray(canonical_history["chamber_pressure_pa"], dtype=float)
+    raw_free_volume = np.asarray(canonical_history["free_volume_m3"], dtype=float)
+    raw_regressions = np.asarray(canonical_history["regression_m"], dtype=float)
+    raw_thrust = np.asarray(canonical_history["thrust_n"], dtype=float)
+    raw_exit_pressure = np.asarray(canonical_history["exit_pressure_pa"], dtype=float)
+    raw_exit_velocity = np.asarray(canonical_history["exit_velocity_m_s"], dtype=float)
+    raw_generated_flow = np.asarray(canonical_history["mdot_generated_kg_s"], dtype=float)
+    raw_igniter_flow = np.asarray(canonical_history["mdot_igniter_kg_s"], dtype=float)
+    raw_nozzle_flow = np.asarray(canonical_history["mdot_nozzle_kg_s"], dtype=float)
+    raw_gas_mass = np.asarray(canonical_history["gas_mass_kg"], dtype=float)
+    raw_momentum_ideal = np.asarray(canonical_history["momentum_ideal_n"], dtype=float)
+    raw_momentum = np.asarray(canonical_history["momentum_n"], dtype=float)
+    raw_pressure_thrust = np.asarray(canonical_history["pressure_n"], dtype=float)
+    raw_burn_area = np.asarray(canonical_history["burn_area_m2"], dtype=float)
+    raw_generated_integral = np.asarray(
+        canonical_history["generated_mass_integral_kg"], dtype=float
     )
-    (
-        raw_pressure,
-        raw_free_volume,
-        raw_regression,
-        raw_thrust,
-        raw_exit_pressure,
-        raw_exit_velocity,
-    ) = deduped
+    raw_igniter_integral = np.asarray(
+        canonical_history["igniter_mass_integral_kg"], dtype=float
+    )
+    raw_nozzle_integral = np.asarray(
+        canonical_history["nozzle_mass_integral_kg"], dtype=float
+    )
+    raw_impulse_integral = np.asarray(
+        canonical_history["impulse_integral_ns"], dtype=float
+    )
+    raw_pressure_throat_integral = np.asarray(
+        canonical_history["pressure_throat_integral_ns"], dtype=float
+    )
 
     if resample_step is not None and len(raw_time) > 1:
         step = max(float(resample_step), 1e-6)
@@ -203,7 +231,7 @@ def build_detailed_ballistics(
         if max_time_points is not None:
             count = min(count, max(int(max_time_points), 2))
         time_s = np.linspace(float(raw_time[0]), float(raw_time[-1]), count)
-        burnout_times = simulation.result["metrics"]["grain_burnout_times_s"]
+        burnout_times = canonical_metrics["grain_burnout_times_s"]
         available = list(range(1, count - 1))
         for event_time in sorted({float(t) for t in burnout_times if t is not None}):
             if not available or not raw_time[0] < event_time < raw_time[-1]:
@@ -214,7 +242,7 @@ def build_detailed_ballistics(
         time_s.sort()
         chamber_pressure_pa = _linear_endpoint_clamped(time_s, raw_time, raw_pressure)
         free_volume_m3 = _linear_endpoint_clamped(time_s, raw_time, raw_free_volume)
-        regressed_length_m = _linear_endpoint_clamped(time_s, raw_time, raw_regression)
+        regression_by_grain_m = _interpolate_history(time_s, raw_time, raw_regressions)
         thrust_n = _linear_endpoint_clamped(time_s, raw_time, raw_thrust)
         exit_pressure_pa = _linear_endpoint_clamped(time_s, raw_time, raw_exit_pressure)
         exit_velocity_m_s = _linear_endpoint_clamped(time_s, raw_time, raw_exit_velocity)
@@ -222,7 +250,7 @@ def build_detailed_ballistics(
         time_s = raw_time
         chamber_pressure_pa = raw_pressure
         free_volume_m3 = raw_free_volume
-        regressed_length_m = raw_regression
+        regression_by_grain_m = raw_regressions
         thrust_n = raw_thrust
         exit_pressure_pa = raw_exit_pressure
         exit_velocity_m_s = raw_exit_velocity
@@ -231,7 +259,7 @@ def build_detailed_ballistics(
             time_s = time_s[index]
             chamber_pressure_pa = chamber_pressure_pa[index]
             free_volume_m3 = free_volume_m3[index]
-            regressed_length_m = regressed_length_m[index]
+            regression_by_grain_m = regression_by_grain_m[index]
             thrust_n = thrust_n[index]
             exit_pressure_pa = exit_pressure_pa[index]
             exit_velocity_m_s = exit_velocity_m_s[index]
@@ -242,13 +270,31 @@ def build_detailed_ballistics(
     motor = simulation.motor
     propellant = simulation.propellant
     _validate_dry_hardware(motor)
-    burn_area_m2 = np.asarray(
-        [simulation.compute_total_burn_area(regression) for regression in regressed_length_m],
-        dtype=float,
+    regressed_length_m = np.mean(regression_by_grain_m, axis=1)
+    burn_area_m2 = _interpolate_history(time_s, raw_time, raw_burn_area)
+    mass_generated_kg_s = _interpolate_history(time_s, raw_time, raw_generated_flow)
+    mass_igniter_kg_s = _interpolate_history(time_s, raw_time, raw_igniter_flow)
+    mass_nozzle_kg_s = _interpolate_history(time_s, raw_time, raw_nozzle_flow)
+    gas_mass_kg = _interpolate_history(time_s, raw_time, raw_gas_mass)
+    momentum_ideal_n = _interpolate_history(time_s, raw_time, raw_momentum_ideal)
+    momentum_n = _interpolate_history(time_s, raw_time, raw_momentum)
+    pressure_thrust_n = _interpolate_history(time_s, raw_time, raw_pressure_thrust)
+    generated_mass_integral_kg = _interpolate_history(
+        time_s, raw_time, raw_generated_integral
+    )
+    igniter_mass_integral_kg = _interpolate_history(
+        time_s, raw_time, raw_igniter_integral
+    )
+    nozzle_mass_integral_kg = _interpolate_history(
+        time_s, raw_time, raw_nozzle_integral
+    )
+    impulse_integral_ns = _interpolate_history(time_s, raw_time, raw_impulse_integral)
+    pressure_throat_integral_ns = _interpolate_history(
+        time_s, raw_time, raw_pressure_throat_integral
     )
 
     propellant_mass_kg, propellant_cg_m, motor_mass_kg, motor_cg_m = _evaluate_dynamic_mass_and_cg(
-        motor, propellant, regressed_length_m
+        motor, propellant, regression_by_grain_m
     )
     _validate_dynamic_series(
         time_s,
@@ -261,31 +307,20 @@ def build_detailed_ballistics(
         regression_rate_m_s = np.maximum(
             np.gradient(regressed_length_m, time_s, edge_order=1), 0.0
         )
-        mass_generated_kg_s = np.maximum(
-            -np.gradient(propellant_mass_kg, time_s, edge_order=1), 0.0
-        )
     else:
         regression_rate_m_s = np.zeros_like(time_s)
-        mass_generated_kg_s = np.zeros_like(time_s)
 
-    mass_nozzle_kg_s = np.asarray(
-        [
-            max(float(simulation.evaluate_nozzle_mass_flow(pressure)), 0.0)
-            for pressure in chamber_pressure_pa
-        ],
-        dtype=float,
-    )
-
-    throat_ablation_m = np.zeros_like(time_s)
-    for idx in range(1, len(time_s)):
-        dt = max(float(time_s[idx] - time_s[idx - 1]), 1e-9)
-        throat_ablation_m[idx] = throat_ablation_m[idx - 1] + dt * evaluate_nozzle_ablation_rate(
-            chamber_pressure_pa[idx - 1],
-            mass_nozzle_kg_s[idx - 1],
+    raw_throat_ablation_m = np.zeros_like(raw_time)
+    for idx in range(1, len(raw_time)):
+        dt = max(float(raw_time[idx] - raw_time[idx - 1]), 1e-9)
+        raw_throat_ablation_m[idx] = raw_throat_ablation_m[idx - 1] + dt * evaluate_nozzle_ablation_rate(
+            raw_pressure[idx - 1],
+            raw_nozzle_flow[idx - 1],
             scale=nozzle_ablation_scale,
             pressure_exponent=ablation_pressure_exponent,
             mass_flow_exponent=ablation_mass_flow_exponent,
         )
+    throat_ablation_m = _interpolate_history(time_s, raw_time, raw_throat_ablation_m)
 
     base_throat_radius_m = math.sqrt(max(motor.nozzle_throat_area, 0.0) / math.pi)
     throat_radius_m = base_throat_radius_m + throat_ablation_m
@@ -317,7 +352,17 @@ def build_detailed_ballistics(
         "regression_rate_m_s": regression_rate_m_s,
         "mass_flow_kg_s": mass_generated_kg_s,
         "mass_generated_kg_s": mass_generated_kg_s,
+        "mass_igniter_kg_s": mass_igniter_kg_s,
         "mass_nozzle_kg_s": mass_nozzle_kg_s,
+        "gas_mass_kg": gas_mass_kg,
+        "momentum_ideal_n": momentum_ideal_n,
+        "momentum_n": momentum_n,
+        "pressure_thrust_n": pressure_thrust_n,
+        "generated_mass_integral_kg": generated_mass_integral_kg,
+        "igniter_mass_integral_kg": igniter_mass_integral_kg,
+        "nozzle_mass_integral_kg": nozzle_mass_integral_kg,
+        "impulse_integral_ns": impulse_integral_ns,
+        "pressure_throat_integral_ns": pressure_throat_integral_ns,
         "propellant_mass_kg": propellant_mass_kg,
         "propellant_center_of_mass_position_m": propellant_cg_m,
         "motor_mass_kg": motor_mass_kg,
@@ -330,33 +375,22 @@ def build_detailed_ballistics(
         "cf": cf,
         "ignition_active_fraction": active_fraction,
     }
-    total_impulse_ns = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
-    burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
-    peak_thrust_n = float(np.max(thrust_n)) if len(thrust_n) else 0.0
-    avg_thrust_n = total_impulse_ns / burn_time_s if burn_time_s > 0.0 else 0.0
-    propellant_burned_kg = float(
-        max(propellant_mass_kg[0] - propellant_mass_kg[-1], 0.0)
-    )
-    generated_integral_kg = (
-        float(_trapezoid(mass_generated_kg_s, time_s)) if len(time_s) > 1 else 0.0
-    )
-    expelled_integral_kg = (
-        float(_trapezoid(mass_nozzle_kg_s, time_s)) if len(time_s) > 1 else 0.0
-    )
-    mass_conservation_error_pct = (
-        100.0
-        * abs(generated_integral_kg - expelled_integral_kg)
-        / max(generated_integral_kg, 1e-9)
-        if generated_integral_kg > 1e-9
-        else 0.0
-    )
+    total_impulse_ns = float(canonical_metrics["total_impulse_ns"])
+    burn_time_s = float(canonical_metrics["propellant_burn_duration_s"])
+    nozzle_flow_duration_s = float(canonical_metrics["nozzle_flow_duration_s"])
+    peak_thrust_n = float(canonical_metrics["peak_thrust_n"])
+    avg_thrust_n = total_impulse_ns / nozzle_flow_duration_s if nozzle_flow_duration_s > 0.0 else 0.0
+    propellant_burned_kg = float(canonical_metrics["propellant_mass_consumed_kg"])
+    generated_integral_kg = float(canonical_metrics["generated_mass_integral_kg"])
+    expelled_integral_kg = float(canonical_metrics["nozzle_mass_integral_kg"])
+    mass_conservation_error_pct = float(canonical_metrics["mass_flow_balance_error_pct"])
     isp_effective_s = (
         total_impulse_ns / (propellant_burned_kg * STANDARD_GRAVITY)
         if propellant_burned_kg > 1e-9
         else 0.0
     )
     cstar_effective_m_s = (
-        float(_trapezoid(chamber_pressure_pa * throat_area_m2, time_s))
+        float(canonical_metrics["pressure_throat_integral_ns"])
         / max(generated_integral_kg, 1e-9)
         if generated_integral_kg > 1e-9
         else 0.0
@@ -364,7 +398,7 @@ def build_detailed_ballistics(
     max_dpressure_dt_pa_s = (
         float(
             np.max(
-                np.abs(np.diff(chamber_pressure_pa) / np.maximum(np.diff(time_s), 1e-12))
+                np.abs(np.diff(raw_pressure) / np.maximum(np.diff(raw_time), 1e-12))
             )
         )
         if len(time_s) > 1
@@ -379,14 +413,35 @@ def build_detailed_ballistics(
         "simulation.nominal.avg_thrust_n": avg_thrust_n,
         "simulation.nominal.total_impulse_ns": total_impulse_ns,
         "simulation.nominal.isp_effective_s": isp_effective_s,
-        "simulation.nominal.mass_flow_avg_kg_s": float(np.mean(mass_generated_kg_s)),
-        "simulation.nominal.max_mass_flow_kg_s": float(np.max(mass_generated_kg_s)),
-        "simulation.nominal.max_nozzle_mass_flow_kg_s": float(np.max(mass_nozzle_kg_s)),
+        "simulation.nominal.nozzle_flow_duration_s": nozzle_flow_duration_s,
+        "simulation.nominal.mass_flow_avg_kg_s": float(
+            canonical_metrics["mass_flow_avg_generated_kg_s"]
+        ),
+        "simulation.nominal.mass_flow_avg_nozzle_kg_s": float(
+            canonical_metrics["mass_flow_avg_nozzle_kg_s"]
+        ),
+        "simulation.nominal.max_mass_flow_kg_s": float(
+            canonical_metrics["max_generated_mass_flow_kg_s"]
+        ),
+        "simulation.nominal.max_nozzle_mass_flow_kg_s": float(
+            canonical_metrics["max_nozzle_mass_flow_kg_s"]
+        ),
         "simulation.nominal.chamber_pressure_max_mpa": float(
-            np.max(chamber_pressure_pa) / 1e6
+            canonical_metrics["peak_chamber_pressure_pa"] / 1e6
         ),
         "simulation.nominal.pressure_rise_rate_max_mpa_s": max_dpressure_dt_pa_s / 1e6,
         "simulation.nominal.mass_conservation_error_pct": mass_conservation_error_pct,
+        "simulation.nominal.generated_mass_integral_kg": generated_integral_kg,
+        "simulation.nominal.nozzle_mass_integral_kg": expelled_integral_kg,
+        "simulation.nominal.igniter_mass_injected_kg": float(
+            canonical_metrics["igniter_mass_injected_kg"]
+        ),
+        "simulation.nominal.gas_mass_initial_kg": float(
+            canonical_metrics["gas_mass_initial_kg"]
+        ),
+        "simulation.nominal.gas_mass_cutoff_kg": float(
+            canonical_metrics["gas_mass_cutoff_kg"]
+        ),
         "simulation.nominal.cstar_effective_m_s": cstar_effective_m_s,
         "simulation.nominal.final_throat_diameter_mm": 1000.0
         * float(throat_diameter_m[-1]),
@@ -404,6 +459,9 @@ def build_detailed_ballistics(
         },
         "gamma": float(propellant.specific_heat_ratio),
         "summary": summary,
+        "canonical_result": canonical_result,
+        "status": canonical_status,
+        "provenance": canonical_result["provenance"],
     })
     _validate_result_series(result, time_s)
     return result

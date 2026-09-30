@@ -136,16 +136,32 @@ def _rescale_thrust(result, factor):
         return result
 
     result["thrust_n"] = np.asarray(result["thrust_n"], dtype=float) * factor
-    time_s = np.asarray(result["time_s"], dtype=float)
-    thrust_n = np.asarray(result["thrust_n"], dtype=float)
-    propellant_mass_kg = np.asarray(result["propellant_mass_kg"], dtype=float)
-    burned_kg = max(float(propellant_mass_kg[0] - propellant_mass_kg[-1]), 0.0)
-    burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
-    total_impulse = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
+    canonical = result.get("canonical_result")
+    if canonical is not None:
+        history = canonical["history"]
+        metrics = canonical["metrics"]
+        history["thrust_n"] = np.asarray(history["thrust_n"], dtype=float) * factor
+        history["impulse_integral_ns"] = (
+            np.asarray(history["impulse_integral_ns"], dtype=float) * factor
+        )
+        metrics["total_impulse_ns"] = float(metrics["total_impulse_ns"]) * factor
+        metrics["peak_thrust_n"] = float(metrics["peak_thrust_n"]) * factor
+        total_impulse = float(metrics["total_impulse_ns"])
+        burned_kg = float(metrics["propellant_mass_consumed_kg"])
+        burn_time_s = float(metrics["nozzle_flow_duration_s"])
+        peak_thrust = float(metrics["peak_thrust_n"])
+    else:
+        time_s = np.asarray(result["time_s"], dtype=float)
+        thrust_n = np.asarray(result["thrust_n"], dtype=float)
+        propellant_mass_kg = np.asarray(result["propellant_mass_kg"], dtype=float)
+        burned_kg = max(float(propellant_mass_kg[0] - propellant_mass_kg[-1]), 0.0)
+        burn_time_s = float(time_s[-1] - time_s[0]) if len(time_s) else 0.0
+        total_impulse = float(_trapezoid(thrust_n, time_s)) if len(time_s) > 1 else 0.0
+        peak_thrust = float(np.max(thrust_n)) if len(thrust_n) else 0.0
 
     summary = result["summary"]
     summary["simulation.nominal.total_impulse_ns"] = total_impulse
-    summary["simulation.nominal.peak_thrust_n"] = float(np.max(thrust_n))
+    summary["simulation.nominal.peak_thrust_n"] = peak_thrust
     summary["simulation.nominal.avg_thrust_n"] = (
         total_impulse / burn_time_s if burn_time_s > 0.0 else 0.0
     )
@@ -243,6 +259,16 @@ def run_robustness_analysis(
         scenario_grain, scenario_motor, scenario_propellant, scenario_environment = (
             _apply_scenario(grain, motor, propellant, environment, scenario)
         )
+        scenario_kwargs = dict(simulation_kwargs)
+        scenario_kwargs.update({
+            "igniter_mass_flow": simulation_kwargs.get("igniter_mass_flow"),
+            "igniter_burn_time": simulation_kwargs.get("igniter_burn_time", 0.0)
+            * float(scenario.igniter_energy_factor),
+            "igniter_temperature": simulation_kwargs.get("igniter_temperature"),
+            "burn_area_activation": simulation_kwargs.get("burn_area_activation"),
+            "ignition_ramp_time": simulation_kwargs.get("ignition_ramp_time", 0.0),
+            "tail_off_method": simulation_kwargs.get("tail_off_method", "numerical"),
+        })
         result = run_detailed_ballistics(
             scenario_grain,
             scenario_motor,
@@ -251,13 +277,7 @@ def run_robustness_analysis(
             max_step_size=max_step_size,
             max_time_points=max_time_points,
             nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor),
-            igniter_mass_flow=simulation_kwargs.get("igniter_mass_flow"),
-            igniter_burn_time=simulation_kwargs.get("igniter_burn_time", 0.0)
-            * float(scenario.igniter_energy_factor),
-            igniter_temperature=simulation_kwargs.get("igniter_temperature"),
-            burn_area_activation=simulation_kwargs.get("burn_area_activation"),
-            ignition_ramp_time=simulation_kwargs.get("ignition_ramp_time", 0.0),
-            tail_off_method=simulation_kwargs.get("tail_off_method", "numerical"),
+            **scenario_kwargs,
         )
         result = _rescale_thrust(result, scenario.isp_factor)
         result["scenario_id"] = scenario.scenario_id
@@ -276,8 +296,28 @@ def run_robustness_analysis(
         if len(validation):
             summary["simulation.robustness.valid_ratio"] = float(np.mean(validation))
 
+    scenario_statuses = [
+        result.get("status", {}).get("completed") is True
+        for result in results
+    ]
+    provider_hashes = {
+        result["scenario_id"]: result.get("provenance", {}).get("physics_provider_hash")
+        for result in results
+    }
     return {
+        "robustness_policy_id": "solidpy_robustness_ensemble_v1",
+        "result_role": "ensemble",
+        "status": "completed" if all(scenario_statuses) else "incomplete",
+        "scenario_ids": [result["scenario_id"] for result in results[1:]],
         "nominal": nominal,
         "scenarios": results[1:],
         "summary": summary,
+        "provenance": {
+            "physics_provider": "solidpy_detailed_ballistics",
+            "physics_provider_hashes": provider_hashes,
+            "solidpy_git_shas": {
+                result["scenario_id"]: result.get("provenance", {}).get("solidpy_git_sha")
+                for result in results
+            },
+        },
     }
