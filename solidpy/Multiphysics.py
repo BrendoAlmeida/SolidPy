@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from numbers import Integral, Real
+from pathlib import Path
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -2539,6 +2542,44 @@ class StructuralMonteCarlo:
         def probability(failures):
             return failures / n_evaluated if n_evaluated else None
         bolt_status, bolt_applicability, bolt_reason = self._bolt_configuration
+        provenance = {
+            "physics_provider": "solidpy_structural_v1",
+            "casing_material": {name: getattr(self.casing_material, name) for name in (
+                "density_kg_m3", "modulus_gpa", "yield_strength_mpa", "resolved_allowable_stress_mpa",
+                "resolved_ultimate_strength_mpa", "poisson_ratio", "max_service_temp_c", "material_family",
+            )}, "geometry": asdict(self.geometry),
+            "casing_strength_factor": self.casing_strength_factor,
+            "bolt_count": int(self.bolt_count), "bolt_diameter_m": float(self.bolt_diameter_m),
+            "bolt_strength_mpa": float(self.bolt_strength_mpa),
+            "closure_bolts_applicable": bool(self.closure_bolts_applicable),
+            "thermal_source": "provided" if self.thermal is not None else "not_provided",
+            "thermal": self.thermal,
+            "thermal_stress_model": "not_modeled", "random_seed": self.random_seed,
+            "parameter_sigmas": self.parameter_sigmas,
+            "pressure_history_model": "peak_pressure_synthetic_curve_v1",
+        }
+
+        def json_default(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, np.generic):
+                return value.item()
+            if hasattr(value, "__dict__"):
+                return {
+                    key: item for key, item in vars(value).items()
+                    if not key.startswith("_")
+                }
+            return f"{type(value).__module__}.{type(value).__qualname__}"
+
+        hash_digest = hashlib.sha256()
+        hash_digest.update(Path(__file__).read_bytes())
+        hash_digest.update(
+            json.dumps(
+                provenance, sort_keys=True, separators=(",", ":"),
+                allow_nan=False, default=json_default,
+            ).encode("utf-8")
+        )
+        provenance["physics_provider_hash"] = hash_digest.hexdigest()
         return {
             "robustness_policy_id": "structural_monte_carlo_v1", "result_role": "ensemble",
             "status": "completed" if n_evaluated == n_iterations else "incomplete",
@@ -2556,19 +2597,5 @@ class StructuralMonteCarlo:
             "governing_safety_factor": governing_sf_list,
             "bolt_shear_safety_factor": bolt_shear_sf_list,
             "bolt_bearing_safety_factor": bolt_bearing_sf_list, "samples": samples,
-            "provenance": {
-                "physics_provider": "solidpy_structural_v1",
-                "casing_material": {name: getattr(self.casing_material, name) for name in (
-                    "density_kg_m3", "modulus_gpa", "yield_strength_mpa", "resolved_allowable_stress_mpa",
-                    "resolved_ultimate_strength_mpa", "poisson_ratio", "max_service_temp_c", "material_family",
-                )}, "geometry": asdict(self.geometry),
-                "casing_strength_factor": self.casing_strength_factor,
-                "bolt_count": int(self.bolt_count), "bolt_diameter_m": float(self.bolt_diameter_m),
-                "bolt_strength_mpa": float(self.bolt_strength_mpa),
-                "closure_bolts_applicable": bool(self.closure_bolts_applicable),
-                "thermal_source": "provided" if self.thermal is not None else "not_provided",
-                "thermal_stress_model": "not_modeled", "random_seed": self.random_seed,
-                "parameter_sigmas": self.parameter_sigmas,
-                "pressure_history_model": "peak_pressure_synthetic_curve_v1",
-            },
+            "provenance": provenance,
         }

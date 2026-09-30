@@ -212,6 +212,12 @@ def test_structural_ensemble_records_failures_and_missing_bolt_probability():
     assert result["failure_probability_bolts"] is None
     assert result["provenance"]["random_seed"] == 7
     assert result["provenance"]["thermal_source"] == "not_provided"
+    assert len(result["provenance"]["physics_provider_hash"]) == 64
+    repeated = StructuralMonteCarlo(
+        make_geometry(), CasingMaterial(),
+        peak_pressure_distribution=lambda: 3.0e6, random_seed=7,
+    ).run(2)
+    assert repeated["provenance"]["physics_provider_hash"] == result["provenance"]["physics_provider_hash"]
     assert all(record["structural"]["simulation.advanced.structural.thermal_service_margin"] is None
                for record in result["scenarios"])
     json.dumps(result, allow_nan=False)
