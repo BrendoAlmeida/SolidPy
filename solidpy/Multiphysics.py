@@ -61,11 +61,20 @@ class MotorGeometry:
     free_volume_m3: float
     propellant_mass_kg: float
     dry_mass_kg: float
-    motor_initial_mass_kg: float
+    motor_initial_mass_kg: Optional[float]
     motor_final_mass_kg: float
     casing_mass_kg: float = 0.0
     liner_mass_kg: float = 0.0
     nozzle_mass_kg: float = 0.0
+    casing_body_length_m: Optional[float] = None
+    liner_length_m: Optional[float] = None
+    motor_total_length_m: Optional[float] = None
+    connected_chamber_volume_m3: Optional[float] = None
+    mass_scope: str = "unknown"
+    modeled_mass_components: tuple[str, ...] = ()
+    omitted_mass_components: tuple[str, ...] = ()
+    dry_mass_source: str = "unknown"
+    motor_initial_mass_status: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -539,6 +548,10 @@ def geometry_from_components(
     casing_density_kg_m3: float = 7850.0,
     casing_material: Optional[CasingMaterial] = None,
     nozzle_material: Optional[NozzleMaterial] = None,
+    *,
+    casing_body_length_m: Optional[float] = None,
+    liner_length_m: Optional[float] = None,
+    motor_total_length_m: Optional[float] = None,
 ) -> MotorGeometry:
     """Derive an advanced-model geometry from SolidPy components.
 
@@ -547,6 +560,11 @@ def geometry_from_components(
     enables the component model: casing shell plus two bulkheads, liner, and
     the convergent/divergent nozzle shell are calculated independently.  A
     material omitted in that mode keeps the corresponding legacy fallback.
+
+    Physical lengths default to ``motor.chamber_length``. The casing body must
+    contain the active chamber, the liner must not exceed it, and the total
+    envelope must contain the casing body. Gas volume remains independent of
+    these structural dimensions.
 
     The convergent half-angle is fixed at
     ``DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG``.  ``motor.nozzle_angle`` is
@@ -576,6 +594,32 @@ def geometry_from_components(
     )
     exit_area = nonnegative_float(motor.nozzle_exit_area, "motor.nozzle_exit_area")
     chamber_length = nonnegative_float(motor.chamber_length, "motor.chamber_length")
+    if chamber_length <= 0.0:
+        raise ValueError("motor.chamber_length must be positive")
+
+    def physical_length(value: Optional[float], default: float, name: str) -> float:
+        if value is None:
+            return default
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+            raise ValueError(f"{name} must be a finite positive real number")
+        converted = float(value)
+        if not math.isfinite(converted) or converted <= 0.0:
+            raise ValueError(f"{name} must be a finite positive real number")
+        return converted
+
+    casing_body_length = physical_length(
+        casing_body_length_m, chamber_length, "casing_body_length_m"
+    )
+    liner_length = physical_length(liner_length_m, chamber_length, "liner_length_m")
+    motor_total_length = physical_length(
+        motor_total_length_m, casing_body_length, "motor_total_length_m"
+    )
+    if liner_length > chamber_length:
+        raise ValueError("liner_length_m must not exceed motor.chamber_length")
+    if chamber_length > casing_body_length:
+        raise ValueError("casing_body_length_m must contain motor.chamber_length")
+    if casing_body_length > motor_total_length:
+        raise ValueError("motor_total_length_m must contain casing_body_length_m")
     casing_wall_thickness_m = max(
         finite_float(casing_wall_thickness_m, "casing_wall_thickness_m"),
         1e-5,
@@ -661,7 +705,7 @@ def geometry_from_components(
         casing_volume = (
             math.pi
             * max(outer_radius**2 - motor_inner_radius**2, 0.0)
-            * chamber_length
+            * casing_body_length
         )
     except OverflowError as exc:
         raise ValueError("casing geometry calculation overflowed") from exc
@@ -680,12 +724,12 @@ def geometry_from_components(
                 casing_mass = _casing_mass_with_bulkheads_kg(
                     motor_inner_radius,
                     casing_wall_thickness_m,
-                    chamber_length,
+                    casing_body_length,
                     casing_material,
                 )
                 liner_mass = _liner_mass_kg(
                     motor_inner_radius,
-                    chamber_length,
+                    liner_length,
                     casing_material,
                 )
             except OverflowError as exc:
@@ -741,14 +785,42 @@ def geometry_from_components(
     nozzle_mass = finite_float(nozzle_mass, "nozzle mass")
     dry_mass = finite_float(dry_mass, "dry mass")
     propellant_mass_kg = finite_float(propellant_mass_kg, "propellant mass")
-    motor_initial_mass = finite_float(
-        dry_mass + propellant_mass_kg,
-        "motor initial mass",
-    )
+    modeled_components = ["casing"]
+    omitted_components = []
+    if casing_material is None:
+        omitted_components.append("liner")
+    else:
+        modeled_components.append("liner")
+    if nozzle_material is None:
+        omitted_components.append("nozzle")
+    else:
+        modeled_components.append("nozzle")
+
+    if dry_mass_kg is not None:
+        mass_scope = "explicit_dry_mass_override"
+        dry_mass_source = "explicit_override"
+        motor_initial_mass = finite_float(
+            dry_mass + propellant_mass_kg,
+            "motor initial mass",
+        )
+        motor_initial_mass_status = "complete_from_dry_mass_override"
+    elif omitted_components:
+        mass_scope = "partial_components"
+        dry_mass_source = "partial_component_sum"
+        motor_initial_mass = None
+        motor_initial_mass_status = "incomplete_component_scope"
+    else:
+        mass_scope = "modeled_components"
+        dry_mass_source = "component_sum"
+        motor_initial_mass = finite_float(
+            dry_mass + propellant_mass_kg,
+            "motor initial mass",
+        )
+        motor_initial_mass_status = "complete"
     casing_volume = finite_float(casing_volume, "casing volume")
 
     return MotorGeometry(
-        motor_length_m=chamber_length,
+        motor_length_m=casing_body_length,
         motor_inner_diameter_m=motor_inner_diameter,
         casing_wall_thickness_m=casing_wall_thickness_m,
         grain_outer_diameter_m=grain_outer_diameter,
@@ -767,6 +839,18 @@ def geometry_from_components(
         casing_mass_kg=casing_mass,
         liner_mass_kg=liner_mass,
         nozzle_mass_kg=nozzle_mass,
+        casing_body_length_m=casing_body_length,
+        liner_length_m=liner_length,
+        motor_total_length_m=motor_total_length,
+        connected_chamber_volume_m3=finite_float(
+            getattr(motor, "chamber_volume", chamber_area * chamber_length),
+            "motor.chamber_volume",
+        ),
+        mass_scope=mass_scope,
+        modeled_mass_components=tuple(modeled_components),
+        omitted_mass_components=tuple(omitted_components),
+        dry_mass_source=dry_mass_source,
+        motor_initial_mass_status=motor_initial_mass_status,
     )
 
 
@@ -1415,6 +1499,11 @@ def simulate_flight_1d(
     body_fineness_ratio=10.0,
 ):
     """Vertical 1D flight proxy with drag and post-burn coast."""
+    if geometry.motor_initial_mass_kg is None:
+        raise ValueError(
+            "flight simulation requires complete motor mass; configure all mass "
+            "components or provide dry_mass_kg explicitly"
+        )
     time_s = np.asarray(curve["time_s"], dtype=float)
     thrust_n = np.asarray(curve["thrust_n"], dtype=float)
     propellant_mass = _series(
@@ -1846,6 +1935,11 @@ def simulate_flight_3dof(
     Returns:
         dict with simulation summary and trajectory arrays.
     """
+    if geometry.motor_initial_mass_kg is None:
+        raise ValueError(
+            "flight simulation requires complete motor mass; configure all mass "
+            "components or provide dry_mass_kg explicitly"
+        )
     import math
     # ── Parse inputs ──────────────────────────────────────────────────────────
     theta0 = math.radians(max(0.0, min(float(launch_angle_deg), 90.0)))  # elevation

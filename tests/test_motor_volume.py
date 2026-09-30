@@ -1,9 +1,11 @@
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from solidpy import CasingMaterial, Grain, Motor, NozzleMaterial
+from solidpy.Multiphysics import geometry_from_components
 from solidpy.surrogate_physics import compute_structural_features
 
 
@@ -56,6 +58,25 @@ def test_connected_volume_preserves_physical_structure_and_mass():
     connected_features = compute_structural_features(connected, **parameters)
     assert connected.chamber_length == baseline.chamber_length
     assert connected_features == baseline_features
+
+    baseline_geometry = geometry_from_components(
+        baseline.grain, baseline, SimpleNamespace(density=1700.0),
+        casing_wall_thickness_m=0.004,
+        casing_material=parameters["casing_material"],
+        nozzle_material=parameters["nozzle_material"],
+    )
+    connected_geometry = geometry_from_components(
+        connected.grain, connected, SimpleNamespace(density=1700.0),
+        casing_wall_thickness_m=0.004,
+        casing_material=parameters["casing_material"],
+        nozzle_material=parameters["nozzle_material"],
+    )
+    assert connected_geometry.connected_chamber_volume_m3 > baseline_geometry.connected_chamber_volume_m3
+    assert connected_geometry.motor_length_m == baseline_geometry.motor_length_m
+    assert connected_geometry.casing_body_length_m == baseline_geometry.casing_body_length_m
+    assert connected_geometry.motor_initial_mass_kg == pytest.approx(
+        baseline_geometry.motor_initial_mass_kg
+    )
 
 
 def test_legacy_replicated_grains_and_inferred_physical_length():

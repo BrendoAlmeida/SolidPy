@@ -19,6 +19,7 @@ from solidpy import (
     run_detailed_ballistics,
     simulate_advanced_components,
     simulate_advanced_physics,
+    simulate_structural_response,
     simulate_thermal_ablation,
 )
 from solidpy.Multiphysics import (
@@ -330,6 +331,125 @@ def test_geometry_material_model_adds_bulkheads_and_exposes_components():
     assert geometry.dry_mass_kg == pytest.approx(
         geometry.casing_mass_kg + geometry.liner_mass_kg + geometry.nozzle_mass_kg
     )
+
+
+def test_geometry_uses_physical_casing_and_liner_lengths():
+    grain, motor, propellant, _environment = make_motor_stack()
+    casing = CasingMaterial(liner_thickness_m=0.002, liner_density_kg_m3=1100.0)
+    nozzle = NozzleMaterial()
+    body_length, liner_length, total_length = 0.75, 0.40, 0.80
+    geometry = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        casing_material=casing,
+        nozzle_material=nozzle,
+        casing_body_length_m=body_length,
+        liner_length_m=liner_length,
+        motor_total_length_m=total_length,
+    )
+    inner_radius = math.sqrt(motor.chamber_area / math.pi)
+    shell_volume = math.pi * ((inner_radius + 0.004) ** 2 - inner_radius**2) * body_length
+    bulkhead_volume = 2.0 * math.pi * inner_radius**2 * 0.004 * casing.bulkhead_fraction
+    liner_inner_radius = inner_radius - casing.liner_thickness_m
+    liner_volume = math.pi * (inner_radius**2 - liner_inner_radius**2) * liner_length
+
+    assert geometry.casing_body_length_m == body_length
+    assert geometry.liner_length_m == liner_length
+    assert geometry.motor_total_length_m == total_length
+    assert geometry.motor_length_m == body_length
+    assert geometry.fill_length_m == motor.chamber_length
+    assert geometry.casing_mass_kg == pytest.approx(
+        (shell_volume + bulkhead_volume) * casing.density_kg_m3
+    )
+    assert geometry.liner_mass_kg == pytest.approx(
+        liner_volume * casing.liner_density_kg_m3
+    )
+    baseline = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        casing_material=casing,
+        nozzle_material=nozzle,
+    )
+    assert geometry.nozzle_mass_kg == pytest.approx(baseline.nozzle_mass_kg)
+    assert geometry.casing_mass_kg > baseline.casing_mass_kg
+    assert geometry.liner_mass_kg < baseline.liner_mass_kg
+    assert geometry.connected_chamber_volume_m3 == pytest.approx(motor.chamber_volume)
+    assert geometry.motor_initial_mass_kg == pytest.approx(
+        geometry.dry_mass_kg + geometry.propellant_mass_kg
+    )
+    assert geometry.mass_scope == "modeled_components"
+    assert geometry.omitted_mass_components == ()
+    curve = {
+        "time_s": np.asarray([0.0, 1.0]),
+        "thrust_n": np.zeros(2),
+        "chamber_pressure_pa": np.full(2, 3.5e6),
+    }
+    baseline_response = simulate_structural_response(
+        baseline, curve, None, casing_material=casing
+    )
+    extended_response = simulate_structural_response(
+        geometry, curve, None, casing_material=casing
+    )
+    assert extended_response["simulation.advanced.structural.first_mode_hz"] < (
+        baseline_response["simulation.advanced.structural.first_mode_hz"]
+    )
+
+
+@pytest.mark.parametrize(
+    "lengths,field",
+    [
+        ((0.6, 0.7, 0.8), "liner_length_m"),
+        ((0.5, 0.4, 0.8), "casing_body_length_m"),
+        ((0.7, 0.4, 0.6), "motor_total_length_m"),
+        ((math.nan, 0.4, 0.8), "casing_body_length_m"),
+        ((0.7, math.inf, 0.8), "liner_length_m"),
+        ((0.7, 0.4, True), "motor_total_length_m"),
+    ],
+)
+def test_geometry_rejects_invalid_physical_length_relationships(lengths, field):
+    grain, motor, propellant, _environment = make_motor_stack()
+    with pytest.raises(ValueError, match=field):
+        geometry_from_components(
+            grain,
+            motor,
+            propellant,
+            casing_wall_thickness_m=0.004,
+            casing_material=CasingMaterial(),
+            nozzle_material=NozzleMaterial(),
+            casing_body_length_m=lengths[0],
+            liner_length_m=lengths[1],
+            motor_total_length_m=lengths[2],
+        )
+
+
+def test_geometry_marks_partial_mass_scope_and_explicit_override():
+    grain, motor, propellant, _environment = make_motor_stack()
+    partial = geometry_from_components(
+        grain, motor, propellant, casing_wall_thickness_m=0.004
+    )
+    assert partial.motor_initial_mass_kg is None
+    assert partial.mass_scope == "partial_components"
+    assert partial.modeled_mass_components == ("casing",)
+    assert partial.omitted_mass_components == ("liner", "nozzle")
+    assert partial.motor_initial_mass_status == "incomplete_component_scope"
+
+    overridden = geometry_from_components(
+        grain,
+        motor,
+        propellant,
+        casing_wall_thickness_m=0.004,
+        dry_mass_kg=3.25,
+    )
+    assert overridden.motor_initial_mass_kg == pytest.approx(
+        3.25 + overridden.propellant_mass_kg
+    )
+    assert overridden.mass_scope == "explicit_dry_mass_override"
+    assert overridden.dry_mass_source == "explicit_override"
+    assert overridden.motor_initial_mass_status == "complete_from_dry_mass_override"
 
 
 @pytest.mark.parametrize("legacy_density", [math.nan, math.inf])

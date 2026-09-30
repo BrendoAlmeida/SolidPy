@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from numbers import Real
 from typing import Optional, Union
 
 import numpy as np
 
 StructuralFeatureValue = Union[float, np.ndarray]
-StructuralFeatureDictValue = Union[float, np.ndarray, list]
+StructuralFeatureDictValue = Union[
+    float, np.ndarray, list, str, tuple[str, ...], None
+]
 
 try:
     from .Burn import Burn
@@ -189,6 +192,14 @@ class SurrogateStructuralFeatures:
     burst_safety_factor_at_reference_pa:
         ``burst_pressure_pa / max(chamber_pressure_pa, 1)``.
         Fonte: ``Multiphysics.py::simulate_structural_response``.
+
+    casing_body_length_m, liner_length_m, motor_total_length_m:
+        Comprimentos físicos usados pela massa do casing e do liner, mais o
+        envelope total. O envelope não altera as massas dos componentes.
+
+    mass_scope, modeled_mass_components, omitted_mass_components:
+        Escopo conhecido da estimativa de massa seca. As funções estáticas
+        escalar e vetorizada modelam os três componentes.
     """
     casing_mass_kg: StructuralFeatureValue
     liner_mass_kg: StructuralFeatureValue
@@ -201,6 +212,12 @@ class SurrogateStructuralFeatures:
     von_mises_at_reference_pa: StructuralFeatureValue
     burst_pressure_pa: StructuralFeatureValue
     burst_safety_factor_at_reference_pa: StructuralFeatureValue
+    casing_body_length_m: Optional[StructuralFeatureValue] = None
+    liner_length_m: Optional[StructuralFeatureValue] = None
+    motor_total_length_m: Optional[StructuralFeatureValue] = None
+    mass_scope: str = "modeled_components"
+    modeled_mass_components: tuple[str, ...] = ("casing", "liner", "nozzle")
+    omitted_mass_components: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -429,6 +446,30 @@ def _finite_positive(name: str, value: float) -> float:
     return value
 
 
+def _physical_length(name: str, value: float) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite positive real number")
+    value = float(value)
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a finite positive real number")
+    return value
+
+
+def _physical_length_array(name: str, value: StructuralFeatureValue) -> np.ndarray:
+    try:
+        raw = np.asarray(value, dtype=object)
+        if any(
+            isinstance(item, (bool, np.bool_)) or not isinstance(item, Real)
+            for item in raw.flat
+        ):
+            raise ValueError
+        result = np.asarray(value, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must contain finite positive real numbers") from exc
+    _validate_vector_positive(name, result)
+    return result
+
+
 def _cone_half_angle(name: str, value: float) -> float:
     value = _finite_value(name, value)
     if not 0.0 < value < math.pi / 2.0:
@@ -477,6 +518,9 @@ def compute_structural_features(
     grain: Optional[Grain] = None,
     propellant_mass_kg: Optional[float] = None,
     casing_strength_factor: float = 1.0,
+    casing_body_length_m: Optional[float] = None,
+    liner_length_m: Optional[float] = None,
+    motor_total_length_m: Optional[float] = None,
 ) -> SurrogateStructuralFeatures:
     """Calcula massa e razões estruturais sem ``solve_ivp``.
 
@@ -512,6 +556,10 @@ def compute_structural_features(
         Fator multiplicativo de resistência, com a mesma convenção da análise
         estrutural transiente: após validar finitude, usa
         ``max(valor, 0.01)``.
+    casing_body_length_m, liner_length_m, motor_total_length_m:
+        Comprimentos físicos do corpo, liner e envelope total. Por padrão,
+        correspondem ao comprimento ativo de ``motor.chamber_length``. Devem
+        obedecer a ``liner <= active <= casing_body <= total``.
     """
     casing_material = CasingMaterial() if casing_material is None else casing_material
     nozzle_material = NozzleMaterial() if nozzle_material is None else nozzle_material
@@ -526,9 +574,27 @@ def compute_structural_features(
         "motor.nozzle_throat_area", motor.nozzle_throat_area
     )
     exit_area_m2 = _finite_positive("motor.nozzle_exit_area", motor.nozzle_exit_area)
-    chamber_length_m = _finite_positive(
+    chamber_length_m = _physical_length(
         "motor.chamber_length", motor.chamber_length
     )
+    casing_body_length_m = _physical_length(
+        "casing_body_length_m",
+        chamber_length_m if casing_body_length_m is None else casing_body_length_m,
+    )
+    liner_length_m = _physical_length(
+        "liner_length_m",
+        chamber_length_m if liner_length_m is None else liner_length_m,
+    )
+    motor_total_length_m = _physical_length(
+        "motor_total_length_m",
+        casing_body_length_m if motor_total_length_m is None else motor_total_length_m,
+    )
+    if liner_length_m > chamber_length_m:
+        raise ValueError("liner_length_m must not exceed motor.chamber_length")
+    if chamber_length_m > casing_body_length_m:
+        raise ValueError("casing_body_length_m must contain motor.chamber_length")
+    if casing_body_length_m > motor_total_length_m:
+        raise ValueError("motor_total_length_m must contain casing_body_length_m")
 
     _finite_nonnegative(
         "casing_material.density_kg_m3", casing_material.density_kg_m3
@@ -591,12 +657,12 @@ def compute_structural_features(
         casing_mass_kg = _casing_mass_with_bulkheads_kg(
             chamber_radius_m,
             wall_m,
-            chamber_length_m,
+            casing_body_length_m,
             casing_material,
         )
         liner_mass_kg = _liner_mass_kg(
             chamber_radius_m,
-            chamber_length_m,
+            liner_length_m,
             casing_material,
         )
         nozzle_mass_kg = _nozzle_mass_kg(
@@ -745,6 +811,9 @@ def compute_structural_features(
         von_mises_at_reference_pa=von_mises_pa,
         burst_pressure_pa=burst_pressure_pa,
         burst_safety_factor_at_reference_pa=burst_safety_factor,
+        casing_body_length_m=casing_body_length_m,
+        liner_length_m=liner_length_m,
+        motor_total_length_m=motor_total_length_m,
     )
 
 
@@ -768,23 +837,46 @@ def compute_structural_features_vectorized(
     propellant_mass_kg: StructuralFeatureValue,
     ultimate_strength_mpa: StructuralFeatureValue,
     casing_strength_factor: StructuralFeatureValue = 1.0,
+    casing_body_length_m: Optional[StructuralFeatureValue] = None,
+    liner_length_m: Optional[StructuralFeatureValue] = None,
+    motor_total_length_m: Optional[StructuralFeatureValue] = None,
 ) -> SurrogateStructuralFeatures:
     """Calcula features estruturais para um lote com broadcasting NumPy.
 
     Todos os argumentos aceitam escalares ou ``numpy.ndarray`` broadcastable;
     a conversão interna usa ``float64``. O retorno é um
-    :class:`SurrogateStructuralFeatures` cujos onze campos são arrays NumPy
+    :class:`SurrogateStructuralFeatures` cujos campos numéricos são arrays NumPy
     com o shape broadcastado; entradas escalares produzem arrays 0-D. As
     fórmulas, clamps e validações físicas correspondem ao caminho escalar
     :func:`compute_structural_features`, sem integração de ODE. O liner é
     validado somente nas posições com espessura positiva, e um bocal com raio
     de saída igual ao da garganta continua sendo rejeitado neste caminho
     superior, tal como no caminho escalar.
+
+    Os comprimentos físicos opcionais aceitam escalares ou arrays broadcastable.
+    Por padrão, o casing e o liner usam ``chamber_length_m``, e o envelope usa
+    o comprimento do casing. Os comprimentos devem obedecer a
+    ``liner <= active <= casing_body <= total``.
     """
     if divergent_half_angle_rad is None:
         raise ValueError(
             "divergent_half_angle_rad deve ser finito e estar em (0, pi/2)"
         )
+    active_length_input = _physical_length_array(
+        "chamber_length_m", chamber_length_m
+    )
+    body_length_input = _physical_length_array(
+        "casing_body_length_m",
+        chamber_length_m if casing_body_length_m is None else casing_body_length_m,
+    )
+    liner_length_input = _physical_length_array(
+        "liner_length_m",
+        chamber_length_m if liner_length_m is None else liner_length_m,
+    )
+    total_length_input = _physical_length_array(
+        "motor_total_length_m",
+        body_length_input if motor_total_length_m is None else motor_total_length_m,
+    )
     (
         chamber_radius,
         throat_radius,
@@ -804,11 +896,14 @@ def compute_structural_features_vectorized(
         propellant_mass,
         ultimate_strength,
         strength_factor,
+        casing_body_length,
+        physical_liner_length,
+        total_length,
     ) = _vector_broadcast_float_arrays(
         chamber_radius_m,
         throat_radius_m,
         exit_radius_m,
-        chamber_length_m,
+        active_length_input,
         casing_wall_thickness_m,
         casing_density_kg_m3,
         bulkhead_fraction,
@@ -823,6 +918,9 @@ def compute_structural_features_vectorized(
         propellant_mass_kg,
         ultimate_strength_mpa,
         casing_strength_factor,
+        body_length_input,
+        liner_length_input,
+        total_length_input,
     )
 
     _validate_vector_positive("chamber_radius_m", chamber_radius)
@@ -833,6 +931,15 @@ def compute_structural_features_vectorized(
     if np.any(exit_radius <= throat_radius):
         raise ValueError("exit_radius_m deve ser maior que throat_radius_m")
     _validate_vector_positive("chamber_length_m", chamber_length)
+    _validate_vector_positive("casing_body_length_m", casing_body_length)
+    _validate_vector_positive("liner_length_m", physical_liner_length)
+    _validate_vector_positive("motor_total_length_m", total_length)
+    if np.any(physical_liner_length > chamber_length):
+        raise ValueError("liner_length_m must not exceed chamber_length_m")
+    if np.any(chamber_length > casing_body_length):
+        raise ValueError("casing_body_length_m must contain chamber_length_m")
+    if np.any(casing_body_length > total_length):
+        raise ValueError("motor_total_length_m must contain casing_body_length_m")
     _validate_vector_finite("casing_wall_thickness_m", casing_wall)
     _validate_vector_nonnegative("casing_density_kg_m3", casing_density)
     _validate_vector_positive("bulkhead_fraction", bulkhead_fraction)
@@ -869,13 +976,13 @@ def compute_structural_features_vectorized(
     casing_mass = _casing_mass_with_bulkheads_kg_vectorized(
         chamber_radius,
         casing_wall,
-        chamber_length,
+        casing_body_length,
         casing_density,
         bulkhead_fraction,
     )
     liner_mass = _liner_mass_kg_vectorized(
         chamber_radius,
-        chamber_length,
+        physical_liner_length,
         liner_thickness,
         liner_density,
     )
@@ -970,6 +1077,9 @@ def compute_structural_features_vectorized(
         von_mises_at_reference_pa=np.asarray(von_mises),
         burst_pressure_pa=np.asarray(burst_pressure),
         burst_safety_factor_at_reference_pa=np.asarray(burst_safety_factor),
+        casing_body_length_m=np.asarray(casing_body_length),
+        liner_length_m=np.asarray(physical_liner_length),
+        motor_total_length_m=np.asarray(total_length),
     )
 
 
@@ -1089,7 +1199,7 @@ def static_features_to_dict(feats: SurrogateStaticFeatures) -> dict[str, float]:
 
 
 def _structural_feature_value_to_python(
-    value: StructuralFeatureValue,
+    value: Optional[StructuralFeatureValue],
     *,
     json_compatible: bool = False,
 ) -> StructuralFeatureDictValue:
@@ -1099,6 +1209,8 @@ def _structural_feature_value_to_python(
     para listas Python; o padrão preserva ``numpy.ndarray`` para consumidores
     de lotes e Parquet.
     """
+    if value is None:
+        return None
     array = np.asarray(value)
     if array.ndim == 0:
         return float(array)
@@ -1157,4 +1269,16 @@ def structural_features_to_dict(
             feats.burst_safety_factor_at_reference_pa,
             json_compatible=json_compatible,
         ),
+        "surrogate.casing_body_length_m": _structural_feature_value_to_python(
+            feats.casing_body_length_m, json_compatible=json_compatible
+        ),
+        "surrogate.liner_length_m": _structural_feature_value_to_python(
+            feats.liner_length_m, json_compatible=json_compatible
+        ),
+        "surrogate.motor_total_length_m": _structural_feature_value_to_python(
+            feats.motor_total_length_m, json_compatible=json_compatible
+        ),
+        "surrogate.mass_scope": feats.mass_scope,
+        "surrogate.modeled_mass_components": feats.modeled_mass_components,
+        "surrogate.omitted_mass_components": feats.omitted_mass_components,
     }

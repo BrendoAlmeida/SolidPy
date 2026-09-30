@@ -332,6 +332,43 @@ class TestStructuralFeatures:
         )
         assert 0.0 <= features.structural_mass_ratio <= 1.0
 
+    def test_physical_lengths_match_component_geometry(
+        self, tubular_grain, motor, kndx_propellant
+    ):
+        casing = CasingMaterial(liner_thickness_m=0.0015)
+        nozzle = NozzleMaterial()
+        lengths = {
+            "casing_body_length_m": 0.20,
+            "liner_length_m": 0.09,
+            "motor_total_length_m": 0.22,
+        }
+        features = compute_structural_features(
+            motor,
+            casing,
+            nozzle,
+            chamber_pressure_pa=3.5e6,
+            casing_wall_thickness_m=0.004,
+            propellant_mass_kg=kndx_propellant.density * tubular_grain.volume,
+            **lengths,
+        )
+        geometry = geometry_from_components(
+            tubular_grain,
+            motor,
+            kndx_propellant,
+            casing_wall_thickness_m=0.004,
+            casing_material=casing,
+            nozzle_material=nozzle,
+            **lengths,
+        )
+
+        for name in ("casing_body_length_m", "liner_length_m", "motor_total_length_m"):
+            assert getattr(features, name) == pytest.approx(getattr(geometry, name))
+        for name in ("casing_mass_kg", "liner_mass_kg", "nozzle_mass_kg", "dry_mass_kg"):
+            assert getattr(features, name) == pytest.approx(getattr(geometry, name))
+        assert features.mass_scope == "modeled_components"
+        assert features.modeled_mass_components == ("casing", "liner", "nozzle")
+        assert features.omitted_mass_components == ()
+
     def test_port_throat_ratio_matches_grain_and_motor_geometry(
         self, tubular_grain, motor
     ):
@@ -401,9 +438,18 @@ class TestStructuralFeatures:
             propellant_mass_kg=1.0,
         )
         values = structural_features_to_dict(features)
-        assert all(isinstance(value, float) for value in values.values())
+        assert all(
+            isinstance(value, float)
+            for key, value in values.items()
+            if key.startswith("surrogate.")
+            and key.rsplit(".", 1)[-1] not in {
+                "mass_scope", "modeled_mass_components", "omitted_mass_components"
+            }
+        )
         assert values["surrogate.dry_mass_kg"] == pytest.approx(features.dry_mass_kg)
         assert "surrogate.burst_safety_factor_at_reference_pa" in values
+        assert values["surrogate.mass_scope"] == "modeled_components"
+        assert values["surrogate.omitted_mass_components"] == ()
 
     def test_vectorized_structural_features_to_dict_preserves_batch_arrays(
         self, tubular_grain, motor
@@ -431,10 +477,13 @@ class TestStructuralFeatures:
         values = structural_features_to_dict(features)
         assert isinstance(values["surrogate.dry_mass_kg"], np.ndarray)
         assert values["surrogate.dry_mass_kg"].shape == (2,)
+        assert values["surrogate.casing_body_length_m"].shape == (2,)
+        assert values["surrogate.mass_scope"] == "modeled_components"
 
         json_values = structural_features_to_dict(features, json_compatible=True)
         json.dumps(json_values)
         assert isinstance(json_values["surrogate.dry_mass_kg"], list)
+        assert isinstance(json_values["surrogate.motor_total_length_m"], list)
 
     def test_vectorized_structural_features_scalar_inputs_return_float64_arrays(
         self, tubular_grain, motor
@@ -772,6 +821,9 @@ class TestStructuralFeatures:
         propellant_mass = np.array([1.0, 1.2, 1.4])
         ultimate_strength = np.array([620.0, 700.0, 550.0])
         strength_factor = np.array([1.0, 0.8, 1.2])
+        body_length = np.array([0.20, 0.24, 0.30])
+        liner_length = np.array([0.10, 0.12, 0.14])
+        total_length = np.array([0.22, 0.26, 0.32])
 
         vector = compute_structural_features_vectorized(
             chamber_radius_m=np.full(n, chamber_radius),
@@ -792,6 +844,9 @@ class TestStructuralFeatures:
             propellant_mass_kg=propellant_mass,
             ultimate_strength_mpa=ultimate_strength,
             casing_strength_factor=strength_factor,
+            casing_body_length_m=body_length,
+            liner_length_m=liner_length,
+            motor_total_length_m=total_length,
         )
 
         scalar_features = [
@@ -814,6 +869,9 @@ class TestStructuralFeatures:
                 grain=tubular_grain,
                 propellant_mass_kg=propellant_mass[i],
                 casing_strength_factor=strength_factor[i],
+                casing_body_length_m=body_length[i],
+                liner_length_m=liner_length[i],
+                motor_total_length_m=total_length[i],
             )
             for i in range(n)
         ]
@@ -829,6 +887,9 @@ class TestStructuralFeatures:
             "von_mises_at_reference_pa",
             "burst_pressure_pa",
             "burst_safety_factor_at_reference_pa",
+            "casing_body_length_m",
+            "liner_length_m",
+            "motor_total_length_m",
         ):
             expected = np.array([getattr(item, field_name) for item in scalar_features])
             np.testing.assert_allclose(getattr(vector, field_name), expected)
