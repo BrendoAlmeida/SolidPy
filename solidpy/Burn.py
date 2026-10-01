@@ -122,15 +122,26 @@ class Burn:
             if chamber_pressure is None
             else max(float(chamber_pressure), 0.0)
         )
+        # While a BurnSimulation solves, the inputs below cannot change, so the last pressure's
+        # answer is reused (a right-hand-side evaluation asks for it ~14 times). Outside that scope
+        # ``_solve_cache`` is None and every call recomputes, as before.
+        cache = getattr(self, "_solve_cache", None)
+        if cache is not None:
+            last = cache.get("parameters")
+            if last is not None and last[0] == pressure:
+                return last[1]
         # c* scales with sqrt(T_0), so eta_c enters through effective temperature.
         t0_eff = self.propellant.Tc_at_pressure(pressure) * (self.eta_c ** 2)
-        return (
+        result = (
             t0_eff,  # T_0 (effective)
             self.propellant.products_constant,  # R
             self.propellant.density,  # rho_g
             self.propellant.get_gamma(pressure),  # k
             self.motor.nozzle_throat_area,  # A_t
         )
+        if cache is not None:
+            cache["parameters"] = (pressure, result)
+        return result
 
     def evaluate_nozzle_mass_flow(self, chamber_pressure, *, chamber_temperature=None):
         """Calculation of total nozzle mass flow.
@@ -531,6 +542,7 @@ class BurnSimulation(Burn):
         atol: float = 1e-10,
         burn_timeout_s: float = 100.0,
         tail_off_timeout_s: float = 100.0,
+        solve_cache: bool = True,
     ):
         Burn.__init__(
             self,
@@ -571,12 +583,18 @@ class BurnSimulation(Burn):
         self._validate_source_profiles()
         self._termination_reason = "burn_timeout"
 
-        self.grain_burn_solution = self.evaluate_grain_burn_solution()
-        self.tail_off_solution = (
-            self.evaluate_tail_off_solution() if tail_off_evaluation else None
-        )
-        self.total_burn_solution = self.evaluate_complete_solution()
-        self.result = self._build_result(tail_off_evaluation)
+        # ``solve_cache`` only avoids repeating identical evaluations while solving; results are
+        # bit-for-bit the same with it off, and the cache is released when the solve ends.
+        self._solve_cache = {"quantities": {}} if solve_cache else None
+        try:
+            self.grain_burn_solution = self.evaluate_grain_burn_solution()
+            self.tail_off_solution = (
+                self.evaluate_tail_off_solution() if tail_off_evaluation else None
+            )
+            self.total_burn_solution = self.evaluate_complete_solution()
+            self.result = self._build_result(tail_off_evaluation)
+        finally:
+            self._solve_cache = None
 
     """Solver required functions"""
 
@@ -714,6 +732,24 @@ class BurnSimulation(Burn):
         return sorted(set(float(t) for t in points if start < t <= stop))
 
     def _state_quantities(self, time, state, active=None):
+        """Derived quantities at one state.
+
+        Within a solve, evaluations with ``active=None`` (the post-processing of the integrated
+        history, which revisits the same points several times) are memoised per (time, state);
+        the integrator's own calls pass ``active`` and are never cached. The returned dictionary
+        is shared between calls: treat it as read-only.
+        """
+        cache = getattr(self, "_solve_cache", None)
+        if active is not None or cache is None:
+            return self._state_quantities_uncached(time, state, active)
+        memo = cache["quantities"]
+        key = (float(time), np.asarray(state, dtype=float).tobytes())
+        hit = memo.get(key)
+        if hit is None:
+            hit = memo[key] = self._state_quantities_uncached(time, state, None)
+        return hit
+
+    def _state_quantities_uncached(self, time, state, active=None):
         n = len(self.motor.grains)
         regressions = np.asarray(state[2:2 + n])
         remaining = sum(g.calculate_remaining_volume(r) for g, r in zip(self.motor.grains, regressions))
