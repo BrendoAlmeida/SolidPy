@@ -36,6 +36,10 @@ from scipy.integrate import solve_ivp
 import scipy.constants as const
 import matplotlib.pyplot as plt
 
+# Execution backends: only the registry is imported here. Accelerator libraries load on first use.
+from . import backends
+from .backends import set_backend, use_backend
+
 from .Grain import Grain
 from .Motor import Motor
 from .Propellant import Propellant, build_cea_properties
