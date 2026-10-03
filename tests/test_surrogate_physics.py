@@ -25,6 +25,8 @@ from solidpy import (
 from solidpy.surrogate_physics import (
     _estimate_equilibrium_pressure,
     _finite_value,
+    _STRUCTURAL_VECTOR_INPUT_NAMES,
+    _structural_features_vectorized_xp_kernel,
     compute_burn_area_curve,
     compute_static_features,
     compute_structural_features,
@@ -83,6 +85,50 @@ def motor(tubular_grain):
         chamber_length=0.14,
         grain_separation=0.002,
     )
+
+
+def _xp_structural_feature_kwargs():
+    return {
+        "chamber_radius_m": np.array([[0.037], [0.038]]),
+        "throat_radius_m": np.array([0.008, 0.0085, 0.009]),
+        "exit_radius_m": np.array([0.018, 0.019, 0.020]),
+        "chamber_length_m": 0.14,
+        "casing_wall_thickness_m": np.array([0.004, 0.0045, 0.0035]),
+        "casing_density_kg_m3": np.array([7850.0, 7800.0, 8000.0]),
+        "bulkhead_fraction": 1.35,
+        "liner_thickness_m": np.array([0.001, 0.0, -0.001]),
+        "liner_density_kg_m3": np.array([1100.0, np.nan, np.inf]),
+        "nozzle_density_kg_m3": np.array([1800.0, 1750.0, 1900.0]),
+        "nozzle_wall_thickness_factor": np.array([1.15, 1.0, 1.3]),
+        "nozzle_min_wall_thickness_m": np.array([0.004, 0.003, 0.005]),
+        "divergent_half_angle_rad": np.array([0.26, 0.31, 0.35]),
+        "chamber_pressure_pa": np.array([3.0e6, 3.5e6, 4.0e6]),
+        "port_area_m2": 0.0011,
+        "propellant_mass_kg": np.array([1.0, 1.2, 1.4]),
+        "ultimate_strength_mpa": np.array([620.0, 700.0, 550.0]),
+        "casing_strength_factor": np.array([1.0, 0.8, 1.2]),
+        "casing_body_length_m": np.array([[0.20], [0.24]]),
+        "liner_length_m": np.array([0.10, 0.12, 0.13]),
+        "motor_total_length_m": np.array([0.26, 0.28, 0.32]),
+    }
+
+
+_STRUCTURAL_FEATURE_NUMERIC_FIELDS = (
+    "casing_mass_kg",
+    "liner_mass_kg",
+    "nozzle_mass_kg",
+    "dry_mass_kg",
+    "motor_initial_mass_kg",
+    "motor_final_mass_kg",
+    "structural_mass_ratio",
+    "port_throat_ratio",
+    "von_mises_at_reference_pa",
+    "burst_pressure_pa",
+    "burst_safety_factor_at_reference_pa",
+    "casing_body_length_m",
+    "liner_length_m",
+    "motor_total_length_m",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +980,83 @@ class TestStructuralFeatures:
                 "burst_safety_factor_at_reference_pa",
             )
         )
+
+    def test_vectorized_structural_features_xp_numpy_matches_default(self):
+        kwargs = _xp_structural_feature_kwargs()
+        default = compute_structural_features_vectorized(**kwargs)
+        explicit_numpy = compute_structural_features_vectorized(**kwargs, xp=np)
+        kernel = _structural_features_vectorized_xp_kernel(
+            np,
+            tuple(kwargs[name] for name in _STRUCTURAL_VECTOR_INPUT_NAMES),
+        )
+
+        for field_name in _STRUCTURAL_FEATURE_NUMERIC_FIELDS:
+            np.testing.assert_array_equal(
+                getattr(explicit_numpy, field_name), getattr(default, field_name)
+            )
+        for field_name, value in zip(_STRUCTURAL_FEATURE_NUMERIC_FIELDS, kernel):
+            np.testing.assert_allclose(
+                value, getattr(default, field_name), rtol=1e-12, atol=1e-12
+            )
+
+    def test_vectorized_structural_features_jax_eager_and_jit_parity(self):
+        jax = pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        previous_x64 = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", False)
+        try:
+            kwargs = _xp_structural_feature_kwargs()
+            expected = compute_structural_features_vectorized(**kwargs)
+            eager = compute_structural_features_vectorized(**kwargs, xp=jnp)
+
+            for field_name in _STRUCTURAL_FEATURE_NUMERIC_FIELDS:
+                value = getattr(eager, field_name)
+                assert isinstance(value, jax.Array)
+                assert value.dtype == jnp.float64
+                assert value.shape == (2, 3)
+                np.testing.assert_allclose(
+                    np.asarray(jax.device_get(value)),
+                    getattr(expected, field_name),
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
+            assert jax.config.read("jax_enable_x64") is False
+
+            if hasattr(jax, "enable_x64"):
+                x64_context = jax.enable_x64(True)
+            else:
+                from jax.experimental import enable_x64
+
+                x64_context = enable_x64()
+            with x64_context:
+                kernel_inputs = tuple(
+                    jnp.asarray(kwargs[name], dtype=jnp.float64)
+                    for name in _STRUCTURAL_VECTOR_INPUT_NAMES
+                )
+                compiled_kernel = jax.jit(
+                    lambda values: _structural_features_vectorized_xp_kernel(
+                        jnp, values
+                    )
+                )
+                compiled = compiled_kernel(kernel_inputs)
+            for field_name, value in zip(_STRUCTURAL_FEATURE_NUMERIC_FIELDS, compiled):
+                assert isinstance(value, jax.Array)
+                assert value.dtype == jnp.float64
+                assert value.shape == (2, 3)
+                np.testing.assert_allclose(
+                    np.asarray(jax.device_get(value)),
+                    getattr(expected, field_name),
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
+
+            invalid = dict(kwargs)
+            invalid["divergent_half_angle_rad"] = np.array([0.0, 0.31, 0.35])
+            with pytest.raises(ValueError, match="divergent_half_angle_rad"):
+                compute_structural_features_vectorized(**invalid, xp=jnp)
+        finally:
+            jax.config.update("jax_enable_x64", previous_x64)
 
     @pytest.mark.parametrize(
         "bad_angle",

@@ -4,11 +4,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from numbers import Real
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 
-StructuralFeatureValue = Union[float, np.ndarray]
+StructuralFeatureValue = Any
 StructuralFeatureDictValue = Union[
     float, np.ndarray, list, str, tuple[str, ...], None
 ]
@@ -19,6 +19,7 @@ try:
     from .Motor import Motor
     from .Multiphysics import (
         CasingMaterial,
+        DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
         NozzleMaterial,
         casing_burst_pressure_pa,
         _casing_mass_with_bulkheads_kg,
@@ -40,6 +41,7 @@ except ImportError:
     from Motor import Motor
     from Multiphysics import (
         CasingMaterial,
+        DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG,
         NozzleMaterial,
         casing_burst_pressure_pa,
         _casing_mass_with_bulkheads_kg,
@@ -817,6 +819,315 @@ def compute_structural_features(
     )
 
 
+_STRUCTURAL_VECTOR_INPUT_NAMES = (
+    "chamber_radius_m",
+    "throat_radius_m",
+    "exit_radius_m",
+    "chamber_length_m",
+    "casing_wall_thickness_m",
+    "casing_density_kg_m3",
+    "bulkhead_fraction",
+    "liner_thickness_m",
+    "liner_density_kg_m3",
+    "nozzle_density_kg_m3",
+    "nozzle_wall_thickness_factor",
+    "nozzle_min_wall_thickness_m",
+    "divergent_half_angle_rad",
+    "chamber_pressure_pa",
+    "port_area_m2",
+    "propellant_mass_kg",
+    "ultimate_strength_mpa",
+    "casing_strength_factor",
+    "casing_body_length_m",
+    "liner_length_m",
+    "motor_total_length_m",
+)
+
+_STRUCTURAL_VECTOR_RESULT_NAMES = (
+    "casing_mass_kg",
+    "liner_mass_kg",
+    "nozzle_mass_kg",
+    "dry_mass_kg",
+    "motor_initial_mass_kg",
+    "motor_final_mass_kg",
+    "structural_mass_ratio",
+    "port_throat_ratio",
+    "von_mises_at_reference_pa",
+    "burst_pressure_pa",
+    "burst_safety_factor_at_reference_pa",
+    "casing_body_length_m",
+    "liner_length_m",
+    "motor_total_length_m",
+)
+
+
+def _structural_features_vectorized_xp_kernel(xp, values):
+    """Pure XP kernel; callers validate concrete values outside this function.
+
+    ``values`` follows ``_STRUCTURAL_VECTOR_INPUT_NAMES`` and the returned tuple
+    follows ``_STRUCTURAL_VECTOR_RESULT_NAMES``. This makes the numerical core
+    directly usable as a JAX-jitted function without tracing host validation.
+    JAX callers must enable 64-bit mode around tracing and execution; the
+    public wrapper does this automatically.
+    """
+    arrays = tuple(xp.asarray(value, dtype=xp.float64) for value in values)
+    (
+        chamber_radius,
+        throat_radius,
+        exit_radius,
+        chamber_length,
+        casing_wall,
+        casing_density,
+        bulkhead_fraction,
+        liner_thickness,
+        liner_density,
+        nozzle_density,
+        nozzle_wall_factor,
+        nozzle_min_wall,
+        divergent_angle,
+        chamber_pressure,
+        port_area,
+        propellant_mass,
+        ultimate_strength,
+        strength_factor,
+        casing_body_length,
+        physical_liner_length,
+        total_length,
+    ) = xp.broadcast_arrays(*arrays)
+
+    casing_wall = xp.maximum(casing_wall, 1e-5)
+    casing_volume = (
+        xp.pi
+        * xp.maximum((chamber_radius + casing_wall) ** 2 - chamber_radius**2, 0.0)
+        * casing_body_length
+    )
+    bulkhead_thickness = casing_wall * bulkhead_fraction
+    bulkhead_volume = (
+        2.0
+        * (xp.pi / 4.0)
+        * (2.0 * chamber_radius) ** 2
+        * bulkhead_thickness
+    )
+    casing_mass = (casing_volume + bulkhead_volume) * casing_density
+
+    liner_active = liner_thickness > 0.0
+    active_liner_thickness = xp.where(liner_active, liner_thickness, 0.0)
+    active_liner_density = xp.where(liner_active, liner_density, 0.0)
+    liner_inner_diameter = xp.maximum(
+        2.0 * chamber_radius - 2.0 * active_liner_thickness, 0.0
+    )
+    liner_volume = (
+        (xp.pi / 4.0)
+        * xp.maximum(
+            (2.0 * chamber_radius) ** 2 - liner_inner_diameter**2,
+            0.0,
+        )
+        * physical_liner_length
+    )
+    liner_mass = liner_volume * active_liner_density
+
+    nozzle_wall = xp.maximum(casing_wall * nozzle_wall_factor, nozzle_min_wall)
+    divergent_delta = xp.maximum(exit_radius - throat_radius, 0.0)
+    divergent_length = divergent_delta / xp.tan(divergent_angle)
+    divergent_area = xp.where(
+        divergent_delta == 0.0,
+        0.0,
+        xp.pi
+        * (throat_radius + exit_radius)
+        * xp.hypot(divergent_length, divergent_delta),
+    )
+    convergent_delta = xp.maximum(chamber_radius - throat_radius, 0.0)
+    convergent_length = convergent_delta / xp.tan(
+        math.radians(DEFAULT_NOZZLE_CONVERGENT_HALF_ANGLE_DEG)
+    )
+    convergent_area = (
+        xp.pi
+        * (chamber_radius + throat_radius)
+        * xp.hypot(convergent_length, convergent_delta)
+    )
+    nozzle_mass = (divergent_area + convergent_area) * nozzle_wall * nozzle_density
+
+    dry_mass = casing_mass + liner_mass + nozzle_mass
+    initial_mass = dry_mass + propellant_mass
+    final_mass = dry_mass
+    structural_ratio = xp.where(
+        initial_mass > 0.0, dry_mass / initial_mass, 0.0
+    )
+    port_throat_ratio = port_area / (xp.pi * throat_radius**2)
+
+    inner_radius = xp.maximum(chamber_radius, 1e-5)
+    inner_radius_sq = inner_radius**2
+    outer_radius_sq = (inner_radius + casing_wall) ** 2
+    lame_branch = casing_wall / xp.maximum(inner_radius, 1e-9) > 0.1
+    lame_hoop = (
+        chamber_pressure
+        * inner_radius_sq
+        * (outer_radius_sq + inner_radius_sq)
+        / xp.maximum(outer_radius_sq - inner_radius_sq, 1e-9)
+        / xp.maximum(inner_radius_sq, 1e-9)
+    )
+    lame_axial = chamber_pressure * inner_radius_sq / xp.maximum(
+        outer_radius_sq - inner_radius_sq, 1e-9
+    )
+    barlow_hoop = chamber_pressure * inner_radius / casing_wall
+    barlow_axial = chamber_pressure * inner_radius / (2.0 * casing_wall)
+    hoop = xp.where(lame_branch, lame_hoop, barlow_hoop)
+    axial = xp.where(lame_branch, lame_axial, barlow_axial)
+    radial = -chamber_pressure
+    stress_invariant = 0.5 * (
+        (hoop - radial) ** 2
+        + (radial - axial) ** 2
+        + (axial - hoop) ** 2
+    )
+    von_mises = xp.sqrt(xp.maximum(stress_invariant, 0.0))
+
+    strength_factor = xp.maximum(strength_factor, 0.01)
+    burst_pressure = (
+        (2.0 / xp.sqrt(3.0))
+        * (ultimate_strength * 1e6 * strength_factor)
+        * xp.log1p(casing_wall / inner_radius)
+    )
+    burst_safety_factor = burst_pressure / xp.maximum(chamber_pressure, 1.0)
+
+    return (
+        casing_mass,
+        liner_mass,
+        nozzle_mass,
+        dry_mass,
+        initial_mass,
+        final_mass,
+        structural_ratio,
+        port_throat_ratio,
+        von_mises,
+        burst_pressure,
+        burst_safety_factor,
+        casing_body_length,
+        physical_liner_length,
+        total_length,
+    )
+
+
+def _validate_structural_features_xp_inputs(host_values):
+    """Run the NumPy contract checks on concrete host copies of XP inputs."""
+    active_length = _physical_length_array("chamber_length_m", host_values[3])
+    body_length = _physical_length_array("casing_body_length_m", host_values[18])
+    liner_length = _physical_length_array("liner_length_m", host_values[19])
+    total_length = _physical_length_array("motor_total_length_m", host_values[20])
+    host_values = (
+        *host_values[:3],
+        active_length,
+        *host_values[4:18],
+        body_length,
+        liner_length,
+        total_length,
+    )
+    (
+        chamber_radius,
+        throat_radius,
+        exit_radius,
+        chamber_length,
+        casing_wall,
+        casing_density,
+        bulkhead_fraction,
+        liner_thickness,
+        liner_density,
+        nozzle_density,
+        nozzle_wall_factor,
+        nozzle_min_wall,
+        divergent_angle,
+        chamber_pressure,
+        port_area,
+        propellant_mass,
+        ultimate_strength,
+        strength_factor,
+        casing_body_length,
+        physical_liner_length,
+        total_length,
+    ) = _vector_broadcast_float_arrays(*host_values)
+
+    _validate_vector_positive("chamber_radius_m", chamber_radius)
+    _validate_vector_positive("throat_radius_m", throat_radius)
+    _validate_vector_positive("exit_radius_m", exit_radius)
+    if np.any(chamber_radius <= throat_radius):
+        raise ValueError("chamber_radius_m deve ser maior que throat_radius_m")
+    if np.any(exit_radius <= throat_radius):
+        raise ValueError("exit_radius_m deve ser maior que throat_radius_m")
+    _validate_vector_positive("chamber_length_m", chamber_length)
+    _validate_vector_positive("casing_body_length_m", casing_body_length)
+    _validate_vector_positive("liner_length_m", physical_liner_length)
+    _validate_vector_positive("motor_total_length_m", total_length)
+    if np.any(physical_liner_length > chamber_length):
+        raise ValueError("liner_length_m must not exceed chamber_length_m")
+    if np.any(chamber_length > casing_body_length):
+        raise ValueError("casing_body_length_m must contain chamber_length_m")
+    if np.any(casing_body_length > total_length):
+        raise ValueError("motor_total_length_m must contain casing_body_length_m")
+    _validate_vector_finite("casing_wall_thickness_m", casing_wall)
+    _validate_vector_nonnegative("casing_density_kg_m3", casing_density)
+    _validate_vector_positive("bulkhead_fraction", bulkhead_fraction)
+    _validate_vector_finite("liner_thickness_m", liner_thickness)
+    liner_active = liner_thickness > 0.0
+    if np.any(liner_active & (liner_thickness >= chamber_radius)):
+        raise ValueError("liner_thickness_m deve ser menor que chamber_radius_m")
+    if np.any(liner_active & ~np.isfinite(liner_density)):
+        raise ValueError(
+            "liner_density_kg_m3 deve conter valores finitos quando o liner está ativo"
+        )
+    if np.any(liner_active & (liner_density <= 0.0)):
+        raise ValueError(
+            "liner_density_kg_m3 deve ser maior que zero quando o liner está ativo"
+        )
+    _validate_vector_positive("nozzle_density_kg_m3", nozzle_density)
+    _validate_vector_positive("nozzle_wall_thickness_factor", nozzle_wall_factor)
+    _validate_vector_nonnegative("nozzle_min_wall_thickness_m", nozzle_min_wall)
+    _validate_vector_finite("divergent_half_angle_rad", divergent_angle)
+    if np.any((divergent_angle <= 0.0) | (divergent_angle >= np.pi / 2.0)):
+        raise ValueError("divergent_half_angle_rad deve estar em (0, pi/2)")
+    _validate_vector_nonnegative("chamber_pressure_pa", chamber_pressure)
+    _validate_vector_nonnegative("port_area_m2", port_area)
+    _validate_vector_nonnegative("propellant_mass_kg", propellant_mass)
+    _validate_vector_positive("ultimate_strength_mpa", ultimate_strength)
+    _validate_vector_finite("casing_strength_factor", strength_factor)
+
+
+def _compute_structural_features_vectorized_xp(xp, values):
+    """Validated eager XP wrapper around the pure numeric kernel."""
+    try:
+        import jax
+        import jax.numpy as jnp
+    except ImportError as exc:
+        raise ImportError("xp=jax.numpy requires the optional JAX dependency") from exc
+    if xp is not jnp:
+        raise TypeError("xp must be numpy or jax.numpy")
+
+    try:
+        host_values = tuple(np.asarray(jax.device_get(value)) for value in values)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "os argumentos vetorizados devem ser números ou arrays "
+            "com shapes broadcastable"
+        ) from exc
+    _validate_structural_features_xp_inputs(host_values)
+    if hasattr(jax, "enable_x64"):
+        x64_context = jax.enable_x64(True)
+    else:
+        from jax.experimental import enable_x64
+
+        x64_context = enable_x64()
+    with x64_context:
+        results = _structural_features_vectorized_xp_kernel(xp, values)
+        for name, result in zip(_STRUCTURAL_VECTOR_RESULT_NAMES, results):
+            host_result = np.asarray(jax.device_get(result))
+            _vector_result(name, host_result)
+            if np.any(host_result < 0.0):
+                raise ValueError(f"{name} não pode conter valores negativos")
+        if np.any(np.asarray(jax.device_get(results[4])) <= 0.0):
+            raise ValueError("motor_initial_mass_kg deve ser maior que zero")
+    return SurrogateStructuralFeatures(
+        **dict(zip(_STRUCTURAL_VECTOR_RESULT_NAMES, results))
+    )
+
+
 def compute_structural_features_vectorized(
     *,
     chamber_radius_m: StructuralFeatureValue,
@@ -840,18 +1151,22 @@ def compute_structural_features_vectorized(
     casing_body_length_m: Optional[StructuralFeatureValue] = None,
     liner_length_m: Optional[StructuralFeatureValue] = None,
     motor_total_length_m: Optional[StructuralFeatureValue] = None,
+    xp: Optional[Any] = None,
 ) -> SurrogateStructuralFeatures:
-    """Calcula features estruturais para um lote com broadcasting NumPy.
+    """Calcula features estruturais vetorizadas.
 
-    Todos os argumentos aceitam escalares ou ``numpy.ndarray`` broadcastable;
-    a conversão interna usa ``float64``. O retorno é um
-    :class:`SurrogateStructuralFeatures` cujos campos numéricos são arrays NumPy
-    com o shape broadcastado; entradas escalares produzem arrays 0-D. As
-    fórmulas, clamps e validações físicas correspondem ao caminho escalar
-    :func:`compute_structural_features`, sem integração de ODE. O liner é
-    validado somente nas posições com espessura positiva, e um bocal com raio
-    de saída igual ao da garganta continua sendo rejeitado neste caminho
-    superior, tal como no caminho escalar.
+    Com ``xp=None`` (padrão) ou ``xp=numpy``, preserva o caminho NumPy atual.
+    ``xp=jax.numpy`` calcula no dispositivo e retorna arrays JAX nos campos
+    numéricos; as entradas concretas e os resultados são validados na borda
+    host. O núcleo puro :func:`_structural_features_vectorized_xp_kernel`
+    aceita esses valores normalizados e pode ser compilado com ``jax.jit``.
+
+    Todos os argumentos aceitam escalares ou arrays broadcastable e usam
+    ``float64``. As fórmulas, clamps e validações físicas correspondem ao
+    caminho escalar :func:`compute_structural_features`, sem integração de
+    ODE. O liner é validado somente nas posições com espessura positiva, e um
+    bocal com raio de saída igual ao da garganta continua sendo rejeitado neste
+    caminho superior, tal como no caminho escalar.
 
     Os comprimentos físicos opcionais aceitam escalares ou arrays broadcastable.
     Por padrão, o casing e o liner usam ``chamber_length_m``, e o envelope usa
@@ -862,6 +1177,37 @@ def compute_structural_features_vectorized(
         raise ValueError(
             "divergent_half_angle_rad deve ser finito e estar em (0, pi/2)"
         )
+    if xp is not None and xp is not np:
+        body_length = (
+            chamber_length_m
+            if casing_body_length_m is None
+            else casing_body_length_m
+        )
+        values = (
+            chamber_radius_m,
+            throat_radius_m,
+            exit_radius_m,
+            chamber_length_m,
+            casing_wall_thickness_m,
+            casing_density_kg_m3,
+            bulkhead_fraction,
+            liner_thickness_m,
+            liner_density_kg_m3,
+            nozzle_density_kg_m3,
+            nozzle_wall_thickness_factor,
+            nozzle_min_wall_thickness_m,
+            divergent_half_angle_rad,
+            chamber_pressure_pa,
+            port_area_m2,
+            propellant_mass_kg,
+            ultimate_strength_mpa,
+            casing_strength_factor,
+            body_length,
+            chamber_length_m if liner_length_m is None else liner_length_m,
+            body_length if motor_total_length_m is None else motor_total_length_m,
+        )
+        return _compute_structural_features_vectorized_xp(xp, values)
+
     active_length_input = _physical_length_array(
         "chamber_length_m", chamber_length_m
     )
