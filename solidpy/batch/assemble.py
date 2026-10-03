@@ -338,6 +338,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
                 "history": history, "fallback": None, "kernel_source_hash": kernel_hash,
                 "tolerances_version": _tolerances.TOLERANCES_VERSION,
                 "step_overflow": bool(out["overflow"][lane]),
+                "scenario_inputs": {"burn_rate_factor": float(a["burn_rate_factor"][lane])},
             },
         }
         results.append({

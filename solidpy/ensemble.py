@@ -56,7 +56,7 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
         tabulated = evaluate_table(np, np.full(len(batch), 3.0), a["rate_table_x"],
                                    tuple(a[f"rate_table_c{i}"] for i in range(4)), a["rate_table_n"],
                                    a["rate_table_below"], a["rate_table_above"]) / 1000.0  # at a typical 3 MPa
-        rate = np.where(a["burn_rate_mode"] == 1.0, tabulated, rate)
+        rate = np.where(a["burn_rate_mode"] == 1.0, tabulated, rate) * a["burn_rate_factor"]
         depth = np.where(a["grain_valid"], a["burnout_depth"], 0.0).max(axis=1)
         cost = depth / rate / a["max_step_size"] + 40.0 * a["n_valid_grains"]
     return np.where(np.isfinite(cost), cost, np.finfo(float).max)

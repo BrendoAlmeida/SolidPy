@@ -7,6 +7,7 @@ numerical source of truth every other backend is compared with.
 
 from __future__ import annotations
 
+import copy
 import pickle
 import platform
 from concurrent.futures import ProcessPoolExecutor
@@ -15,11 +16,25 @@ from typing import Any, Dict, List, Optional
 from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions
 
 
+class _ScaledBurnRate:
+    """``propellant.evaluate_burn_rate`` times a factor, the way ``Robustness`` applies a scenario's burn rate factor."""
+
+    def __init__(self, original, factor):
+        self.original = original
+        self.factor = factor
+
+    def __call__(self, chamber_pressure, port_mass_flux=0.0):
+        return self.factor * self.original(chamber_pressure, port_mass_flux)
+
+
 def _run_lane(arguments):
     """Solve one lane. Module level so a process pool can pickle it."""
     from ..Burn import BurnSimulation
 
-    motor, propellant, environment, settings = arguments
+    motor, propellant, environment, settings, burn_rate_factor = arguments
+    if burn_rate_factor != 1.0:
+        propellant = copy.deepcopy(propellant)  # the lane's propellant may be shared with lanes of another factor
+        propellant.evaluate_burn_rate = _ScaledBurnRate(propellant.evaluate_burn_rate, burn_rate_factor)
     return BurnSimulation(motor.grains[0], motor, propellant, environment, **settings).result
 
 
@@ -63,7 +78,8 @@ class ReferenceBackend:
         options = SolveOptions() if options is None else options
         if not isinstance(options, SolveOptions):
             raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
-        jobs = list(zip(batch.motors, batch.propellants, batch.environments, batch.settings))
+        factors = [float(f) for f in batch.arrays["burn_rate_factor"]]
+        jobs = list(zip(batch.motors, batch.propellants, batch.environments, batch.settings, factors))
         results = [None] * len(jobs)
         pooled = []
         if options.workers and options.workers > 1 and len(jobs) > 1:

@@ -9,7 +9,8 @@ def burn_rate(xp, pressure, port_mass_flux, P):
 
     ``pressure`` and ``port_mass_flux`` are per lane. The tabulated rate is a function of the pressure in MPa, in
     mm/s. The erosive correction ``k_e G^0.8 exp(-alpha_e r0 / G)`` applies only where ``k_e > 0`` and
-    ``G > 1e-3``.
+    ``G > 1e-3``. The lane's ``burn_rate_factor`` multiplies the whole rate, as a scenario of ``Robustness`` does
+    (``factor * propellant.evaluate_burn_rate(...)``); it is 1 unless a lane asks otherwise.
     """
     megapascal = xp.maximum(pressure, 0.0) * 1e-6
     coefficients = tuple(P[f"rate_table_c{i}"] for i in range(4))
@@ -23,7 +24,7 @@ def burn_rate(xp, pressure, port_mass_flux, P):
         * xp.exp(-P["erosive_alpha"] * r0 / xp.maximum(port_mass_flux, 1e-9)),
         0.0,
     )
-    return r0 + xp.where((P["erosive_coefficient"] > 0.0) & (port_mass_flux > 1e-3), erosive, 0.0)
+    return P["burn_rate_factor"] * (r0 + xp.where((P["erosive_coefficient"] > 0.0) & (port_mass_flux > 1e-3), erosive, 0.0))
 
 
 def gas_properties(xp, pressure, P):

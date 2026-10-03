@@ -75,7 +75,7 @@ LANE_FIELDS = (
     "chamber_volume", "free_volume", "propellant_volume", "throat_area", "exit_area", "expansion_ratio",
     "divergence_factor", "exit_mach", "density", "gas_constant", "gamma", "source_temperature",
     "eta_c", "eta_cf", "discharge_coefficient", "ambient_pressure", "burn_rate_a", "burn_rate_n",
-    "erosive_coefficient", "erosive_alpha", "n_valid_grains", "igniter_temperature", "igniter_burn_time",
+    "burn_rate_factor", "erosive_coefficient", "erosive_alpha", "n_valid_grains", "igniter_temperature", "igniter_burn_time",
     "ignition_ramp_time", "max_step_size", "rtol", "atol", "burn_timeout_s", "tail_off_timeout_s",
     "tail_off_evaluation", "igniter_mode", "igniter_value", "activation_mode", "activation_value",
     "source_end_time", "burn_rate_mode", "rate_table_below", "rate_table_above", "thermo_mode",
@@ -229,6 +229,23 @@ def _broadcast(values, count: Optional[int], name: str) -> List[Any]:
     if len(items) == 1:
         return items * count
     raise ValueError(f"{name} has {len(items)} entries for {count} lanes")
+
+
+def _burn_rate_factors(value, count: int) -> np.ndarray:
+    """One burn rate factor per lane from a number (broadcast) or a sequence; each must be finite and positive."""
+    try:
+        factors = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"burn_rate_factor must be a number or one number per lane ({exc})") from exc
+    if factors.ndim > 1:
+        raise ValueError("burn_rate_factor must be a number or one number per lane")
+    if factors.ndim == 0 or len(factors) == 1:
+        factors = np.full(count, float(factors.reshape(-1)[0]))
+    if len(factors) != count:
+        raise ValueError(f"burn_rate_factor has {len(factors)} entries for {count} lanes")
+    for lane in np.flatnonzero(~(np.isfinite(factors) & (factors > 0.0))):
+        raise ValueError(f"lane {lane}: burn_rate_factor must be a finite positive number")
+    return factors
 
 
 def _grain_row(grain) -> Dict[str, Any]:
@@ -387,7 +404,8 @@ def _table_parts(propellant, motor, features: FrozenSet[str], cache: Dict[tuple,
     return cache[key]
 
 
-def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], features: FrozenSet[str], parts):
+def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], features: FrozenSet[str], parts,
+                 burn_rate_factor: float = 1.0):
     """Scalar inputs of one lane. Values the batched kernels cannot reproduce are NaN."""
     burn = Burn(
         motor.grains[0], motor, propellant, environment, eta_c=settings["eta_c"], eta_Cf=settings["eta_Cf"],
@@ -433,7 +451,7 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
         eta_c=burn.eta_c, eta_cf=burn.eta_Cf, discharge_coefficient=burn.discharge_coefficient,
         ambient_pressure=ambient,
         burn_rate_a=float(propellant.burn_rate_a) if power_law else nan,
-        burn_rate_n=float(propellant.burn_rate_n) if power_law else nan,
+        burn_rate_n=float(propellant.burn_rate_n) if power_law else nan, burn_rate_factor=float(burn_rate_factor),
         erosive_coefficient=float(getattr(propellant, "erosive_burning_coefficient", 0.0)),
         erosive_alpha=float(getattr(propellant, "erosive_alpha", 35.0)),
         n_valid_grains=float(len(motor.grains)), igniter_temperature=igniter_temperature,
@@ -490,20 +508,27 @@ class ProblemBatch:
         environments=None,
         settings: Optional[Any] = None,
         g_max: Optional[int] = None,
+        burn_rate_factor: Any = 1.0,
     ) -> "ProblemBatch":
         """Pack motors, propellants and environments (one per lane, or one broadcast to every lane).
 
         ``settings`` holds ``BurnSimulation`` keyword settings: one mapping for every lane or one per lane.
+        ``burn_rate_factor`` multiplies the whole burn rate of a lane (erosive term included), the way
+        ``Robustness`` applies a scenario's factor: a number for every lane or one per lane, finite and positive.
         Invalid inputs raise the same errors as ``BurnSimulation`` would, prefixed with the lane index.
         """
         given = {"motors": motors, "propellants": propellants, "environments": environments, "settings": settings}
         count = max((len(value) for value in given.values() if isinstance(value, (list, tuple))), default=1)
+        factor_array = np.asarray(burn_rate_factor, dtype=float) if np.ndim(burn_rate_factor) else None
+        if factor_array is not None and factor_array.ndim == 1 and len(factor_array) > 1:
+            count = max(count, len(factor_array))
         if count == 0:
             raise ValueError("at least one lane is required")
         motor_list = _broadcast(motors, count, "motors")
         propellant_list = _broadcast(propellants, count, "propellants")
         environment_list = _broadcast(Environment() if environments is None else environments, count, "environments")
         setting_list = _broadcast({} if settings is None else settings, count, "settings")
+        factors = _burn_rate_factors(burn_rate_factor, count)
 
         resolved, features, rows, parts_list = [], [], [], []
         cache: Dict[tuple, Any] = {}
@@ -515,7 +540,7 @@ class ProblemBatch:
                 if parts["rate_invalid"]:
                     lane_feature_set = lane_feature_set | {INVALID_BURN_RATE}
                 rows.append(_lane_values(motor_list[lane], propellant_list[lane], environment_list[lane],
-                                         lane_settings, lane_feature_set, parts))
+                                         lane_settings, lane_feature_set, parts, factors[lane]))
                 parts_list.append(parts)
             except (ValueError, TypeError) as exc:
                 if str(exc).startswith(f"lane {lane}:"):
