@@ -23,8 +23,8 @@ note = "post-processing of one history on the CPU (about 7 ms per lane); stays o
 [[entry]]
 path = "solidpy.Multiphysics.simulate_thermal_ablation"
 tier = "T1"
-batched = false
-note = "1-D wall conduction, scipy Radau per time step; planned phase 4b"
+batched = true
+note = "1-D wall conduction, a Radau IIA(5) solve per time step (solidpy.ensemble.simulate_thermal and run_advanced_physics_ensemble; batched Radau with the scipy controller, step for step)"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_structural_response"

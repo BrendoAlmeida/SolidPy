@@ -1,0 +1,42 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "jax": "0.11.2"
+  },
+  "results": [
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "kind": "advanced",
+      "lanes": 1024,
+      "first_call_s": 10.29704378900351,
+      "seconds": 6.4107427839771844,
+      "lanes_per_s": 159.73188045531236,
+      "timings": {
+        "pack_s": 0.34801972200511955,
+        "thermal_s": 0.5894215170119423,
+        "models_s": 5.471658464986831
+      }
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "kind": "advanced",
+      "lanes": 4096,
+      "first_call_s": 27.4890218009823,
+      "seconds": 24.21957403200213,
+      "lanes_per_s": 169.11940707907658,
+      "timings": {
+        "pack_s": 1.3834426210087258,
+        "thermal_s": 1.0173505900020245,
+        "models_s": 21.812091225991026
+      }
+    }
+  ]
+}

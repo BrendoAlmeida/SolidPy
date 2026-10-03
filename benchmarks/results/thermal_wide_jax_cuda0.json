@@ -1,0 +1,50 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "jax": "0.11.2"
+  },
+  "results": [
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "kind": "wide",
+      "lanes": 1024,
+      "nodes": 18,
+      "steps": 398,
+      "pack_s": 0.3429990370059386,
+      "first_call_s": 5.864828613004647,
+      "seconds": 2.4602035080024507,
+      "lanes_per_s": 416.22572956634446,
+      "timings": {
+        "device_s": 2.447685449005803,
+        "assemble_s": 0.004803735006134957
+      },
+      "failed_lanes": 0,
+      "radau_steps": 243441
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "kind": "wide",
+      "lanes": 4096,
+      "nodes": 18,
+      "steps": 398,
+      "pack_s": 1.4474963209941052,
+      "first_call_s": 9.038439991010819,
+      "seconds": 5.560322992998408,
+      "lanes_per_s": 736.6478539390082,
+      "timings": {
+        "device_s": 5.487978591001593,
+        "assemble_s": 0.017973894020542502
+      },
+      "failed_lanes": 0,
+      "radau_steps": 967214
+    }
+  ]
+}
