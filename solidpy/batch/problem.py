@@ -231,16 +231,21 @@ def _broadcast(values, count: Optional[int], name: str) -> List[Any]:
     raise ValueError(f"{name} has {len(items)} entries for {count} lanes")
 
 
-def _burn_rate_factors(value, count: int) -> np.ndarray:
-    """One burn rate factor per lane from a number (broadcast) or a sequence; each must be finite and positive."""
+def _burn_rate_factor_input(value) -> np.ndarray:
+    """The burn rate factors given as a number or a sequence, as a one-dimensional float array (not yet validated)."""
     try:
         factors = np.asarray(value, dtype=float)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"burn_rate_factor must be a number or one number per lane ({exc})") from exc
     if factors.ndim > 1:
         raise ValueError("burn_rate_factor must be a number or one number per lane")
-    if factors.ndim == 0 or len(factors) == 1:
-        factors = np.full(count, float(factors.reshape(-1)[0]))
+    return factors.reshape(-1)
+
+
+def _burn_rate_factors(factors: np.ndarray, count: int) -> np.ndarray:
+    """One factor per lane from ``factors`` (one number is broadcast); each must be finite and positive."""
+    if len(factors) == 1:
+        factors = np.full(count, factors[0])
     if len(factors) != count:
         raise ValueError(f"burn_rate_factor has {len(factors)} entries for {count} lanes")
     for lane in np.flatnonzero(~(np.isfinite(factors) & (factors > 0.0))):
@@ -519,16 +524,16 @@ class ProblemBatch:
         """
         given = {"motors": motors, "propellants": propellants, "environments": environments, "settings": settings}
         count = max((len(value) for value in given.values() if isinstance(value, (list, tuple))), default=1)
-        factor_array = np.asarray(burn_rate_factor, dtype=float) if np.ndim(burn_rate_factor) else None
-        if factor_array is not None and factor_array.ndim == 1 and len(factor_array) > 1:
-            count = max(count, len(factor_array))
+        factor_input = _burn_rate_factor_input(burn_rate_factor)
+        if len(factor_input) > 1:  # a single number is broadcast and never sets the number of lanes
+            count = max(count, len(factor_input))
         if count == 0:
             raise ValueError("at least one lane is required")
         motor_list = _broadcast(motors, count, "motors")
         propellant_list = _broadcast(propellants, count, "propellants")
         environment_list = _broadcast(Environment() if environments is None else environments, count, "environments")
         setting_list = _broadcast({} if settings is None else settings, count, "settings")
-        factors = _burn_rate_factors(burn_rate_factor, count)
+        factors = _burn_rate_factors(factor_input, count)
 
         resolved, features, rows, parts_list = [], [], [], []
         cache: Dict[tuple, Any] = {}

@@ -51,14 +51,15 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
         burning_area = np.where(a["grain_valid"], np.pi * (a["outer_radius"] ** 2 - a["inner_radius0"] ** 2), 0.0).sum(axis=1)
         kn = np.maximum(burning_area, 1e-12) / a["throat_area"]
         n = a["burn_rate_n"]
-        pressure = (a["density"] * a["burn_rate_a"] * (1e-6) ** n * kn * cstar / (1000.0 * a["discharge_coefficient"])) ** (
+        coefficient = a["burn_rate_a"] * a["burn_rate_factor"]  # the factor scales the rate, so the pressure it reaches
+        pressure = (a["density"] * coefficient * (1e-6) ** n * kn * cstar / (1000.0 * a["discharge_coefficient"])) ** (
             1.0 / (1.0 - n)
         )
-        rate = a["burn_rate_a"] * np.maximum(pressure * 1e-6, 1e-12) ** n / 1000.0
+        rate = coefficient * np.maximum(pressure * 1e-6, 1e-12) ** n / 1000.0
         tabulated = evaluate_table(np, np.full(len(batch), 3.0), a["rate_table_x"],
                                    tuple(a[f"rate_table_c{i}"] for i in range(4)), a["rate_table_n"],
                                    a["rate_table_below"], a["rate_table_above"]) / 1000.0  # at a typical 3 MPa
-        rate = np.where(a["burn_rate_mode"] == 1.0, tabulated, rate) * a["burn_rate_factor"]
+        rate = np.where(a["burn_rate_mode"] == 1.0, tabulated * a["burn_rate_factor"], rate)
         depth = np.where(a["grain_valid"], a["burnout_depth"], 0.0).max(axis=1)
         cost = depth / rate / a["max_step_size"] + 40.0 * a["n_valid_grains"]
     return np.where(np.isfinite(cost), cost, np.finfo(float).max)

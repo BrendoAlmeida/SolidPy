@@ -65,6 +65,8 @@ def test_the_factor_defaults_to_one_and_is_broadcast_or_given_per_lane():
     (float("inf"), r"lane 0: burn_rate_factor"),
     ([[1.0, 1.0]], r"one number per lane"),
     ("fast", r"one number per lane"),
+    (["a", "b"], r"one number per lane"),
+    ([[1.0], [1.0, 2.0]], r"one number per lane"),
 ])
 def test_an_invalid_factor_is_refused_with_the_lane(value, message):
     motor, propellant = make_stack()
@@ -157,6 +159,20 @@ def test_the_cost_estimate_follows_the_factor(lanes):
     slow, fast = (lane_cost(pack(built[:1], (f,)))[0] for f in (0.5, 2.0))
 
     assert slow > fast
+
+
+def test_the_cost_estimate_tracks_how_the_burn_time_really_scales_with_the_factor(lanes):
+    """The factor raises the equilibrium pressure too, so a lane at 0.5 takes about 3x as long, not 2x."""
+    factors = (0.5, 0.8, 1.0, 1.25, 2.0)
+    for objects in lanes[1][:2]:  # a power law and a power law with the erosive term
+        batch = ProblemBatch.from_objects([objects[1]] * 5, [objects[2]] * 5, [objects[3]] * 5, [objects[4]] * 5,
+                                          burn_rate_factor=list(factors))
+        results = backends.get_backend("cpu-vectorized").solve_burn(batch).to_results()
+        burnout = np.array([r["metrics"]["grain_burnout_times_s"][0] for r in results])
+        grains = float(batch.arrays["n_valid_grains"][0])
+        estimate = (lane_cost(batch) - 40.0 * grains) * batch.arrays["max_step_size"]
+
+        np.testing.assert_allclose(estimate / estimate[2], burnout / burnout[2], rtol=0.1)
 
 
 def test_simulate_burn_runs_factor_lanes_on_the_requested_backend_and_the_fallback(lanes):
