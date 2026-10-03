@@ -41,17 +41,17 @@ THERMAL_FEATURES = (NON_FINITE_INPUT, SERIES_MISMATCH)
 
 #: Names of the per-lane arrays, in the order ``select`` slices them.
 LANE_ARRAYS = (
-    "lower", "diag", "upper", "source", "y0", "e0", "dt", "bartz", "n_nodes", "n_intervals", "inner_node", "interface_node", "has_liner",
-    "thickness_m", "flame_temp_k", "stagnation", "recovery_temp_k", "throat_ablation_m", "max_recovery_temp_k",
+    "lower", "diag", "upper", "source", "y0", "e0", "dt", "bartz", "n_nodes", "n_intervals", "inner_node",
+    "interface_node", "has_liner", "thickness_m", "flame_temp_k", "stagnation", "recovery_temp_k", "throat_ablation_m", "max_recovery_temp_k",
     "burn_duration_s", "wall_thickness_m", "initial_temp_k",
 )
 
 
-def _per_lane(value, count: int, name: str, scalar: bool = True) -> List[Any]:
+def _per_lane(value, count: int, name: str) -> List[Any]:
     """``value`` broadcast to ``count`` lanes, or checked to hold one entry per lane."""
     if isinstance(value, Mapping) or not isinstance(value, (list, tuple, np.ndarray)):
         return [value] * count
-    if scalar and isinstance(value, np.ndarray) and value.ndim == 0:
+    if isinstance(value, np.ndarray) and value.ndim == 0:
         return [value.item()] * count
     if len(value) != count:
         raise ValueError(f"{name} has {len(value)} entries for {count} lanes")
