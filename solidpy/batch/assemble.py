@@ -117,11 +117,15 @@ def resolved_inputs(motor, propellant, environment, settings, row) -> Dict[str, 
     return resolved
 
 
-def _physics_hash(resolved: Dict[str, Any]) -> str:
+def _scalar_source_bytes() -> bytes:
+    """The bytes of the three reference files, in hash order (read once per batch, not once per lane)."""
+    return b"".join((Path(_burn_module.__file__).parent / name).read_bytes() for name in SCALAR_SOURCES)
+
+
+def _physics_hash(resolved: Dict[str, Any], sources: bytes) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(resolved, sort_keys=True, default=float).encode())
-    for filename in SCALAR_SOURCES:
-        digest.update((Path(_burn_module.__file__).parent / filename).read_bytes())
+    digest.update(sources)
     return digest.hexdigest()
 
 
@@ -204,6 +208,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
     reasons = termination_reasons(out, tail_off)
     git_sha = _git_sha()
     kernel_hash = kernel_source_hash()
+    sources = _scalar_source_bytes()
     execution = dict(execution or {})
     results = []
     for lane in range(len(batch)):
@@ -261,7 +266,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
             "discharge_coefficient_applied": applied["discharge_coefficient"],
             "efficiency_semantics": "native_split", "cea_used": cea_used,
             "thermochemistry_source": "cea_legacy" if cea_used else ("scalar" if scalar else "pressure_table_legacy"),
-            "physics_provider_hash": _physics_hash(resolved), "solidpy_git_sha": git_sha,
+            "physics_provider_hash": _physics_hash(resolved, sources), "solidpy_git_sha": git_sha,
             "solidpy_git_sha_status": "available" if git_sha else "unavailable", "resolved_inputs": resolved,
             "gas_temperature_model": "prescribed_source_temperature_mixing_v1",
             "activation_model": "uniform_front_rate_scaling_v1",

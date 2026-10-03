@@ -84,6 +84,7 @@ def simulate_burn(
     strict: bool = False,
     workers: Optional[int] = None,
     max_steps: Optional[int] = None,
+    tiers: Optional[tuple] = None,
     chunk_size: Optional[int] = None,
     sort: bool = True,
 ) -> BatchResult:
@@ -92,7 +93,9 @@ def simulate_burn(
     ``backend`` is a backend name, ``"auto"``, or ``None`` for the one selected with ``set_backend``,
     ``use_backend`` or the environment (default ``"cpu-reference"``). ``history`` is ``"metrics"`` or ``"full"``.
     ``chunk_size`` bounds how many lanes one solve holds (memory); ``sort`` groups lanes of similar estimated
-    cost into the same chunk, which matters when lanes need very different numbers of steps.
+    cost into the same chunk, which matters when lanes need very different numbers of steps. ``tiers`` are the
+    iteration caps a batched backend runs before its uncapped tier (``None``: ``batch.tiers.DEFAULT_TIERS``,
+    ``()``: one uncapped solve); see ``solidpy.batch.tiers``.
     """
     if not isinstance(batch, ProblemBatch):
         raise TypeError("simulate_burn needs a ProblemBatch; build one with ProblemBatch.from_objects")
@@ -102,7 +105,7 @@ def simulate_burn(
         backend, selected_device = backends.current_backend()
         device = device if device is not None else selected_device
     chosen = backends.get_backend(backend, device)
-    options = SolveOptions(history=history, workers=workers, max_steps=max_steps)
+    options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
 
     missing = batch.unsupported(chosen.capabilities())
     refused = {lane: features for lane, features in enumerate(missing) if features}
@@ -115,12 +118,14 @@ def simulate_burn(
     results: List[Optional[Dict[str, Any]]] = [None] * len(batch)
     supported = np.asarray([lane for lane in range(len(batch)) if lane not in refused], dtype=int)
     chunks: List[np.ndarray] = []
+    tier_log: List[Any] = []
     if len(supported):
         order = supported[np.argsort(lane_cost(batch.select(supported)), kind="stable")] if sort else supported
         chunks = _chunks(order, chunk_size)
         for chunk in chunks:
-            solved = chosen.solve_burn(batch.select(chunk), options).to_results()
-            for lane, result in zip(chunk, solved):
+            outcome = chosen.solve_burn(batch.select(chunk), options)
+            tier_log.append(outcome.execution.get("tiers"))
+            for lane, result in zip(chunk, outcome.to_results()):
                 results[int(lane)] = result
     if refused:
         reference = backends.get_backend("cpu-reference")
@@ -136,5 +141,5 @@ def simulate_burn(
             result["provenance"]["execution"]["requested_backend"] = backend
 
     summary = {"requested_backend": backend, "lanes": len(batch), "fallback_lanes": sorted(int(i) for i in refused),
-               "chunks": len(chunks)}
+               "chunks": len(chunks), "tiers": tier_log}
     return BatchResult(results, backend, summary)

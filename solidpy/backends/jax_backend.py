@@ -14,6 +14,7 @@ count and the grain axis to a bucket, so a sweep reuses one program; a persisten
 from __future__ import annotations
 
 import functools
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -61,7 +62,8 @@ def _compiled(keep_history: bool, max_steps: int):
         store,
     )
     config = solver.SolveConfig(keep_history=keep_history, max_steps=max_steps)
-    return jax.jit(lambda P, y0: solver.solve_burn_and_blowdown(driver, P, y0, config))
+    # the iteration cap is an argument, not a static value, so the tiers of a batch share one compiled program
+    return jax.jit(lambda P, y0, cap: solver.solve_burn_and_blowdown(driver, P, y0, config, cap))
 
 
 class JaxBackend:
@@ -77,6 +79,9 @@ class JaxBackend:
         self.max_lanes = int(max_lanes)
         self._device = self._select_device(device)
         self.device = self._label(self._device)
+        #: Seconds of the last ``solve_burn``: ``device_s`` (padding, transfer, compute, copy back) and
+        #: ``assemble_s`` (result mappings on the host). The first call of a shape includes compilation.
+        self.last_timings: Dict[str, float] = {}
 
     # -- devices ---------------------------------------------------------------------------------------------
     @staticmethod
@@ -127,26 +132,31 @@ class JaxBackend:
         per_lane = (max_steps + 1) * (grains + 8) * 8
         return max(1, min(self.max_lanes, HISTORY_BUDGET_BYTES // per_lane))
 
-    def _solve_chunk(self, chunk, full: bool, max_steps: int):
-        """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only."""
+    def _run(self, sub, full: bool, max_steps: int, cap: Optional[int]):
+        """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
+
+        ``sub`` already has its grain axis padded to a bucket; the lane axis is padded here.
+        """
         jax = self._jax
         jnp = jax.numpy
-        lanes = len(chunk)
-        padded = chunk.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes) - lanes, dtype=int)]))
-        padded = padded.with_g_max(_bucket_grains(padded.g_max))
+        lanes = len(sub)
+        padded = sub.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes) - lanes, dtype=int)]))
+        started = time.perf_counter()
         with self._x64(), jax.default_device(self._device):
             if jnp.zeros(1).dtype != np.float64:
                 raise RuntimeError("float64 is not available in this JAX build; the jax backend needs it")
             P = {name: jax.device_put(jnp.asarray(array), self._device) for name, array in padded.arrays.items()}
             y0 = jax.device_put(jnp.asarray(padded.initial_state()), self._device)
-            out = _compiled(full, max_steps)(P, y0)
-            out = jax.device_get(out)
-        return padded.select(np.arange(lanes)), {name: np.asarray(v)[:lanes] if np.ndim(v) else np.asarray(v) for name, v in out.items()}
+            limit = jnp.asarray(np.iinfo(np.int64).max if cap is None else cap)
+            out = jax.device_get(_compiled(full, max_steps)(P, y0, limit))
+        self._device_s += time.perf_counter() - started
+        return {name: np.asarray(v)[:lanes] for name, v in out.items() if np.ndim(v)}
 
     def solve_burn(self, batch, options=None):
         """Solve ``batch`` on the device and return the canonical results; every lane must be supported."""
         from ..batch.assemble import assemble
         from ..batch.result import BatchResult
+        from ..batch.tiers import DEFAULT_TIERS, solve_in_tiers
 
         options = SolveOptions() if options is None else options
         if not isinstance(options, SolveOptions):
@@ -158,14 +168,22 @@ class JaxBackend:
             )
         full = options.history == "full"
         max_steps = options.max_steps or DEFAULT_MAX_STEPS[options.history]
-        per_launch = self._lanes_per_launch(_bucket_grains(batch.g_max), full, max_steps)
+        tiers = DEFAULT_TIERS if options.tiers is None else options.tiers
+        grains = _bucket_grains(batch.g_max)
+        per_launch = self._lanes_per_launch(grains, full, max_steps)
         provenance = self.provenance()
         results: List[Dict[str, Any]] = []
+        launches: List[Any] = []
+        self._device_s, assemble_s = 0.0, 0.0
         for start in range(0, len(batch), per_launch):
-            chunk = batch.select(np.arange(start, min(start + per_launch, len(batch))))
-            solved, out = self._solve_chunk(chunk, full, max_steps)
-            results.extend(assemble(solved, out, options.history, provenance))
-        return BatchResult(results, self.name, provenance)
+            chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_g_max(grains)
+            out, info = solve_in_tiers(chunk, lambda sub, cap: self._run(sub, full, max_steps, cap), tiers)
+            begin = time.perf_counter()
+            results.extend(assemble(chunk, out, options.history, provenance))
+            assemble_s += time.perf_counter() - begin
+            launches.append(info)
+        self.last_timings = {"device_s": self._device_s, "assemble_s": assemble_s}
+        return BatchResult(results, self.name, {**provenance, "tiers": launches})
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

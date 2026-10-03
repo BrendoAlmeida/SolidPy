@@ -61,15 +61,23 @@ class SolveOptions:
 
     ``history`` is the history policy (``"metrics"`` or ``"full"``), ``workers`` the number of processes a CPU
     backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
-    (``None``: the backend's default). A backend ignores an option that does not apply to it and says so in
-    its docstring.
+    (``None``: the backend's default) and ``tiers`` the iteration caps of the capped tiers a batched backend runs
+    before its uncapped one (``None``: ``batch.tiers.DEFAULT_TIERS``; ``()``: a single uncapped solve). A backend
+    ignores an option that does not apply to it and says so in its docstring.
     """
 
     history: str = "metrics"
     workers: Optional[int] = None
     max_steps: Optional[int] = None
+    tiers: Optional[Tuple[int, ...]] = None
 
     def __post_init__(self):
+        if self.tiers is not None and (
+            not isinstance(self.tiers, tuple)
+            or any(isinstance(t, bool) or not isinstance(t, int) or t < 1 for t in self.tiers)
+            or list(self.tiers) != sorted(set(self.tiers))
+        ):
+            raise ValueError(f"tiers must be a tuple of increasing positive integers or None, got {self.tiers!r}")
         if self.max_steps is not None and (
             isinstance(self.max_steps, bool) or not isinstance(self.max_steps, int) or self.max_steps < 2
         ):

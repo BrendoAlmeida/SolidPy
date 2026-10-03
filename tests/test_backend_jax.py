@@ -150,6 +150,26 @@ def test_history_full_returns_the_canonical_channels_and_the_step_budget_flags_f
     assert short["provenance"]["execution"]["step_overflow"] is True and not short["status"]["completed"]
 
 
+def test_tiers_give_the_same_results_as_one_uncapped_launch_and_are_reported(subset):
+    cases, reference, batch = subset
+    few = batch.select(np.arange(0, len(cases), 4))
+    backend = backends.get_backend("jax", device="cpu")
+
+    plain = backend.solve_burn(few, SolveOptions(tiers=()))
+    tiered = backend.solve_burn(few, SolveOptions(tiers=(150,)))  # about half of these lanes finish in 150
+
+    launches = tiered.execution["tiers"][0]
+    assert [tier[0] for tier in launches] == [150, None] and launches[0][1] == len(few)
+    assert 0 < launches[1][1] < len(few) and launches[1][1] == launches[0][2]  # the rest were rerun in a smaller batch
+    assert plain.execution["tiers"][0] == [(None, len(few), 0)]
+    for a, b in zip(plain.to_results(), tiered.to_results()):
+        assert a["status"]["termination_reason"] == b["status"]["termination_reason"]
+        for key in ("total_impulse_ns", "generated_mass_integral_kg"):
+            assert b["metrics"][key] == pytest.approx(a["metrics"][key], rel=tol.INTEGRAL_RTOL), key
+        for t_a, t_b in zip(a["metrics"]["grain_burnout_times_s"], b["metrics"]["grain_burnout_times_s"]):
+            assert t_b == pytest.approx(t_a, rel=tol.TIME_RTOL)
+
+
 def test_unsupported_lanes_are_refused_by_name():
     by_id = {c["id"]: c for c in gc.load_corpus()["cases"]}
     batch = pack([by_id["tubular-000"], by_id["igniter-scalar-000"]])

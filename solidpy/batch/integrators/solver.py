@@ -302,16 +302,24 @@ def tail_body(driver, c, P, cfg, cutoff):
     return out
 
 
-def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig()):
+def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=None):
     """Solve every lane through the burn stage and, when requested, the blowdown stage.
+
+    ``max_iterations`` caps the iterations of each stage loop (``None``: no cap). A lane that is not finished
+    when the cap is hit is reported in ``unfinished`` and its other outputs are partial; callers rerun such lanes
+    from the start in a smaller batch (see ``batch.tiers``). The cap is a plain value, or a traced scalar under jit,
+    so changing it does not recompile.
 
     Returns a mapping of per-lane arrays: the final state and time, running maxima, flow-interval trackers,
     the burnout time of every grain, stage flags and, if ``cfg.keep_history``, the stored points.
     """
     xp = driver.xp
     b = y0.shape[0]
+    cap = xp.asarray(np.iinfo(np.int64).max if max_iterations is None else max_iterations)
     carry = initial_carry(driver, P, y0, cfg)
-    burn = driver.loop(lambda c: ~xp.all(c["done"]), lambda c: burn_body(driver, c, P, cfg), carry)
+    burn = driver.loop(
+        lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap), lambda c: burn_body(driver, c, P, cfg), carry
+    )
     burned_out = ~xp.any(burn["active"], axis=1) & burn["ok"]
 
     # blowdown cutoff from the burn-stage pressure peak (burn points only, as in the scalar code)
@@ -329,7 +337,7 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig()):
         iterations=xp.zeros((), dtype=int),
     )
     tail = driver.loop(
-        lambda c: ~xp.all(c["done"]), lambda c: tail_body(driver, c, P, cfg, cutoff), tail
+        lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap), lambda c: tail_body(driver, c, P, cfg, cutoff), tail
     )
     return {
         "t": tail["t"], "y": tail["y"], "y0": y0, "n_points": tail["hn"], "ht": tail["ht"], "hy": tail["hy"],
@@ -338,5 +346,5 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig()):
         "noz_end": tail["noz_end"], "burn_t": burn["burn_t"], "burn_ok": burn["ok"], "burned_out": burned_out,
         "tail_ok": tail["ok"], "reached_cutoff": tail["reached_cutoff"], "cutoff": cutoff, "peak_burn": peak_burn,
         "overflow": tail["overflow"], "burn_end": burn["t"], "burn_iterations": burn["iterations"],
-        "tail_iterations": tail["iterations"],
+        "tail_iterations": tail["iterations"], "unfinished": ~burn["done"] | ~tail["done"],
     }
