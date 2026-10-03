@@ -10,6 +10,26 @@ NumPy and on ``jax.numpy`` and can be jit-compiled.
 PI = 3.141592653589793
 
 
+def ordered_sum(xp, values):
+    """Sum over the last axis the way CPython's ``sum`` adds floats (Neumaier compensated summation).
+
+    The scalar code sums the remaining volumes of the grains with ``sum()``, which compensates rounding from
+    Python 3.12 on and adds plainly before. A pairwise ``sum`` rounds differently, and at the initial state the
+    chamber pressure equals the ambient pressure to the last bit, where the nozzle flow depends on the square
+    root of the difference. The loop runs over the small static grain axis; trailing zeros of padded grains
+    do not change the result. On Python 3.11 and older the scalar sum is plain, so agreement there is to the
+    last bits only.
+    """
+    total = values[..., 0]
+    compensation = xp.zeros_like(total)
+    for i in range(1, values.shape[-1]):
+        x = values[..., i]
+        t = total + x
+        compensation = compensation + xp.where(xp.abs(total) >= xp.abs(x), (total - t) + x, (x - t) + total)
+        total = t
+    return total + xp.where(xp.isfinite(compensation), compensation, 0.0)
+
+
 def port_area(xp, regression, P):
     """Gas-port cross-section at ``regression`` (``Grain.evaluate_port_area``)."""
     w = xp.maximum(regression, 0.0)

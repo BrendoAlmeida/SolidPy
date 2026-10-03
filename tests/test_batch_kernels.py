@@ -1,3 +1,5 @@
+import sys
+
 import numpy as np
 import pytest
 
@@ -6,7 +8,7 @@ from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch
 from solidpy.batch import problem as pb
 from solidpy import Burn
-from solidpy.batch.kernels import geometry, nozzle, propellant
+from solidpy.batch.kernels import geometry, nozzle, propellant, rhs
 
 RTOL = tol.KERNEL_RTOL_NUMPY
 
@@ -259,3 +261,233 @@ def test_scalar_thermochemistry_gives_the_lane_constants(lanes):
 
     np.testing.assert_array_equal(source_temperature[:, 0], sub.arrays["source_temperature"])
     np.testing.assert_array_equal(k[:, 0], sub.arrays["gamma"])
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Right-hand side, on states taken from real reference trajectories.
+
+TRAJECTORY_FAMILIES = (
+    "tubular", "star", "ends-tubular", "ends-star", "mixed", "erosive", "efficiency", "lowkn", "altitude",
+    "replicated", "guard-axial", "guard-nearpi", "guard-slot", "guard-thinweb", "short",
+)
+
+
+def history_view(P):
+    """Every packed array with an axis inserted after the lane axis, for ``[B, T]`` evaluations."""
+    return {name: array[:, None] for name, array in P.items()}
+
+
+PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
+
+
+@pytest.fixture(scope="module")
+def trajectories():
+    """The cheapest corpus design of each family, and of 4, 8 and 12 grains, simulated by the scalar solver."""
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+
+    def cheapest(members):
+        return min(members, key=lambda c: reference[c["id"]]["history_points"])
+
+    cases = [cheapest(c for c in corpus if c["family"] == family) for family in TRAJECTORY_FAMILIES]
+    for grains in (4, 8, 12):
+        cases.append(cheapest(c for c in corpus if PLAIN_TAGS | {f"grains:{grains}"} <= set(c["tags"])))
+    out = []
+    for case in cases:
+        simulation = gc.simulate(case)
+        raws = [simulation._burn_raw] + ([simulation._tail_raw] if simulation.tail_off_solution is not None else [])
+        times, states = simulation._join_segments(raws)
+        out.append((case, simulation, times, states.T))
+    return out
+
+
+def sampled_indices(simulation, states):
+    """Evenly spaced points plus the neighbourhood of every grain burnout and the end of the blowdown."""
+    count = len(states)
+    picks = set(np.linspace(0, count - 1, 24).astype(int))
+    for slot, grain in enumerate(simulation.motor.grains):
+        reached = np.flatnonzero(states[:, 2 + slot] >= grain.burnout_regression_m * (1 - 1e-9))
+        if len(reached):
+            picks.update(int(i) for i in np.clip([reached[0] - 1, reached[0], reached[0] + 1], 0, count - 1))
+    picks.update(range(max(count - 3, 0), count))
+    return np.array(sorted(picks))
+
+
+QUANTITY_SCALES = {
+    "pressure": lambda q, a: q["pressure"],
+    "volume": lambda q, a: a["chamber_volume"],  # a difference of the chamber and the remaining propellant
+    "temperature": lambda q, a: q["temperature"],
+}
+
+
+def assert_quantities_match(kernel, scalar, chamber_volume, where):
+    close(kernel["pressure"], scalar["pressure"], "pressure " + where)
+    close(kernel["volume"], scalar["volume"], "volume " + where, scale=chamber_volume)
+    close(kernel["temperature"], scalar["temperature"], "temperature " + where)
+    close(kernel["regression_rates"], scalar["regression_rates"], "regression rates " + where)
+    close(kernel["areas"], scalar["areas"], "areas " + where, scale=np.max(scalar["areas"], initial=0.0))
+    close(kernel["generated_grains"], scalar["generated_grains"], "generated per grain " + where,
+          scale=scalar["generated"])
+    close(kernel["generated"], scalar["generated"], "generated " + where)
+    close(kernel["nozzle"], scalar["nozzle"], "nozzle flow " + where)
+    close(kernel["momentum_ideal"], scalar["components"]["momentum_ideal_n"], "ideal momentum " + where)
+    close(kernel["momentum"], scalar["components"]["momentum_n"], "momentum " + where)
+    close(kernel["pressure_thrust"], scalar["components"]["pressure_n"], "pressure thrust " + where,
+          scale=scalar["pressure"] * 1e-3)
+    close(kernel["thrust"], scalar["components"]["total_n"], "thrust " + where,
+          scale=abs(scalar["components"]["momentum_n"]) + abs(scalar["components"]["pressure_n"]))
+
+
+def assert_vector_close(actual, desired, scale, where):
+    """Entrywise ``|actual - desired| <= RTOL * (|desired| + scale)``, naming the entries that fail."""
+    tolerance = RTOL * (np.abs(desired) + scale)
+    bad = np.flatnonzero(~(np.abs(actual - desired) <= tolerance))
+    assert bad.size == 0, (
+        f"{where}: entries {bad.tolist()} differ, kernel {actual[bad]} scalar {desired[bad]} "
+        f"tolerance {tolerance[bad]}"
+    )
+
+
+def derivative_scales(simulation, q, state):
+    """Per-entry magnitude of the terms each derivative is built from, for the cancelling entries."""
+    n = len(simulation.motor.grains)
+    source = simulation._parameters_at_pressure(q["pressure"])[0]
+    scale = np.abs(np.asarray(simulation._conservative_rhs(0.0, state, None), dtype=float))
+    scale[0] = max(abs(q["generated"]), abs(q["nozzle"]))
+    scale[1] = max(abs(q["generated"] * source), abs(q["nozzle"] * q["temperature"]))
+    scale[2 + n + 3] = abs(q["components"]["momentum_n"]) + abs(q["components"]["pressure_n"])
+    return scale
+
+
+def test_quantities_and_rhs_match_the_scalar_solver_along_real_trajectories(trajectories):
+    for case, simulation, times, states in trajectories:
+        batch = ProblemBatch.from_objects(simulation.motor, simulation.propellant, simulation.environment,
+                                          {"eta_c": simulation.eta_c, "eta_Cf": simulation.eta_Cf,
+                                           "discharge_coefficient": simulation.discharge_coefficient})
+        V = history_view(batch.namespace(np))
+        picks = sampled_indices(simulation, states)
+        y = states[picks][None]
+
+        quantities = rhs.state_quantities(np, y, None, V)
+        derivative = rhs.conservative_rhs(np, y, None, V)
+
+        for row, index in enumerate(picks):
+            where = f"{case['id']} state {index} t={times[index]!r}"
+            scalar = simulation._state_quantities_uncached(times[index], states[index], None)
+            kernel = {key: value[0, row] for key, value in quantities.items()}
+            assert_quantities_match(kernel, scalar, simulation.motor.chamber_volume, where)
+            expected = np.asarray(simulation._conservative_rhs(times[index], states[index], None), dtype=float)
+            scale = derivative_scales(simulation, scalar, states[index])
+            assert_vector_close(derivative[0, row], expected, scale, where)
+
+
+def test_pressure_of_is_the_pressure_of_the_quantities(trajectories):
+    for case, simulation, times, states in trajectories:
+        batch = ProblemBatch.from_objects(simulation.motor, simulation.propellant, simulation.environment)
+        V = history_view(batch.namespace(np))
+        y = states[None]
+
+        np.testing.assert_array_equal(rhs.pressure_of(np, y, V), rhs.state_quantities(np, y, None, V)["pressure"])
+
+
+def pad_state(state, grains, g_max):
+    """Move a ``[G + 7]`` state to the layout of a batch padded to ``g_max`` grains."""
+    padded = np.zeros(g_max + 7)
+    padded[: 2 + grains] = state[: 2 + grains]
+    padded[2 + g_max :] = state[2 + grains :]
+    return padded
+
+
+def test_lanes_with_different_grain_counts_share_one_padded_batch_exactly(trajectories):
+    motors = [t[1].motor for t in trajectories]
+    batch = ProblemBatch.from_objects(
+        motors, [t[1].propellant for t in trajectories], [t[1].environment for t in trajectories],
+        [{"eta_c": t[1].eta_c, "eta_Cf": t[1].eta_Cf, "discharge_coefficient": t[1].discharge_coefficient}
+         for t in trajectories],
+    )
+    assert len(set(batch.n_grains)) > 3 and batch.g_max > batch.n_grains.min()
+    V = history_view(batch.namespace(np))
+    count = min(len(t[3]) for t in trajectories)
+    picks = [np.linspace(0, len(t[3]) - 1, count).astype(int) for t in trajectories]
+    y = np.stack([
+        np.stack([pad_state(t[3][i], len(t[1].motor.grains), batch.g_max) for i in idx])
+        for t, idx in zip(trajectories, picks)
+    ])
+
+    derivative = rhs.conservative_rhs(np, y, None, V)
+
+    for lane, (case, simulation, times, states) in enumerate(trajectories):
+        n = len(simulation.motor.grains)
+        for row, index in enumerate(picks[lane]):
+            expected = np.asarray(simulation._conservative_rhs(times[index], states[index], None), dtype=float)
+            scale = derivative_scales(simulation, simulation._state_quantities_uncached(times[index], states[index], None),
+                                      states[index])
+            got = derivative[lane, row]
+            assert_vector_close(
+                np.concatenate([got[: 2 + n], got[2 + batch.g_max :]]), expected, scale, f"{case['id']} state {index}"
+            )
+            assert not got[2 + n : 2 + batch.g_max].any(), "padded grains must not regress"
+
+
+def test_an_explicit_active_mask_changes_the_result_only_where_it_differs_from_the_derived_one(trajectories):
+    case, simulation, times, states = trajectories[1]
+    batch = ProblemBatch.from_objects(simulation.motor, simulation.propellant, simulation.environment)
+    V = history_view(batch.namespace(np))
+    y = states[None]
+    derived = batch.arrays["grain_valid"][:, None, :] & (y[..., 2 : 2 + batch.g_max] < V["burnout_depth"])
+
+    np.testing.assert_array_equal(
+        rhs.conservative_rhs(np, y, derived, V), rhs.conservative_rhs(np, y, None, V)
+    )
+    blowdown = rhs.conservative_rhs(np, y, np.zeros_like(derived), V)  # nothing burns: only the gas leaves
+    assert not blowdown[..., 2 : 2 + batch.g_max].any()
+    assert (blowdown[..., 0] <= 0.0).all()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="sum() compensates float sums from Python 3.12 on")
+def test_ordered_sum_is_bit_identical_to_python_sum():
+    rng = np.random.default_rng(11)
+    values = rng.uniform(1e-6, 1e-3, size=(500, 24))
+    values[::7, 3:9] = 0.0  # burned-out grains contribute exact zeros
+
+    ordered = geometry.ordered_sum(np, values)
+
+    assert ordered.tolist() == [sum(row.tolist()) for row in values]
+    assert (ordered != values.sum(axis=-1)).any()  # the pairwise sum rounds differently, which is the point
+
+
+def test_ordered_sum_ignores_padding_and_handles_non_finite_values():
+    rng = np.random.default_rng(12)
+    values = rng.uniform(1e-6, 1e-3, size=(50, 12))
+    padded = np.concatenate([values, np.zeros((50, 5))], axis=1)
+
+    np.testing.assert_array_equal(geometry.ordered_sum(np, padded), geometry.ordered_sum(np, values))
+    assert geometry.ordered_sum(np, values[:, :1]).tolist() == values[:, 0].tolist()
+    with np.errstate(invalid="ignore"):
+        assert np.isnan(geometry.ordered_sum(np, np.array([[1.0, np.nan, 2.0]]))).all()
+        assert np.isposinf(geometry.ordered_sum(np, np.array([[1.0, np.inf, 2.0]]))).all()
+
+
+def test_runge_kutta_stages_that_overshoot_the_burnout_depth_are_clamped_like_the_scalar_code(trajectories):
+    """A trial stage can push an active grain past its burnout depth before the event is located."""
+    checked = 0
+    for case, simulation, times, states in trajectories:
+        n = len(simulation.motor.grains)
+        batch = ProblemBatch.from_objects(simulation.motor, simulation.propellant, simulation.environment,
+                                          {"eta_c": simulation.eta_c, "eta_Cf": simulation.eta_Cf,
+                                           "discharge_coefficient": simulation.discharge_coefficient})
+        V = history_view(batch.namespace(np))
+        index = len(states) // 3
+        for factor in (1.0, 1.0 + 1e-12, 1.0 + 1e-3, 1.4):
+            state = states[index].copy()
+            for slot, grain in enumerate(simulation.motor.grains):
+                state[2 + slot] = grain.burnout_regression_m * factor
+            active = np.ones(n, dtype=bool)
+
+            got = rhs.conservative_rhs(np, state[None, None], active[None, None], V)[0, 0]
+
+            expected = np.asarray(simulation._conservative_rhs(times[index], state, active), dtype=float)
+            q = simulation._state_quantities_uncached(times[index], state, active)
+            assert_vector_close(got, expected, derivative_scales(simulation, q, state), f"{case['id']} x{factor}")
+            checked += 1
+    assert checked == 4 * len(trajectories)
