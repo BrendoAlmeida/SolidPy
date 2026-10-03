@@ -258,8 +258,9 @@ Six workers were slower on all three tested shapes: the W2 model stage took 3.29
 at 1,024 lanes; the W3 detailed-ballistics stage took 2.77x as long. Pool startup and job serialization outweigh the
 parallel work on this host, so the pool is opt-in and serial is the default. A GPU run could change the total W3 balance,
 but that is an inference and remains unmeasured; these CPU-model timings still apply. The rows above were measured before
-the producer-consumer pipeline was added and do not include its overlap. Updated end-to-end W2/W3 throughput is pending.
-The process pool starts after the solve, so there is no overlap with accelerator work yet. Raw benchmark output is in
+the producer-consumer pipeline was added and do not include its overlap. A CPU-only post-pipeline sample follows; GPU
+end-to-end W2/W3 throughput is still pending. The benchmark CLIs expose `--chunk-size` for W2 and `--chunk-lanes` for W3,
+and their JSON records whether multiple solve chunks overlapped process work. Raw pre-pipeline benchmark output is in
 `benchmarks/results/postprocess_w2_numpy_workers{1,6}.json`,
 `benchmarks/results/postprocess_w2_numpy_1024_workers{1,6}.json` and
 `benchmarks/results/postprocess_w3_numpy_workers{1,6}.json`.
@@ -267,9 +268,25 @@ The process pool starts after the solve, so there is no overlap with accelerator
 Reproduce the measured shapes with:
 
 ```
-python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --repeat 1
-python benchmarks/bench_robustness.py --backend cpu-vectorized --workers 6 --designs 8 --repeat 1
+python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --chunk-size 256 --repeat 1
+python benchmarks/bench_robustness.py --backend cpu-vectorized --workers 6 --designs 8 --chunk-lanes 54 --repeat 1
 ```
+
+## Producer-consumer pipeline sample (CPU-only)
+
+Measured on the current host with `cpu-vectorized`, six post-processing workers, and one warm repeat after the first call.
+The chunks force more than one solve so the pipeline can overlap stages. These numbers validate the benchmark path and
+record the CPU schedule; they do not estimate GPU throughput. `models_s` is the sum of worker CPU time and is not wall
+time, while `thermal_s` and `solve_s` are producer wall time accumulated across chunks.
+
+| Workload | Lanes / solve chunks | Total wall (s) | Solve wall (s) | Post-processing CPU (s) | Lanes/s | Overlap |
+|---|---:|---:|---:|---:|---:|---|
+| W2 advanced, chunk size 256 | 1,024 / 4 | 19.52 | 3.32 thermal | 5.81 models | 52.5 | yes |
+| W3 robustness, chunk lanes 54 | 216 / 4 | 32.39 | 31.65 burn | 0.66 ballistics | 6.7 | yes |
+
+Machine-readable results: `benchmarks/results/postpipeline_w2_cpu_vectorized_1024_workers6_chunk256.json` and
+`benchmarks/results/postpipeline_w3_cpu_vectorized_8_workers6_chunk54.json`. The CPU-vectorized W3 burn dominates this
+host run; the process pipeline does not turn that backend into an accelerator.
 
 ## Structural Monte Carlo (W4)
 

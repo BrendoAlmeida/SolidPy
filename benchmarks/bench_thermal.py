@@ -167,27 +167,30 @@ def bench_advanced_scalar(count, workers):
             "lanes_per_s": count / seconds}
 
 
-def bench_advanced_backend(count, name, device, repeat, workers):
+def bench_advanced_backend(count, name, device, repeat, workers, chunk_size):
     designs = advanced_designs(count)
     geometries = [d[0] for d in designs]
     curves = [d[1] for d in designs]
     propellant = designs[0][2]
     options = dict(casing_material=ADVANCED_CASING, nozzle_material=NozzleMaterial(), flame_temp_k=propellant.combustion_temperature,
-                   r_specific=propellant.products_constant, backend=name, device=device, workers=workers)
-    timings = {}
+                   r_specific=propellant.products_constant, backend=name, device=device, workers=workers,
+                   chunk_size=chunk_size)
+    timings, execution = {}, {}
     started = time.perf_counter()
-    run_advanced_physics_ensemble(geometries, curves, timings=timings, **options)
+    run_advanced_physics_ensemble(geometries, curves, timings=timings, execution=execution, **options)
     first_call = time.perf_counter() - started
-    best, best_timings = None, None
+    best, best_timings, best_execution = None, None, None
     for _ in range(repeat):
-        timings = {}
+        timings, execution = {}, {}
         started = time.perf_counter()
-        run_advanced_physics_ensemble(geometries, curves, timings=timings, **options)
+        run_advanced_physics_ensemble(geometries, curves, timings=timings, execution=execution, **options)
         seconds = time.perf_counter() - started
         if best is None or seconds < best:
-            best, best_timings = seconds, dict(timings)
+            best, best_timings, best_execution = seconds, dict(timings), dict(execution)
     return {"backend": name, "device": device, "kind": "advanced", "lanes": count, "workers": workers,
-            "first_call_s": first_call, "seconds": best, "lanes_per_s": count / best, "timings": best_timings}
+            "chunk_size": chunk_size, "first_call_s": first_call, "seconds": best, "lanes_per_s": count / best,
+            "timings": best_timings,
+            "execution": {key: best_execution.get(key) for key in ("schedule", "chunks", "overlap")}}
 
 
 def main():
@@ -198,6 +201,8 @@ def main():
     parser.add_argument("--kind", default="typical", choices=("typical", "wide", "advanced"))
     parser.add_argument("--workers", default="1",
                         help="process counts for cpu-scalar; count for cpu-reference or advanced-ensemble post-processing")
+    parser.add_argument("--chunk-size", type=int, default=None,
+                        help="thermal lanes per solve chunk for --kind advanced; use to measure W2 pipeline overlap")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
@@ -205,6 +210,8 @@ def main():
     results = []
     sizes = [int(n) for n in args.lanes.split(",")]
     worker_count = int(args.workers.split(",")[0])
+    if args.chunk_size is not None and args.kind != "advanced":
+        parser.error("--chunk-size applies only to --kind advanced")
     if args.kind != "advanced" and args.backend not in ("cpu-scalar", "cpu-reference") and worker_count != 1:
         parser.error("--workers above 1 applies to cpu-scalar/reference solves or --kind advanced post-processing")
     if args.backend == "cpu-scalar":
@@ -216,7 +223,7 @@ def main():
     else:
         workers = worker_count if args.backend == "cpu-reference" or args.kind == "advanced" else None
         for count in sizes:
-            results.append(bench_advanced_backend(count, args.backend, args.device, args.repeat, workers)
+            results.append(bench_advanced_backend(count, args.backend, args.device, args.repeat, workers, args.chunk_size)
                            if args.kind == "advanced"
                            else bench_backend(args.kind, count, args.backend, args.device, args.repeat, workers))
             print(json.dumps(results[-1]), flush=True)

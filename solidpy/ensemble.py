@@ -702,6 +702,7 @@ def run_robustness_ensemble(
     max_steps: Optional[int] = None,
     chunk_lanes: int = 4096,
     timings: Optional[Dict[str, float]] = None,
+    execution: Optional[Dict[str, Any]] = None,
     keep_series: bool = True,
     **simulation_kwargs: Any,
 ) -> List[Dict[str, Any]]:
@@ -721,6 +722,8 @@ def run_robustness_ensemble(
     before any burn is solved; the scalar path raises as it reaches them. A dict passed as ``timings`` receives the
     seconds spent packing (``pack_s``), solving chunks (``solve_s``), worker CPU time for detailed ballistics
     (``postprocess_s``) and assembling reports (``report_s``); solve and post-process work may overlap.
+    A dict passed as ``execution`` receives the solve-chunk count, process-batch count and whether those stages could
+    overlap in this run.
 
     Every lane of a report holds its full series and canonical history, about 200 kB each for a four-grain design, as
     the scalar path's does.
@@ -758,8 +761,10 @@ def run_robustness_ensemble(
     designs_per_chunk = max(1, int(chunk_lanes) // lanes_per_design)
     total_lanes = len(parsed) * lanes_per_design
     solver_workers, postprocess_workers = _pipeline_worker_counts(workers)
+    solve_chunks = 0
 
     def lane_jobs():
+        nonlocal solve_chunks
         for start in range(0, len(parsed), designs_per_chunk):
             chunk = parsed[start : start + designs_per_chunk]
             mark = time.perf_counter()
@@ -803,6 +808,7 @@ def run_robustness_ensemble(
                 reserved_cores=reserved_cores, max_steps=max_steps,
             ).to_results()
             clock["solve_s"] += time.perf_counter() - mark
+            solve_chunks += 1
             for lane in range(len(solved)):
                 local_design, scenario_index = divmod(lane, lanes_per_design)
                 scenario = None if scenario_index == 0 else scenario_list[scenario_index - 1]
@@ -812,12 +818,14 @@ def run_robustness_ensemble(
             solved = None
 
     design_results: List[Dict[str, Any]] = []
+    postprocess_schedule: Dict[str, int] = {}
     postprocess_reserved_cores = _process_reserved_cores(backend, device, reserved_cores, total_lanes)
     if workers is not None and workers > 1:
         postprocess_reserved_cores += 2  # keep a producer core and one reference fallback worker available
     for job, (result, elapsed) in _bounded_process_batches(
         _timed_detailed_ballistics_batch, lane_jobs(), total_lanes, postprocess_workers,
         process_safe=_detailed_ballistics_process_safe, reserved_cores=postprocess_reserved_cores,
+        schedule=postprocess_schedule,
     ):
         _, view, scenario, _, design_index, local_lane = job
         if design_index != len(reports):
@@ -845,4 +853,12 @@ def run_robustness_ensemble(
             design_results = []
     if timings is not None:
         timings.update(clock)
+    if execution is not None:
+        execution.update(
+            schedule="burn_postprocess_pipeline",
+            lanes=total_lanes,
+            chunks=solve_chunks,
+            process_batches=postprocess_schedule.get("process_batches", 0),
+            overlap=solve_chunks > 1 and postprocess_schedule.get("process_batches", 0) > 0,
+        )
     return reports

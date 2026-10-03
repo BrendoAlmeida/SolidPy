@@ -109,23 +109,23 @@ def bench_scalar(count, workers):
             "lanes_per_s": lanes / seconds}
 
 
-def bench_ensemble(count, backend, device, repeat, max_steps, workers, keep_series):
+def bench_ensemble(count, backend, device, repeat, max_steps, workers, keep_series, chunk_lanes):
     work = designs(count)
     options = dict(monte_carlo_sample_count=MONTE_CARLO_SAMPLES, max_step_size=MAX_STEP_SIZE,
                    max_time_points=MAX_TIME_POINTS, backend=backend, device=device, max_steps=max_steps, workers=workers,
-                   keep_series=keep_series)
-    timings = {}
+                   keep_series=keep_series, chunk_lanes=chunk_lanes)
+    timings, execution = {}, {}
     started = time.perf_counter()
-    first = run_robustness_ensemble(work, timings=timings, **options)
+    first = run_robustness_ensemble(work, timings=timings, execution=execution, **options)
     first_call = time.perf_counter() - started
-    best, best_timings = None, None
+    best, best_timings, best_execution = None, None, None
     for _ in range(repeat):
-        timings = {}
+        timings, execution = {}, {}
         started = time.perf_counter()
-        reports = run_robustness_ensemble(work, timings=timings, **options)
+        reports = run_robustness_ensemble(work, timings=timings, execution=execution, **options)
         seconds = time.perf_counter() - started
         if best is None or seconds < best:
-            best, best_timings = seconds, dict(timings)
+            best, best_timings, best_execution = seconds, dict(timings), dict(execution)
     lanes = count * lanes_per_design()
     fallback = sum(
         1 for report in reports for r in [report["nominal"]] + report["scenarios"]
@@ -133,9 +133,11 @@ def bench_ensemble(count, backend, device, repeat, max_steps, workers, keep_seri
     )
     complete = sum(report["status"] == "completed" for report in reports)
     return {"backend": backend, "device": device, "designs": count, "lanes": lanes, "workers": workers,
+            "chunk_lanes": chunk_lanes,
             "first_call_s": first_call,
             "seconds": best, "lanes_per_s": lanes / best, "timings": best_timings, "fallback_lanes": fallback,
-            "completed_designs": complete, "max_steps": max_steps, "keep_series": keep_series}
+            "completed_designs": complete, "max_steps": max_steps, "keep_series": keep_series,
+            "execution": best_execution}
 
 
 def main():
@@ -147,6 +149,8 @@ def main():
                         help="process counts for cpu-scalar; CPU post-processing workers for ensemble backends")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=2000, help="history points per lane on a batched backend")
+    parser.add_argument("--chunk-lanes", type=int, default=4096,
+                        help="maximum burn lanes per solve chunk; reduce to measure W3 pipeline overlap")
     parser.add_argument("--keep-series", action="store_true",
                         help="keep the full series and history of every lane (about 300 kB each); default: scalars only")
     parser.add_argument("--out", type=Path, default=None)
@@ -163,7 +167,7 @@ def main():
         workers = int(args.workers.split(",")[0])
         for count in sizes:
             results.append(bench_ensemble(count, args.backend, args.device, args.repeat, args.max_steps, workers,
-                                          args.keep_series))
+                                          args.keep_series, args.chunk_lanes))
             print(json.dumps(results[-1]), flush=True)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
