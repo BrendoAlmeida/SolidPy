@@ -41,11 +41,12 @@ def nozzle_mass_flow(xp, pressure, temperature, k, P):
     return xp.where(pressure <= P["ambient_pressure"], 0.0, flow)
 
 
-def thrust_components(xp, pressure, temperature, nozzle_flow, k, mach, P):
+def thrust_components(xp, pressure, temperature, nozzle_flow, k, mach, P, detail=False):
     """Return ``(ideal momentum, momentum, pressure thrust, reported total)`` in newtons.
 
     The discharge coefficient scales the momentum only and ``eta_Cf`` scales the summed thrust
-    (``Burn.evaluate_thrust_components``). All four are zero at or below ambient pressure.
+    (``Burn.evaluate_thrust_components``). All four are zero at or below ambient pressure. With ``detail`` the
+    exit velocity and exit pressure (``Burn.evaluate_exit_velocity`` and ``evaluate_exit_pressure``) follow.
     """
     ambient, gas_constant = P["ambient_pressure"], P["gas_constant"]
     above = pressure > ambient
@@ -68,4 +69,7 @@ def thrust_components(xp, pressure, temperature, nozzle_flow, k, mach, P):
     ideal = xp.where(above, ideal, zero)
     momentum = xp.where(above, momentum, zero)
     pressure_thrust = xp.where(above, pressure_thrust, zero)
-    return ideal, momentum, pressure_thrust, P["eta_cf"] * (momentum + pressure_thrust)
+    total = P["eta_cf"] * (momentum + pressure_thrust)
+    if detail:
+        return ideal, momentum, pressure_thrust, total, velocity, exit_pressure
+    return ideal, momentum, pressure_thrust, total

@@ -28,11 +28,12 @@ def pressure_of(xp, y, P):
     return P["gas_constant"] * xp.maximum(y[..., 1], TINY) / (P["chamber_volume"] - remaining)
 
 
-def state_quantities(xp, y, active, P):
+def state_quantities(xp, y, active, P, detail=False):
     """Derived quantities at a state.
 
     ``active`` is the per-grain boolean mask the integrator carries, or ``None`` to derive it from the
-    regressions as the scalar post-processing does. Padded grains are never active.
+    regressions as the scalar post-processing does. Padded grains are never active. ``detail`` adds the exit
+    velocity and exit pressure used by stored histories.
     """
     g = P["grain_valid"].shape[-1]
     valid = P["grain_valid"]
@@ -64,10 +65,9 @@ def state_quantities(xp, y, active, P):
 
     generated_grains = P["density"][..., None] * areas * rates
     generated = xp.sum(generated_grains, axis=-1)
-    ideal, momentum, pressure_thrust, thrust = thrust_components(
-        xp, pressure, temperature, nozzle, k, P["exit_mach"], P
-    )
-    return {
+    parts = thrust_components(xp, pressure, temperature, nozzle, k, P["exit_mach"], P, detail)
+    ideal, momentum, pressure_thrust, thrust = parts[:4]
+    quantities = {
         "pressure": pressure,
         "volume": volume,
         "temperature": temperature,
@@ -82,6 +82,9 @@ def state_quantities(xp, y, active, P):
         "pressure_thrust": pressure_thrust,
         "thrust": thrust,
     }
+    if detail:
+        quantities["exit_velocity"], quantities["exit_pressure"] = parts[4], parts[5]
+    return quantities
 
 
 def conservative_rhs(xp, y, active, P, igniter_flow=None):

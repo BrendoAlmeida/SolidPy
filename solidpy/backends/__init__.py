@@ -29,6 +29,7 @@ from ._protocol import (
     BackendUnavailable,
     Capabilities,
     SolveOptions,
+    UnsupportedLane,
 )
 
 DEFAULT_BACKEND = "cpu-reference"
@@ -50,6 +51,7 @@ class _Registration:
 # First-party backends, registered in code and imported lazily. Entry points are only for third parties.
 _BUILTIN: Dict[str, _Registration] = {
     "cpu-reference": _Registration("cpu-reference", "solidpy.backends.cpu_reference:ReferenceBackend"),
+    "cpu-vectorized": _Registration("cpu-vectorized", "solidpy.backends.numpy_vectorized:NumpyBackend"),
 }
 _REGISTERED: Dict[str, _Registration] = {}
 _INSTANCES: Dict[Tuple[str, Optional[str]], Backend] = {}
@@ -283,6 +285,7 @@ __all__ = [
     "BackendUnavailable",
     "Capabilities",
     "SolveOptions",
+    "UnsupportedLane",
     "available",
     "current_backend",
     "describe",

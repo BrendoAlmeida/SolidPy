@@ -15,6 +15,10 @@ UNSUPPORTED = "unsupported"
 _LEVELS = (SUPPORTED, PARTIAL, UNSUPPORTED)
 
 
+class UnsupportedLane(ValueError):
+    """A lane needs features the chosen backend does not support (raised with ``strict=True``)."""
+
+
 class BackendUnavailable(ImportError):
     """A backend was requested but cannot run here (library missing, no device, unknown name).
 
@@ -55,14 +59,21 @@ class Capabilities:
 class SolveOptions:
     """Options of ``Backend.solve_burn`` that are not part of the problem itself.
 
-    ``history`` is the history policy (``"metrics"`` or ``"full"``) and ``workers`` the number of processes a
-    CPU backend may use. A backend ignores an option that does not apply to it and says so in its docstring.
+    ``history`` is the history policy (``"metrics"`` or ``"full"``), ``workers`` the number of processes a CPU
+    backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
+    (``None``: the backend's default). A backend ignores an option that does not apply to it and says so in
+    its docstring.
     """
 
     history: str = "metrics"
     workers: Optional[int] = None
+    max_steps: Optional[int] = None
 
     def __post_init__(self):
+        if self.max_steps is not None and (
+            isinstance(self.max_steps, bool) or not isinstance(self.max_steps, int) or self.max_steps < 2
+        ):
+            raise ValueError(f"max_steps must be an integer of at least 2 or None, got {self.max_steps!r}")
         if self.history not in ("metrics", "full"):
             raise ValueError(f"history must be 'metrics' or 'full', got {self.history!r}")
         if self.workers is not None and (
