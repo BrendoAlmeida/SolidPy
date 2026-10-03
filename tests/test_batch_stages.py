@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 
@@ -5,6 +7,7 @@ import golden_corpus as gc
 from solidpy import backends
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch
+from solidpy.batch.integrators import solver
 
 SOURCE_FAMILIES = ("igniter-scalar", "igniter-table", "igniter-after", "activation-scalar", "activation-table",
                    "ramp", "combo-ramp", "combo-table", "quirk")
@@ -134,3 +137,37 @@ def test_sources_are_evaluated_just_below_the_end_of_a_segment(solved):
 
     assert inside_segment[0, offset + 1] > 0.0 and raw[0, offset + 1] == 0.0
     assert inside_segment[0, offset + 1] == sub.arrays["igniter_value"][0]
+
+
+def _two_grains_with_a_node(case, node, max_iterations):
+    case = copy.deepcopy(case)
+    case["simulation"]["burn_area_activation"] = [[0.0, 1.0], [node, 1.0], [node + 5.0, 1.0]]
+    _, motor, propellant, environment, kwargs = gc.build_objects(case)
+    batch = ProblemBatch.from_objects([motor], [propellant], [environment], [kwargs])
+    return solver.solve_burn_and_blowdown(solver.numpy_driver(), batch.namespace(np), batch.initial_state(),
+                                          solver.SolveConfig(), max_iterations=max_iterations)
+
+
+def test_a_burnout_that_lands_on_the_end_of_a_segment_moves_on_to_the_next_segment(monkeypatch):
+    """The root of the burnout event is the very end of the step, which is a source breakpoint, while another
+    grain is still burning. The scalar loop (``while start < boundary``) has nothing left to integrate there and
+    goes on; restarting over an empty interval used to give a NaN step that never finished."""
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+    case = next(
+        c for c in corpus
+        if c["family"] in ("tubular", "mixed", "many") and len(c["grains"]) == 2
+        and reference[c["id"]]["status"]["termination_reason"] == "completed"
+        and reference[c["id"]]["history_points"] < 200
+        and {"igniter_none", "activation_none", "power_law"} <= set(c["tags"])
+        and np.ptp(reference[c["id"]]["metrics"]["grain_burnout_times_s"]) > 0.05
+    )
+    first = float(_two_grains_with_a_node(case, 1e9, 3000)["burn_t"][0].min())
+    node = float(np.nextafter(first, np.inf))  # the burnout falls in the last ulp-wide step, clipped to the node
+    monkeypatch.setattr(solver, "_bisect", lambda driver, value_at, shape, below_is_low: np.ones(shape))
+
+    out = _two_grains_with_a_node(case, node, 3000)
+
+    assert float(out["burn_t"][0].min()) == node  # the event really was at the segment end
+    assert not out["unfinished"][0] and out["burn_ok"][0] and out["burned_out"][0]
+    assert np.isfinite(out["burn_t"][0]).all()

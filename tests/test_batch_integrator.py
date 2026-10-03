@@ -94,6 +94,15 @@ def test_initial_step_is_identical_to_scipys_for_every_lane():
         assert h[lane] == pytest.approx(solver.h_abs, rel=1e-13), lane
 
 
+def test_initial_step_over_an_empty_interval_is_zero_like_scipys_not_nan():
+    t0 = np.full(6, 3.0)
+    f0 = batched(t0, Y0)
+
+    h = dop853.initial_step(np, batched, t0, Y0, f0, t0.copy(), MAX_STEP, RTOL, ATOL)
+
+    np.testing.assert_array_equal(h, np.zeros(6))
+
+
 def test_accepted_steps_follow_scipys_sequence_and_lie_on_its_solution():
     record = drive(batched, Y0, 10.0, MAX_STEP, RTOL, ATOL, steps=25)
 

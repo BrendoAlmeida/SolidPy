@@ -252,7 +252,10 @@ def burn_body(driver, c, P, cfg):
     y_point = xp.where(event_lane[:, None], y_event, a["y_new"])
     out = _record(driver, c, P, cfg, accept, t_point, y_point)
 
-    at_segment_end = plain & (a["t_new"] >= c["t_seg"])
+    # a burnout that lands on the segment end leaves nothing to integrate there (scalar: ``while start < boundary``
+    # is false), so the lane moves to the next segment instead of restarting over an empty interval
+    event_at_end = event_lane & any_left & (t_event >= c["t_seg"])
+    at_segment_end = (plain & (a["t_new"] >= c["t_seg"])) | event_at_end
     reached_bound = at_segment_end & (c["t_seg"] >= c["t_stop"])
     next_segment = at_segment_end & ~reached_bound
     finished = event_lane & ~any_left

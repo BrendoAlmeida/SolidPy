@@ -56,7 +56,7 @@ def initial_step(xp, fun, t0, y0, f0, t_bound, max_step, rtol, atol, size=None):
     h0 = xp.minimum(h0, interval)
     y1 = y0 + h0[:, None] * f0
     f1 = fun(t0 + h0, y1)
-    d2 = rms(xp, (f1 - f0) / scale, size) / h0
+    d2 = rms(xp, (f1 - f0) / scale, size) / xp.where(h0 > 0.0, h0, 1.0)  # an empty interval gives h0 = 0, as in scipy
     h1 = xp.where(
         (d1 <= 1e-15) & (d2 <= 1e-15),
         xp.maximum(1e-6, h0 * 1e-3),
