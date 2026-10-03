@@ -159,7 +159,7 @@ CASES = {
                         {pb.EROSIVE_BURNING}, set()),
     "instance override of the burn rate": (_instance_override, {pb.INSTANCE_OVERRIDE}, set()),
     "propellant subclass": (_subclass_propellant, {pb.CUSTOM_CLASS}, set()),
-    "unknown grain geometry": (_unknown_geometry, {pb.UNKNOWN_GEOMETRY}, set()),
+    "unknown grain geometry": (_unknown_geometry, {pb.UNKNOWN_GEOMETRY}, {pb.TUBULAR_GRAIN, pb.STAR_GRAIN}),
     "instance override on a grain": (_grain_override, {pb.INSTANCE_OVERRIDE}, set()),
 }
 
@@ -321,3 +321,32 @@ def test_packed_inputs_match_the_stored_reference_initial_state(corpus_lanes):
         assert batch.initial_state()[0, 0] == pytest.approx(stored, rel=1e-13), case["id"]
         checked += 1
     assert checked > 300
+
+
+def test_a_custom_grain_without_a_geometry_is_routed_not_a_crash():
+    motor, propellant = make_stack()
+
+    class Bare:
+        outer_radius, initial_inner_radius, initial_height, ends_burn = 0.035, 0.015, 0.12, False
+
+    motor.grains = [Bare()]
+    features = pb.required_features(motor, propellant, pb.SETTING_DEFAULTS)
+
+    assert {pb.CUSTOM_CLASS, pb.UNKNOWN_GEOMETRY} <= features
+    assert pb.REFERENCE_ONLY & features
+
+
+def test_solve_cache_is_an_accepted_setting_and_does_not_change_the_packed_values():
+    motor, propellant = make_stack()
+
+    on = ProblemBatch.from_objects(motor, propellant, settings={"solve_cache": True})
+    off = ProblemBatch.from_objects(motor, propellant, settings={"solve_cache": False})
+
+    assert off.settings[0]["solve_cache"] is False
+    for name in on.arrays:
+        np.testing.assert_array_equal(on.arrays[name], off.arrays[name])
+
+
+def test_an_empty_batch_is_a_clear_error():
+    with pytest.raises(ValueError, match="at least one lane is required"):
+        ProblemBatch.from_objects([], [])

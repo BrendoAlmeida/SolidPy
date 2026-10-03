@@ -106,3 +106,55 @@ def test_options_default_to_the_metrics_policy_and_no_pool():
     options = SolveOptions()
 
     assert (options.history, options.workers) == ("metrics", None)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"history": "everything"}, "history must be 'metrics' or 'full'"),
+        ({"workers": 2.5}, "workers must be a positive integer"),
+        ({"workers": 0}, "workers must be a positive integer"),
+        ({"workers": -3}, "workers must be a positive integer"),
+        ({"workers": True}, "workers must be a positive integer"),
+    ],
+)
+def test_invalid_options_are_rejected_when_they_are_built(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        SolveOptions(**kwargs)
+
+
+def test_the_backend_rejects_options_that_are_not_solve_options(corpus_batch):
+    _, batch = corpus_batch
+
+    with pytest.raises(TypeError, match="options must be a SolveOptions"):
+        backends.get_backend("cpu-reference").solve_burn(batch, {"workers": 2})
+
+
+def test_the_reference_provides_both_history_policies():
+    capabilities = backends.get_backend("cpu-reference").capabilities()
+
+    assert set(capabilities.history_policies) == {"metrics", "full"}
+    for policy in capabilities.history_policies:
+        SolveOptions(history=policy)  # every advertised policy is a valid option
+
+
+def test_lanes_that_cannot_be_pickled_are_solved_in_process_and_the_pool_keeps_the_rest():
+    cases = {case["id"]: case for case in gc.load_corpus()["cases"]}
+    built = [gc.build_objects(cases[i]) for i in ("tubular-000", "tubular-001", "igniter-callable-000")]
+    local = {"calls": 0}
+
+    def igniter(t):  # a closure: not picklable
+        local["calls"] += 1
+        return 0.004 if t < 0.1 else 0.0
+
+    settings = [dict(b[4]) for b in built]
+    settings[2] = {**settings[2], "igniter_mass_flow": igniter, "igniter_burn_time": 0.1}
+    batch = ProblemBatch.from_objects([b[1] for b in built], [b[2] for b in built], [b[3] for b in built], settings)
+    backend = backends.get_backend("cpu-reference")
+
+    pooled = backend.solve_burn(batch, SolveOptions(workers=3)).to_results()
+    sequential = backend.solve_burn(batch).to_results()
+
+    assert local["calls"] > 0  # the closure ran here, in this process
+    for one, other in zip(pooled, sequential):
+        assert_same(one, other)

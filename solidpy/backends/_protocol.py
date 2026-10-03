@@ -62,6 +62,14 @@ class SolveOptions:
     history: str = "metrics"
     workers: Optional[int] = None
 
+    def __post_init__(self):
+        if self.history not in ("metrics", "full"):
+            raise ValueError(f"history must be 'metrics' or 'full', got {self.history!r}")
+        if self.workers is not None and (
+            isinstance(self.workers, bool) or not isinstance(self.workers, int) or self.workers < 1
+        ):
+            raise ValueError(f"workers must be a positive integer or None, got {self.workers!r}")
+
 
 class Backend(Protocol):
     """An execution engine for batches of independent motors."""

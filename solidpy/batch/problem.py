@@ -86,8 +86,12 @@ _BOOL_GRAIN_FIELDS = ("ends_burn", "is_star", "grain_valid")
 
 
 def _setting_defaults() -> Dict[str, Any]:
-    """Defaults of the ``BurnSimulation`` keyword settings, read from its signature so they cannot drift."""
-    skip = {"self", "grain", "motor", "propellant", "environment", "solve_cache"}
+    """Defaults of the ``BurnSimulation`` keyword settings, read from its signature so they cannot drift.
+
+    ``solve_cache`` is among them: it never changes a result, so batched backends ignore it and the reference
+    backend passes it on.
+    """
+    skip = {"self", "grain", "motor", "propellant", "environment"}
     parameters = inspect.signature(BurnSimulation.__init__).parameters
     return {name: parameter.default for name, parameter in parameters.items() if name not in skip}
 
@@ -119,10 +123,14 @@ def required_features(motor, propellant, settings: Mapping[str, Any]) -> FrozenS
     for grain in grains:
         if type(grain) is not Grain:
             features.add(CUSTOM_CLASS)
-        features.add(STAR_GRAIN if grain.geometry == "star" else TUBULAR_GRAIN)
-        if grain.geometry not in ("tubular", "star"):
-            features.add(UNKNOWN_GEOMETRY)
-        if grain.ends_burn:
+        geometry = getattr(grain, "geometry", None)
+        if geometry == "star":
+            features.add(STAR_GRAIN)
+        elif geometry == "tubular":
+            features.add(TUBULAR_GRAIN)
+        else:
+            features.add(UNKNOWN_GEOMETRY)  # the scalar code would treat it as tubular; do not claim that
+        if getattr(grain, "ends_burn", False):
             features.add(ENDS_BURN)
     if type(motor) is not Motor or type(propellant) is not Propellant:
         features.add(CUSTOM_CLASS)
@@ -258,7 +266,12 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
 
 @dataclass
 class ProblemBatch:
-    """Many independent motors as arrays. Build one with :meth:`from_objects`."""
+    """Many independent motors as arrays. Build one with :meth:`from_objects`.
+
+    The arrays are a snapshot of the objects at packing time. The batch also keeps the objects, which the
+    reference backend solves from, so mutating a motor, propellant or environment after packing makes the
+    backends disagree: build a new batch after changing an object.
+    """
 
     arrays: Dict[str, np.ndarray]
     lane_features: List[FrozenSet[str]]
@@ -291,6 +304,8 @@ class ProblemBatch:
         """
         given = {"motors": motors, "propellants": propellants, "environments": environments, "settings": settings}
         count = max((len(value) for value in given.values() if isinstance(value, (list, tuple))), default=1)
+        if count == 0:
+            raise ValueError("at least one lane is required")
         motor_list = _broadcast(motors, count, "motors")
         propellant_list = _broadcast(propellants, count, "propellants")
         environment_list = _broadcast(Environment() if environments is None else environments, count, "environments")
