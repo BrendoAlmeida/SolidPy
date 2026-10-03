@@ -16,8 +16,13 @@ TOLERANCES_VERSION = "2"
 # Version 2 (cause): the first measurement of the batched solver on the golden corpus, 160 completed lanes
 # that include tolerances from rtol 1e-6 to 1e-9, gave event times up to 1.5e-6 (median 3e-10) and the maximum
 # generated mass flow, read off the step grid, up to 2.04e-3 (median 3e-9). The version 1 values (1e-6 and 2e-3)
-# came from a smaller, tighter corpus (architecture document, appendix D). The peak limit is still 4x inside
-# the 2 % acceptance policy and cannot be tighter than the step grid allows.
+# came from a smaller, tighter corpus (architecture document, appendix D).
+# Investigated against a refined run of the reference (rtol 1e-11, max_step 2 ms): on the worst lanes it is the
+# stored reference that is off, not the batched solver. tolerance-013 (rtol 1e-7): final time of the reference
+# 1.4e-6 from the refined value, batched 4e-9; ends-tubular-009: maximum generated flow of the reference 2.4e-3
+# from the refined value (its coarse grid misses the peak), batched 3e-4. The limits therefore cover the error
+# of the reference itself, not a bias of the batched solver; tests/test_batch_accuracy.py keeps the batched
+# error from exceeding the reference's. The peak limit is still 4x inside the 2 % acceptance policy.
 
 #: Relative error of one kernel against the scalar method it mirrors.
 KERNEL_RTOL_NUMPY = 1e-12
