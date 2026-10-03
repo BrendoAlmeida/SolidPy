@@ -50,10 +50,8 @@ def _bucket_grains(count: int) -> int:
     return count
 
 
-@functools.lru_cache(maxsize=None)
-def _compiled(keep_history: bool, max_steps: int):
-    """The jitted solve for one history policy and step budget (jax caches per input shape)."""
-    import jax
+def _driver():
+    """The loop, conditional, scatter and scan of the compiled programs."""
     import jax.numpy as jnp
     from jax import lax
 
@@ -62,13 +60,24 @@ def _compiled(keep_history: bool, max_steps: int):
     def store(buffer, rows, cols, values):
         return buffer.at[rows, cols].set(values)
 
-    driver = solver.Driver(
+    return solver.Driver(
         jnp,
         lambda cond, body, carry: lax.while_loop(cond, body, carry),
         lambda any_lane, if_true, if_false, operand: lax.cond(any_lane, if_true, if_false, operand),
         lambda count, body, state: lax.fori_loop(0, count, body, state),
         store,
+        lambda body, init, xs, reverse=False: lax.scan(body, init, xs, reverse=reverse),
     )
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled(keep_history: bool, max_steps: int):
+    """The jitted solve for one history policy and step budget (jax caches per input shape)."""
+    import jax
+
+    from ..batch.integrators import solver
+
+    driver = _driver()
     config = solver.SolveConfig(keep_history=keep_history, max_steps=max_steps)
     # the iteration cap is an argument, not a static value, so the tiers of a batch share one compiled program
     return jax.jit(lambda P, y0, cap: solver.solve_burn_and_blowdown(driver, P, y0, config, cap))

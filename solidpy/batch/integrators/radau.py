@@ -6,11 +6,11 @@ heuristic, the simplified Newton iteration on the transformed system (one real a
 solve), the error estimate with its second pass after a rejection, the two-step step-size predictor, the
 reuse of the Jacobian and of the factorization across steps, and the extrapolation of the previous step's
 dense output as the next Newton start. Each lane therefore takes the steps ``solve_ivp`` would take for it.
-Two differences remain, neither of which changes what a step computes:
-
-* the factorization is an explicit inverse, applied by a matrix product (batched and the same on every
-  backend), where scipy keeps an LU; a solve differs by about ``cond * eps`` relative;
-* the Jacobian is a dense ``[B, n, n]`` array and the state of a padded lane is exactly zero.
+The Jacobian is tridiagonal (a chain of cells), given as its three diagonals, and the systems are factored by
+the Thomas algorithm without pivoting, the matrices being diagonally dominant. The factorization is kept and
+reused across steps exactly as scipy reuses its LU (including a factorization made for another step size), so
+the iteration and the error estimate see the same matrix. Where scipy pivots, a solve differs by about
+``cond * eps`` relative. The state of a padded cell is exactly zero and decoupled.
 
 ``integrate`` advances one interval ``[0, t_bound]`` for every lane and also returns the trapezoid of an
 observed scalar over the accepted points and its maximum over them, which is how ``simulate_thermal_ablation``
@@ -70,11 +70,81 @@ def _lane_norm(xp, x, count):
     return xp.sqrt(xp.sum(x * x, axis=axes)) / count**0.5
 
 
-def newton(driver, fun, t, y, h, Z0, scale, tol, inv_real, inv_complex, size, run):
+def tridiagonal_factor(driver, lower, diag, upper):
+    """LU without pivoting of tridiagonal matrices, one per row: returns the multipliers ``[B, n-1]`` and the pivots ``[B, n]``.
+
+    ``lower[:, i]`` is the entry below the diagonal in column ``i``, ``upper[:, i]`` the entry above it in column ``i + 1``.
+    """
+    xp = driver.xp
+
+    def body(previous, xs):
+        below, d, above_previous = xs
+        multiplier = below / previous
+        pivot = d - multiplier * above_previous
+        return pivot, (multiplier, pivot)
+
+    first = diag[:, 0]
+    _, (multiplier, pivot) = driver.scan(body, first, (lower.T, diag[:, 1:].T, upper.T))
+    return multiplier.T, xp.concatenate([first[:, None], pivot.T], axis=1)
+
+
+def tridiagonal_solve(driver, multiplier, pivot, upper, rhs):
+    """Solve with the factors of ``tridiagonal_factor``."""
+    xp = driver.xp
+
+    def forward(previous, xs):
+        factor, b = xs
+        y = b - factor * previous
+        return y, y
+
+    first = rhs[:, 0]
+    _, rest = driver.scan(forward, first, (multiplier.T, rhs[:, 1:].T))
+    y = xp.concatenate([first[:, None], rest.T], axis=1)
+
+    def backward(following, xs):
+        y_i, pivot_i, above = xs
+        x = (y_i - above * following) / pivot_i
+        return x, x
+
+    last = y[:, -1] / pivot[:, -1]
+    _, head = driver.scan(backward, last, (y[:, :-1].T, pivot[:, :-1].T, upper.T), reverse=True)
+    return xp.concatenate([head.T, last[:, None]], axis=1)
+
+
+def _factor_pair(driver, jl, jd, ju, h):
+    """Factors of ``MU_REAL / h * I - J`` and ``MU_COMPLEX / h * I - J``, stacked on the lane axis (real one first).
+
+    Both are factored in one pass over the cells (the real system as a complex one), because the cost of a pass is
+    its number of sequential steps, not its width.
+    """
+    xp = driver.xp
+    lanes = jd.shape[0]
+    mu = xp.concatenate([xp.full(lanes, MU_REAL + 0j), xp.full(lanes, MU_COMPLEX)]) / xp.concatenate([h, h])
+    diag = mu[:, None] - xp.concatenate([jd, jd]).astype(complex)
+    lower = -xp.concatenate([jl, jl]).astype(complex)
+    upper = -xp.concatenate([ju, ju]).astype(complex)
+    multiplier, pivot = tridiagonal_factor(driver, lower, diag, upper)
+    return multiplier, pivot, upper
+
+
+def _solve_pair(driver, factors, rhs_real, rhs_complex):
+    multiplier, pivot, upper = factors
+    solved = tridiagonal_solve(driver, multiplier, pivot, upper, driver.xp.concatenate([rhs_real.astype(complex), rhs_complex]))
+    lanes = rhs_real.shape[0]
+    return solved[:lanes].real, solved[lanes:]
+
+
+def _solve_real(driver, factors, rhs):
+    multiplier, pivot, upper = factors
+    lanes = rhs.shape[0]
+    return tridiagonal_solve(driver, multiplier[:lanes], pivot[:lanes], upper[:lanes], rhs.astype(complex)).real
+
+
+def newton(driver, fun, t, y, h, Z0, scale, tol, factors, size, run):
     """``solve_collocation_system`` for every lane in ``run``.
 
-    Returns ``(converged, n_iter, Z, rate)``: ``Z`` has shape ``[B, 3, n]`` and ``rate`` is NaN where scipy's is ``None``.
-    ``size`` is the real number of state components of each lane.
+    ``factors`` are those of ``_factor_pair``. Returns ``(converged, n_iter, Z, rate)``: ``Z`` has shape ``[B, 3, n]``
+    and ``rate`` is NaN where scipy's is ``None``. ``size`` is the real number of state components of each lane.
     """
     xp = driver.xp
     lanes = y.shape[0]
@@ -107,8 +177,7 @@ def newton(driver, fun, t, y, h, Z0, scale, tol, inv_real, inv_complex, size, ru
         W = s["W"]
         f_real = xp.einsum("bjn,j->bn", F, ti_real) - m_real[:, None] * W[:, 0, :]
         f_complex = xp.einsum("bjn,j->bn", F, ti_complex) - m_complex[:, None] * (W[:, 1, :] + 1j * W[:, 2, :])
-        dW_real = xp.einsum("bij,bj->bi", inv_real, f_real)
-        dW_complex = xp.einsum("bij,bj->bi", inv_complex, f_complex)
+        dW_real, dW_complex = _solve_pair(driver, factors, f_real, f_complex)
         dW = xp.stack([dW_real, dW_complex.real, dW_complex.imag], axis=1)
         dW_norm = _lane_norm(xp, dW / scale[:, None, :], count)
         has_rate = k > 0
@@ -148,9 +217,9 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
     """Integrate ``dy/dt = fun(t, y)`` from 0 to ``t_bound`` for every lane in ``active``.
 
     ``fun(t, y)`` takes ``t`` of shape ``[B]`` and ``y`` of shape ``[B, n]``; ``jac(t, y, f)`` returns the
-    ``[B, n, n]`` Jacobian; ``observe(y)`` is a scalar per lane whose trapezoid over the accepted points
-    (including the start) and maximum over them are returned. ``size`` is the real state size of each lane.
-    The state of a padded component must have a zero derivative and zero rows and columns in the Jacobian.
+    tridiagonal Jacobian as ``(lower [B, n-1], diag [B, n], upper [B, n-1])``; ``observe(y)`` is a scalar per lane whose
+    trapezoid over the accepted points (including the start) and maximum over them are returned. ``size`` is the real
+    state size of each lane. The state of a padded cell must have a zero derivative and zero Jacobian entries.
 
     Returns a dict with the final ``y``, the trapezoid ``integral`` and ``peak`` of the observed quantity,
     ``steps`` (accepted), ``attempts`` and ``failed`` (the step became too small, the attempt limit was hit
@@ -166,8 +235,6 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
     rtol_lane = xp.full(lanes, float(rtol))
     atol_lane = xp.full(lanes, float(atol))
     tol = newton_tolerance(rtol)
-    eye = xp.eye(n)
-    c_stage = xp.asarray(C)
     e_coefficients = xp.asarray(E)
     p_matrix = xp.asarray(P)
 
@@ -176,11 +243,13 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
                              ERROR_ESTIMATOR_ORDER)
     g0 = observe(y0)
     nan = xp.full(lanes, xp.nan)
+    jl0, jd0, ju0 = jac(float_zero, y0, f0)
     carry = {
-        "t": float_zero, "y": y0, "f": f0, "J": jac(float_zero, y0, f0),
+        "t": float_zero, "y": y0, "f": f0, "Jl": jl0, "Jd": jd0, "Ju": ju0,
         "h_prop": h0, "h_old": nan, "e_old": nan, "h_cur": h0, "h_old_loc": nan, "e_old_loc": nan,
         "new_step": ~false, "rejected": false, "current_jac": ~false,
-        "inv_real": xp.zeros((lanes, n, n)), "inv_complex": xp.zeros((lanes, n, n), dtype=complex), "lu_valid": false,
+        "fac_mult": xp.zeros((2 * lanes, n - 1), dtype=complex), "fac_piv": xp.ones((2 * lanes, n), dtype=complex),
+        "fac_up": xp.zeros((2 * lanes, n - 1), dtype=complex), "lu_valid": false,
         "has_sol": false, "Q": xp.zeros((lanes, n, 3)), "sol_t": float_zero, "sol_h": float_zero + 1.0,
         "sol_y": y0,
         "g_prev": g0, "integral": float_zero, "peak": g0,
@@ -211,28 +280,33 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
         need = go & ~c["lu_valid"]
 
         def factorize(operand):
-            needed, jacobian, step, old_real, old_complex = operand
-            new_real = xp.linalg.inv((MU_REAL / step)[:, None, None] * eye - jacobian)
-            new_complex = xp.linalg.inv((MU_COMPLEX / step)[:, None, None] * eye - jacobian)
-            return _select(xp, needed, new_real, old_real), _select(xp, needed, new_complex, old_complex)
+            needed, jl, jd, ju, step, old = operand
+            new = _factor_pair(driver, jl, jd, ju, step)
+            both = xp.concatenate([needed, needed])
+            return tuple(_select(xp, both, a, b) for a, b in zip(new, old))
 
-        inv_real, inv_complex = driver.branch(
-            xp.any(need), factorize, lambda operand: (operand[3], operand[4]),
-            (need, c["J"], h_use, c["inv_real"], c["inv_complex"]),
+        factors = driver.branch(
+            xp.any(need), factorize, lambda operand: operand[5],
+            (need, c["Jl"], c["Jd"], c["Ju"], h_use, (c["fac_mult"], c["fac_piv"], c["fac_up"])),
         )
         converged, n_iter, Z, rate = newton(
-            driver, fun, t, y, h_use, _dense_start(xp, c, t, h_use, y), scale, tol, inv_real, inv_complex, size, go
+            driver, fun, t, y, h_use, _dense_start(xp, c, t, h_use, y), scale, tol, factors, size, go
         )
         converged = go & converged
 
         y_new = y + Z[:, 2, :]
         ZE = xp.einsum("bjn,j->bn", Z, e_coefficients) / h_use[:, None]
-        error = xp.einsum("bij,bj->bi", inv_real, f + ZE)
+        error = _solve_real(driver, factors, f + ZE)
         error_scale = atol_lane[:, None] + xp.maximum(xp.abs(y), xp.abs(y_new)) * rtol_lane[:, None]
         error_norm = _lane_norm(xp, error / error_scale, size)
         safety = 0.9 * (2 * NEWTON_MAXITER + 1) / (2 * NEWTON_MAXITER + n_iter)
         second = converged & rejected & (error_norm > 1.0)
-        refined = xp.einsum("bij,bj->bi", inv_real, fun(t, y + error) + ZE)
+        refined = driver.branch(
+            xp.any(second),
+            lambda operand: _solve_real(driver, factors, fun(t, y + error) + ZE),
+            lambda operand: error,
+            None,
+        )
         error_norm = xp.where(second, _lane_norm(xp, refined / error_scale, size), error_norm)
 
         over = error_norm > 1.0  # a NaN norm is accepted, as in scipy; the NaN state then fails the lane below
@@ -253,11 +327,18 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
         keep = ~refit & (grown < 1.2)
         grown = xp.where(keep, 1.0, grown)
         recompute = accept & refit
-        J = driver.branch(
-            xp.any(recompute | refresh),
-            lambda operand: _select(xp, operand[0], jac(t_new, y_new, f_new),
-                                    _select(xp, operand[1], jac(t, y, f), c["J"])),
-            lambda operand: c["J"],
+
+        def refresh_jacobian(operand):
+            after, here = operand
+            fresh_after = jac(t_new, y_new, f_new)
+            fresh_here = jac(t, y, f)
+            return tuple(
+                _select(xp, after, a, _select(xp, here, b, old))
+                for a, b, old in zip(fresh_after, fresh_here, (c["Jl"], c["Jd"], c["Ju"]))
+            )
+
+        jl, jd, ju = driver.branch(
+            xp.any(recompute | refresh), refresh_jacobian, lambda operand: (c["Jl"], c["Jd"], c["Ju"]),
             (recompute, refresh),
         )
         g_new = observe(y_new)
@@ -266,9 +347,9 @@ def integrate(driver, fun, jac, observe, y0, t_bound, active, size, rtol, atol, 
         out["t"] = xp.where(accept, t_new, t)
         out["y"] = _select(xp, accept, y_new, y)
         out["f"] = _select(xp, accept, f_new, f)
-        out["J"] = J
+        out["Jl"], out["Jd"], out["Ju"] = jl, jd, ju
         out["current_jac"] = xp.where(accept, recompute, xp.where(refresh, True, c["current_jac"]))
-        out["inv_real"], out["inv_complex"] = inv_real, inv_complex
+        out["fac_mult"], out["fac_piv"], out["fac_up"] = factors
         out["lu_valid"] = xp.where(go, accept & keep, c["lu_valid"])
         out["h_prop"] = xp.where(accept, h_abs * grown, c["h_prop"])
         out["h_old"] = xp.where(accept, c["h_prop"], c["h_old"])

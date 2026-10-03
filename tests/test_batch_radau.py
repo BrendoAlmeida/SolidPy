@@ -72,8 +72,12 @@ def pack(lanes, nodes=None):
     def fun(_t, y):
         return np.einsum("bij,bj->bi", A, y) + source + (e0 * flux(y[:, 0])[0])[:, None] * unit
 
+    lower = np.diagonal(A, offset=-1, axis1=1, axis2=2)
+    upper = np.diagonal(A, offset=1, axis1=1, axis2=2)
+    diagonal = np.diagonal(A, axis1=1, axis2=2)
+
     def jac(_t, y, _f):
-        return A + (e0 * flux(y[:, 0])[1])[:, None, None] * np.outer(unit, unit)
+        return lower, diagonal + (e0 * flux(y[:, 0])[1])[:, None] * unit, upper
 
     return {"fun": fun, "jac": jac, "observe": lambda y: flux(y[:, 0])[0], "y0": y0,
             "t_bound": np.asarray([lane["dt"] for lane in lanes]),
@@ -164,9 +168,12 @@ def test_the_result_is_within_the_tolerance_of_a_tight_reference():
     """The solve at the scalar tolerance is as close to a 1e-12 solve as the tolerance says."""
     problem = pack([LANES[4]])
     base = run(problem)
+    def dense_jacobian(t, y):
+        lower, diagonal, upper = (a[0] for a in problem["jac"](np.array([t]), y[None], None))
+        return np.diag(diagonal) + np.diag(lower, -1) + np.diag(upper, 1)
+
     solution = solve_ivp(lambda t, y: problem["fun"](np.array([t]), y[None])[0], (0.0, LANES[4]["dt"]), problem["y0"][0],
-                         method="Radau", jac=lambda t, y: problem["jac"](np.array([t]), y[None], None)[0],
-                         atol=1e-12, rtol=1e-12)
+                         method="Radau", jac=dense_jacobian, atol=1e-12, rtol=1e-12)
 
     np.testing.assert_allclose(base["y"][0], solution.y[:, -1], rtol=1e-4)
 
@@ -195,3 +202,34 @@ def test_random_walls_follow_scipy_step_for_step():
         assert int(out["steps"][i]) == len(solution.t) - 1, i
         assert out["integral"][i] == pytest.approx(integral, rel=1e-9), i
         assert out["peak"][i] == pytest.approx(peak, rel=1e-9), i
+
+
+def test_the_tridiagonal_solver_matches_a_dense_solve_for_real_and_complex_systems():
+    rng = np.random.default_rng(3)
+    driver = solver.numpy_driver()
+    count, n = 6, 9
+    lower, upper = -rng.uniform(0.2, 1.0, (count, n - 1)), -rng.uniform(0.2, 1.0, (count, n - 1))
+    diag = 4.0 + rng.uniform(0.0, 1.0, (count, n)) + 1j * rng.uniform(-0.5, 0.5, (count, n))
+    rhs = rng.normal(size=(count, n)) + 1j * rng.normal(size=(count, n))
+
+    multiplier, pivot = radau.tridiagonal_factor(driver, lower.astype(complex), diag, upper.astype(complex))
+    got = radau.tridiagonal_solve(driver, multiplier, pivot, upper.astype(complex), rhs)
+
+    for i in range(count):
+        dense = np.diag(diag[i]) + np.diag(lower[i], -1) + np.diag(upper[i], 1)
+        np.testing.assert_allclose(got[i], np.linalg.solve(dense, rhs[i]), rtol=1e-12)
+
+
+def test_the_numpy_scan_matches_a_cumulative_recurrence_forwards_and_backwards():
+    driver = solver.numpy_driver()
+    xs = (np.arange(1.0, 6.0)[:, None] * np.ones((1, 2)),)
+
+    def body(carry, x):
+        return carry + x[0], carry + x[0]
+
+    _, forward = driver.scan(body, np.zeros(2), xs)
+    last, backward = driver.scan(body, np.zeros(2), xs, reverse=True)
+
+    np.testing.assert_array_equal(forward[:, 0], [1, 3, 6, 10, 15])
+    np.testing.assert_array_equal(backward[:, 0], [15, 14, 12, 9, 5])
+    assert last[0] == 15

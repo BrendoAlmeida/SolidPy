@@ -46,6 +46,7 @@ class Driver:
     branch: Callable  # branch(any_lane, if_true, if_false, operand) -> result
     repeat: Callable  # repeat(count, body, state) -> state
     store: Callable  # store(buffer, rows, cols, values) -> buffer, rows/cols/values per lane
+    scan: Callable = None  # scan(body, init, xs, reverse=False) -> (carry, ys), as jax.lax.scan; xs is a tuple of arrays
 
 
 def numpy_driver():
@@ -70,7 +71,19 @@ def numpy_driver():
         buffer[rows, cols] = values
         return buffer
 
-    return Driver(xp, loop, branch, repeat, store)
+    def scan(body, init, xs, reverse=False):
+        carry = init
+        outputs = []
+        for i in range(len(xs[0]) - 1, -1, -1) if reverse else range(len(xs[0])):
+            carry, out = body(carry, tuple(x[i] for x in xs))
+            outputs.append(out)
+        if reverse:
+            outputs.reverse()
+        if outputs and isinstance(outputs[0], tuple):
+            return carry, tuple(np.stack([o[k] for o in outputs]) for k in range(len(outputs[0])))
+        return carry, np.stack(outputs)
+
+    return Driver(xp, loop, branch, repeat, store, scan)
 
 
 @dataclass(frozen=True)
