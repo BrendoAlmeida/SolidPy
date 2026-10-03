@@ -220,7 +220,7 @@ def _execution(result: Dict[str, Any]) -> Dict[str, Any]:
 
 def simulate_burn(
     batch: ProblemBatch,
-    backend: Optional[str] = None,
+    backend: Optional[Any] = None,
     device: Optional[str] = None,
     *,
     history: str = "metrics",
@@ -233,8 +233,11 @@ def simulate_burn(
 ) -> BatchResult:
     """Simulate every lane of ``batch`` and return their canonical results in lane order.
 
-    ``backend`` is a backend name, ``"auto"``, or ``None`` for the one selected with ``set_backend``,
-    ``use_backend`` or the environment (default ``"cpu-reference"``). ``history`` is ``"metrics"``, ``"full"``,
+    ``backend`` is a backend name, ``"auto"``, ``None`` for the selected backend, or a list of engine specs such as
+    ``[("jax", "cuda:0"), ("cpu-reference", 6)]`` to run several devices and CPU workers concurrently. An engine
+    spec is a backend name, ``(name, device)``, ``(name, workers)`` for the reference backend, or
+    ``(name, device, workers)``. Unsupported lanes use the scalar reference unless ``strict=True``. ``history`` is
+    ``"metrics"``, ``"full"``,
     ``"decimated:N"`` (up to N native accepted points) or ``"uniform:N"`` (N points on a uniform time grid),
     where N is an integer of at least 2.
     ``chunk_size`` bounds how many lanes one solve holds (memory); ``sort`` groups lanes of similar estimated
@@ -251,6 +254,15 @@ def simulate_burn(
     ):
         raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
     chunk_size = None if chunk_size is None else int(chunk_size)
+    if isinstance(backend, (list, tuple)):
+        from .executor import HeterogeneousExecutor
+
+        if device is not None:
+            raise ValueError("device cannot be combined with heterogeneous backend specs; put it in each engine spec")
+        options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
+        return HeterogeneousExecutor(backend, default_workers=workers).solve_burn(
+            batch, options, requested=backend, device=device, chunk_size=chunk_size, sort=sort, strict=strict
+        )
     requested = backend
     if backend == "auto":
         backend = _auto_backend(batch, device)

@@ -461,40 +461,39 @@ unit test against the scalar function.
 
 ### 6.2 Heterogeneous executor (`solidpy.executor`)
 
-Goal: use every available device at once and keep each busy.
+The first scheduler is implemented by `solidpy.executor.HeterogeneousExecutor` and exposed as a list passed to
+`simulate_burn`, for example `backend=[("jax", "cuda:0"), ("cpu-reference", 6)]`. Each backend/device gets one
+feeder thread. Feeders pull compatible lanes from a shared queue ordered by the existing `lane_cost` estimate; a
+feeder that finishes a chunk can claim another, so faster engines naturally take more work. Accelerator chunks
+default to at most 2,048 lanes (and respect the backend's own memory cap); reference chunks default to 64 lanes per
+worker. Callers can set `chunk_size` to bound either kind of chunk.
 
-* One **feeder** thread/process per GPU: packs a chunk, transfers it, launches the solve, retrieves
-  results. CPU worker processes consume chunks of unsupported or small work and run the reference path.
-* **Throughput-proportional splitting.** A short calibration pass measures lanes/second per device;
-  the executor then keeps a shared work queue and lets each engine pull chunks of its preferred size
-  (large for GPU, small for CPU). Work stealing keeps all devices busy to the end of the ensemble.
-* **Reserved cores.** GPU feeders need CPU time for packing and result assembly. The executor reserves
-  a configurable number of cores for them and sets `OMP_NUM_THREADS=OPENBLAS_NUM_THREADS=MKL_NUM_THREADS=1`
-  in CPU workers to avoid thread oversubscription.
-* **Multi-GPU.** One feeder per device, device-local batches; no cross-device communication is required
-  because lanes are independent.
-* **Failure isolation.** A failed chunk is retried on the reference backend; the failure is recorded in
-  the lanes' provenance.
-* Order is preserved: `results[i]` always corresponds to input lane `i`.
+Multiple devices can run concurrently because each device is a distinct backend instance and feeder. There is no
+cross-device data exchange. Lanes unsupported by all selected engines go to `cpu-reference` unless `strict=True`;
+an engine exception, missing result or `step_overflow` is isolated and retried on the reference. Each lane records the
+selected backend or fallback reason, and output order matches input order. The scheduler uses chunk completion to
+adapt the split; it does not run a separate throughput-calibration solve.
+
+Still open in this section: configurable core reservation and native-thread limits for worker processes. The CPU
+reference worker pool currently follows the existing `workers` option and host process cap.
 
 ### 6.3 Batching policy
 
-* Bucket lanes by `G_max` (grain padding) and by estimated cost (a cheap pre-estimate from burn time
-  `~ web / burn_rate` and `G`), so lanes in one batch need a similar number of steps.
-* Chunk size from the device memory formula in 5.8 and a target of at least 2,048 lanes per launch for the
-  GPU (smaller chunks lose to launch latency).
-* Optionally **refill** (continuous batching): when a lane finishes, a pending problem takes its slot,
-  keeping the device full when step counts vary a lot. This is a Phase 5 optimization; the first version
-  uses bucketing only.
+* The heterogeneous scheduler sorts lanes by the estimated cost from burn time (`~ web / burn_rate`) and grain count.
+  Backend-specific grain and table padding still happens when the chunk is prepared.
+* Accelerator chunk size respects the backend memory cap and defaults to at most 2,048 lanes; a caller may set a
+  smaller `chunk_size` when memory or latency requires it.
+* **Refill** (continuous batching), where a finished lane is replaced inside an active device batch, is not
+  implemented. Feeders currently submit fixed chunks from the shared queue.
 
 ### 6.4 Overlapping accelerator and CPU work
 
-After the batched ODE the remaining per-lane work (derived metrics that stay on the host, result
-assembly, user callbacks, writing outputs) can dominate. The advanced-physics and robustness ensemble APIs now accept
-`workers > 1` to run their CPU post-processing in a bounded process pool, while preserving lane order. The current
-implementation starts that pool after the batched solve; it does not yet overlap device solving, CPU post-processing and
-packing. The Phase 5 executor will pipeline those stages so that while the accelerator solves chunk `k`, host workers
-post-process chunk `k-1` and pack chunk `k+1`. Without this overlap the Amdahl cap of section 2 applies.
+After the batched ODE the remaining per-lane work (derived metrics that stay on the host, result assembly, user
+callbacks, writing outputs) can dominate. The advanced-physics and robustness ensemble APIs accept `workers > 1` for
+bounded CPU post-processing. The heterogeneous burn scheduler can overlap separate backend chunks, including a
+device solve and a CPU reference chunk; the high-level W2/W3 APIs still wait for the complete batch result before
+starting their CPU post-processing. There is not yet a producer/consumer pipeline that overlaps solve chunk `k`,
+post-processes chunk `k-1` and packs chunk `k+1` as one flow.
 
 ## 7. Coverage map (what runs where)
 
@@ -1012,6 +1011,23 @@ JAX chunks history-producing launches against the existing 2 GiB history budget.
 history to host memory for interpolation and axial diagnostics before discarding it; moving these operations onto the device
 remains a memory and throughput optimization. A lane that reaches `max_steps` still follows the existing overflow and
 reference-fallback behavior.
+
+### 14.10 Heterogeneous burn scheduling (2026-10-03)
+
+`simulate_burn` accepts an engine list such as `[("jax", "cuda:0"), ("cpu-reference", 6)]`. The new
+`solidpy.executor.HeterogeneousExecutor` starts one feeder thread per backend/device, pulls compatible cost-sorted lanes
+from a shared dynamic queue, returns lanes in their original order, and records backend selection and fallback reasons.
+Capability misses are sent to the reference unless strict mode is requested. A backend exception, missing result or
+`step_overflow` retries the affected chunk or lanes on the reference. Multiple fake devices were tested concurrently;
+the result ordering and mass mapping were checked through the CPU-vectorized implementation.
+
+The focused review suite passed (`69 passed, 1 skipped` across executor, ensemble, registry and batch-result tests).
+This host has no JAX installation or GPU driver, so a real JAX multi-device run is still required before relying on
+concurrent accelerator launches in production.
+
+Remaining Phase 5 work: heterogeneous thermal services, process-pool reuse and native-thread/core reservation controls,
+continuous refill of active device batches, and a chunk pipeline that overlaps W2/W3 CPU post-processing with device
+solves. The scheduler dynamically shares queued chunks based on completion time; it does not perform a calibration pass.
 
 ## Appendix A. State vector and padded batch schema
 

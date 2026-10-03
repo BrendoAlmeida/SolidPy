@@ -87,6 +87,18 @@ are solved by the reference and flagged in `provenance["execution"]["fallback"]`
 Use `history="decimated:256"` to keep up to 256 native accepted points, or `history="uniform:256"` for fixed-grid
 pressure, thrust, flow, burn-area and regression-rate curves with diagnostics from the native grid.
 
+`simulate_burn` can also schedule a batch over several devices and CPU reference workers:
+
+```python
+results = simulate_burn(batch, backend=[("jax", "cuda:0"), ("cpu-reference", 6)]).to_results()
+```
+
+Each engine pulls chunks from a shared cost-ordered queue; results remain in input order, and unsupported or failed
+accelerator lanes are retried on `cpu-reference` with the reason recorded in their provenance. Pass `strict=True` to
+reject lanes no selected engine supports. This executor currently applies to burn batches; thermal batching still
+accepts one backend at a time. CPU worker pools use `spawn`, so applications should call the API under an
+`if __name__ == "__main__":` guard when process workers are enabled.
+
 The speedup comes from batch size: on an RTX 4060 in float64 the JAX backend runs 11.8x faster than the scalar
 solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a few hundred lanes. See
 `docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
