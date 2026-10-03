@@ -46,8 +46,8 @@ only what you need:
 | Extra | Installs | Use |
 |---|---|---|
 | `cea` | `rocketcea` | NASA CEA thermochemistry tables |
-| `jax` | JAX (CPU or any device) | batched backend through JAX |
-| `jax-cuda12` | JAX with CUDA 12 wheels | NVIDIA GPU |
+| `jax` | JAX (CPU or any device), Python 3.10+ | batched backend through JAX |
+| `jax-cuda12` | JAX with CUDA 12 wheels, Python 3.10+ | NVIDIA GPU |
 | `gpu` | alias of `jax-cuda12` | recommended GPU setup |
 | `all` | `cea` and `jax-cuda12` | everything |
 
@@ -55,10 +55,14 @@ only what you need:
 pip install ".[jax-cuda12]"      # or: uv sync --extra jax-cuda12
 ```
 
+The JAX extras carry a `python_version >= '3.10'` marker: on Python 3.9 they install nothing, and the core
+keeps working on the reference CPU path.
+
 The reference CPU path is always the default and is never replaced. Accelerated backends are opt-in, with
-`solidpy.set_backend(...)`, `with solidpy.use_backend(...)`, or the `SOLIDPY_BACKEND` and `SOLIDPY_DEVICE`
-environment variables. `solidpy.backends.available()` lists what the current environment can run and the
-install command for what is missing. The accelerated backends are under development; the design is in
+`solidpy.set_backend(...)`, `with solidpy.use_backend(...)`, or the environment variables
+`SOLIDPY_BACKEND` and `SOLIDPY_DEVICE` (the device applies to the backend that `SOLIDPY_BACKEND` names).
+`solidpy.backends.available()` lists what the current environment can run and the install command for what
+is missing. The accelerated backends are under development; the design is in
 `docs/gpu_backend_architecture.md`.
 
 ## Authors
