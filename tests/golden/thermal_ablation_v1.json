@@ -75,6 +75,25 @@
   "simulation.advanced.thermal.throat_recession_rate_mm_s": 0.006626197157412419,
   "simulation.advanced.thermal.wall_temp_gradient_k_m": 162839.69212688805
  },
+ "hot_start_above_the_recovery_temperature": {
+  "simulation.advanced.metadata.max_chamber_temperature_k": 2000.0,
+  "simulation.advanced.metadata.thermal_node_count": 4.0,
+  "simulation.advanced.thermal.biot_number": 0.0045000000000000005,
+  "simulation.advanced.thermal.casing_inner_wall_temp_c": 1726.85,
+  "simulation.advanced.thermal.casing_outer_wall_temp_c": 1726.85,
+  "simulation.advanced.thermal.final_throat_diameter_mm": 17.51987443621613,
+  "simulation.advanced.thermal.heat_load_kj_m2": 0.0,
+  "simulation.advanced.thermal.liner_casing_interface_temp_c": 1726.85,
+  "simulation.advanced.thermal.liner_hot_face_temp_c": 1726.85,
+  "simulation.advanced.thermal.max_casing_temp_c": 1726.85,
+  "simulation.advanced.thermal.max_inner_wall_temp_c": 1726.85,
+  "simulation.advanced.thermal.penetration_depth_mm": 4.849524037521091,
+  "simulation.advanced.thermal.throat_ablation_mm": 0.009937218108064522,
+  "simulation.advanced.thermal.throat_growth_pct": 0.11356820694930882,
+  "simulation.advanced.thermal.throat_heat_flux_kw_m2": 0.0,
+  "simulation.advanced.thermal.throat_recession_rate_mm_s": 0.006624812072043015,
+  "simulation.advanced.thermal.wall_temp_gradient_k_m": 0.0
+ },
  "no_pressure_series": {
   "simulation.advanced.metadata.max_chamber_temperature_k": 1577.0434782608695,
   "simulation.advanced.metadata.thermal_node_count": 4.0,
