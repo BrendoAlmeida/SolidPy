@@ -104,13 +104,14 @@ LANES = [
 ]
 
 
-def test_the_constants_are_the_ones_of_the_scipy_solver():
-    assert radau.NEWTON_MAXITER == scipy_radau.NEWTON_MAXITER == 6
-    assert (radau.MIN_FACTOR, radau.MAX_FACTOR) == (0.2, 10)
-    np.testing.assert_array_equal(radau.TI, scipy_radau.TI)
+def test_the_constants_are_the_ones_of_the_installed_scipy_solver():
+    """The copies in ``radau`` equal the private module of scipy bit for bit; a release that changes one is caught here."""
+    for name in ("C", "E", "MU_REAL", "MU_COMPLEX", "T", "TI", "TI_REAL", "TI_COMPLEX", "P"):
+        np.testing.assert_array_equal(getattr(radau, name), getattr(scipy_radau, name), err_msg=name)
+    assert (radau.NEWTON_MAXITER, radau.MIN_FACTOR, radau.MAX_FACTOR) == (
+        scipy_radau.NEWTON_MAXITER, scipy_radau.MIN_FACTOR, scipy_radau.MAX_FACTOR) == (6, 0.2, 10)
     np.testing.assert_allclose(radau.T @ radau.TI, np.eye(3), atol=1e-12)  # the two transformations are inverses
     assert radau.TI_COMPLEX.dtype == complex and radau.TI_REAL.shape == (3,)
-    np.testing.assert_allclose(radau.C, [(4 - 6**0.5) / 10, (4 + 6**0.5) / 10, 1.0])
     assert radau.newton_tolerance(1e-5) == pytest.approx(max(10 * np.finfo(float).eps / 1e-5, min(0.03, 1e-5**0.5)))
 
 

@@ -20,24 +20,32 @@ integrates the heat flux. The functions are pure over the array namespace ``xp``
 
 import numpy as np
 
-# The Butcher tableau and the transformation matrices live in a private scipy module;
-# ``tests/test_batch_radau.py`` checks the layout and the values the controller needs.
-from scipy.integrate._ivp import radau as _radau
-
 from . import dop853
 
-C = np.asarray(_radau.C)
-E = np.asarray(_radau.E)
-MU_REAL = float(_radau.MU_REAL)
-MU_COMPLEX = complex(_radau.MU_COMPLEX)
-T = np.asarray(_radau.T)
-TI = np.asarray(_radau.TI)
-TI_REAL = np.asarray(_radau.TI_REAL)
-TI_COMPLEX = np.asarray(_radau.TI_COMPLEX)
-P = np.asarray(_radau.P)
-NEWTON_MAXITER = int(_radau.NEWTON_MAXITER)
-MIN_FACTOR = float(_radau.MIN_FACTOR)
-MAX_FACTOR = float(_radau.MAX_FACTOR)
+# The Butcher tableau of Radau IIA(5) and the transformation matrices of ``scipy.integrate.Radau``, copied so that no private
+# scipy module is imported; ``tests/test_batch_radau.py`` compares every one of them with the installed scipy's.
+S6 = 6**0.5
+C = np.array([(4 - S6) / 10, (4 + S6) / 10, 1])
+E = np.array([-13 - 7 * S6, -13 + 7 * S6, -1]) / 3
+MU_REAL = 3 + 3 ** (2 / 3) - 3 ** (1 / 3)
+MU_COMPLEX = 3 + 0.5 * (3 ** (1 / 3) - 3 ** (2 / 3)) - 0.5j * (3 ** (5 / 6) + 3 ** (7 / 6))
+T = np.array([
+    [0.09443876248897524, -0.14125529502095421, 0.03002919410514742],
+    [0.25021312296533332, 0.20412935229379994, -0.38294211275726192],
+    [1, 1, 0]])
+TI = np.array([
+    [4.17871859155190428, 0.32768282076106237, 0.52337644549944951],
+    [-4.17871859155190428, -0.32768282076106237, 0.47662355450055044],
+    [0.50287263494578682, -2.57192694985560522, 0.59603920482822492]])
+TI_REAL = TI[0]
+TI_COMPLEX = TI[1] + 1j * TI[2]
+P = np.array([
+    [13 / 3 + 7 * S6 / 3, -23 / 3 - 22 * S6 / 3, 10 / 3 + 5 * S6],
+    [13 / 3 - 7 * S6 / 3, -23 / 3 + 22 * S6 / 3, 10 / 3 - 5 * S6],
+    [1 / 3, -8 / 3, 10 / 3]])
+NEWTON_MAXITER = 6
+MIN_FACTOR = 0.2
+MAX_FACTOR = 10
 ERROR_ESTIMATOR_ORDER = 3
 EPS = float(np.finfo(float).eps)
 
