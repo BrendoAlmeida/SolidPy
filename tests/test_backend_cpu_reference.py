@@ -113,7 +113,7 @@ def test_options_default_to_the_metrics_policy_and_no_pool():
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"history": "everything"}, "history must be 'metrics' or 'full'"),
+        ({"history": "everything"}, "history must be"),
         ({"workers": 2.5}, "workers must be a positive integer"),
         ({"workers": 0}, "workers must be a positive integer"),
         ({"workers": -3}, "workers must be a positive integer"),
@@ -132,12 +132,18 @@ def test_the_backend_rejects_options_that_are_not_solve_options(corpus_batch):
         backends.get_backend("cpu-reference").solve_burn(batch, {"workers": 2})
 
 
-def test_the_reference_provides_both_history_policies():
+def test_the_reference_advertises_every_history_policy_template():
     capabilities = backends.get_backend("cpu-reference").capabilities()
 
-    assert set(capabilities.history_policies) == {"metrics", "full"}
-    for policy in capabilities.history_policies:
-        SolveOptions(history=policy)  # every advertised policy is a valid option
+    assert set(capabilities.history_policies) == {"metrics", "full", "decimated:N", "uniform:N"}
+    for policy in ("metrics", "full", "decimated:8", "uniform:8"):
+        SolveOptions(history=policy)
+
+
+@pytest.mark.parametrize("policy", ["decimated:1", "decimated:0", "uniform:x", "uniform:2.5", "other:8", "uniform:"])
+def test_malformed_point_count_history_policies_are_rejected(policy):
+    with pytest.raises(ValueError, match="history must be"):
+        SolveOptions(history=policy)
 
 
 def test_lanes_that_cannot_be_pickled_are_solved_in_process_and_the_pool_keeps_the_rest():

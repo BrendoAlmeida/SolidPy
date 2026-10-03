@@ -234,7 +234,9 @@ def simulate_burn(
     """Simulate every lane of ``batch`` and return their canonical results in lane order.
 
     ``backend`` is a backend name, ``"auto"``, or ``None`` for the one selected with ``set_backend``,
-    ``use_backend`` or the environment (default ``"cpu-reference"``). ``history`` is ``"metrics"`` or ``"full"``.
+    ``use_backend`` or the environment (default ``"cpu-reference"``). ``history`` is ``"metrics"``, ``"full"``,
+    ``"decimated:N"`` (up to N native accepted points) or ``"uniform:N"`` (N points on a uniform time grid),
+    where N is an integer of at least 2.
     ``chunk_size`` bounds how many lanes one solve holds (memory); ``sort`` groups lanes of similar estimated
     cost into the same chunk, which matters when lanes need very different numbers of steps (and is skipped when
     one chunk holds every lane). A lane that exhausts the step budget of a batched backend is rerun on the

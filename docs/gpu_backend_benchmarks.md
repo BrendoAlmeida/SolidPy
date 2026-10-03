@@ -230,7 +230,7 @@ What the numbers say:
 
 ## Not covered yet
 
-The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, general transient structural
+The CPU+GPU executor, multi-GPU, general transient structural
 responses (W4's synthetic peak-pressure path is implemented), overlapping CPU post-processing with device solves,
 multi-stage scheduling, and a data-center GPU. W4's 100,000-sample harness is
 `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain pending. All measured numbers are for one machine;

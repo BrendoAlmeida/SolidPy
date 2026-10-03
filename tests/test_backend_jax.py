@@ -168,6 +168,20 @@ def test_history_full_returns_the_canonical_channels_and_the_step_budget_flags_f
     assert short["provenance"]["execution"]["step_overflow"] is True and not short["status"]["completed"]
 
 
+def test_history_policies_retain_then_format_jax_accepted_points(subset):
+    cases, reference, batch = subset
+    one = batch.select([0])
+    backend = backends.get_backend("jax", device="cpu")
+
+    decimated = backend.solve_burn(one, SolveOptions(history="decimated:16", max_steps=600)).to_results()[0]
+    uniform = backend.solve_burn(one, SolveOptions(history="uniform:24", max_steps=600)).to_results()[0]
+
+    assert 2 <= len(decimated["history"]["time_s"]) <= 16
+    assert len(uniform["history"]["time_s"]) == 24
+    assert np.isfinite(uniform["history"]["diagnostics"]["max_abs_pressure_derivative_pa_s"])
+    assert uniform["provenance"]["execution"]["history"] == "uniform:24"
+
+
 def test_tiers_give_the_same_results_as_one_uncapped_launch_and_are_reported(subset):
     cases, reference, batch = subset
     few = batch.select(np.arange(0, len(cases), 4))

@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ._protocol import (
-    BACKEND_API_VERSION, SUPPORTED, BackendUnavailable, Capabilities, SolveOptions, refused_lanes, unsupported_lane_error,
+    BACKEND_API_VERSION, HISTORY_POLICY_TEMPLATES, SUPPORTED, BackendUnavailable, Capabilities, SolveOptions,
+    parse_history_policy, refused_lanes, unsupported_lane_error,
 )
 from .numpy_vectorized import DEFAULT_MAX_STEPS, NumpyBackend
 
@@ -28,7 +29,7 @@ INSTALL_HINT = 'pip install "solidpy[jax-cuda12]"   (or "solidpy[jax]" for CPU o
 #: Grain-axis buckets (a batch is padded up to the next one) and the smallest lane bucket.
 GRAIN_BUCKETS = (4, 8, 16, 24, 32)
 MIN_LANE_BUCKET = 64
-#: Bytes the stored history of one launch may take on the device (``history="full"``).
+#: Bytes the transient accepted-step history of one launch may take on the device.
 HISTORY_BUDGET_BYTES = 2 * 1024**3
 DEFAULT_MAX_LANES = 8192
 
@@ -150,7 +151,8 @@ class JaxBackend:
         return out
 
     def capabilities(self) -> Capabilities:
-        return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES}, history_policies=("metrics", "full"),
+        return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES},
+                            history_policies=HISTORY_POLICY_TEMPLATES,
                             services=("thermal_ablation", "structural_response"))
 
     def _x64(self):
@@ -206,12 +208,13 @@ class JaxBackend:
         if refused:
             raise unsupported_lane_error(self.name, refused)
         batch = batch.with_table_buckets()  # table widths are part of the compiled shapes
-        full = options.history == "full"
-        max_steps = options.max_steps or DEFAULT_MAX_STEPS[options.history]
-        # a full history is for inspection, not throughput: capped tiers would allocate and discard its buffers
-        tiers = options.tiers if options.tiers is not None else (() if full else DEFAULT_TIERS)
+        history_kind, _ = parse_history_policy(options.history)
+        stores_history = history_kind != "metrics"
+        max_steps = options.max_steps or DEFAULT_MAX_STEPS[history_kind]
+        # Output policies need accepted points; capped tiers would allocate and discard those buffers.
+        tiers = options.tiers if options.tiers is not None else (() if stores_history else DEFAULT_TIERS)
         grains = _bucket_grains(batch.g_max)
-        per_launch = self._lanes_per_launch(grains, full, max_steps)
+        per_launch = self._lanes_per_launch(grains, stores_history, max_steps)
         provenance = self.provenance()
         results: List[Dict[str, Any]] = []
         launches: List[Any] = []
@@ -219,7 +222,9 @@ class JaxBackend:
         for start in range(0, len(batch), per_launch):
             chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_g_max(grains)
             floor = min(MIN_LANE_BUCKET, per_launch)  # a launch the budget keeps small is not padded back up
-            out, info = solve_in_tiers(chunk, lambda sub, cap: self._run(sub, full, max_steps, cap, floor), tiers)
+            out, info = solve_in_tiers(
+                chunk, lambda sub, cap: self._run(sub, stores_history, max_steps, cap, floor), tiers
+            )
             begin = time.perf_counter()
             results.extend(assemble(chunk, out, options.history, provenance))
             assemble_s += time.perf_counter() - begin

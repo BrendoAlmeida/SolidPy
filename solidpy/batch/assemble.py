@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ..backends import _tolerances
+from ..backends._protocol import parse_history_policy
 from . import problem as pb
 from .kernels import geometry, rhs
 
@@ -241,12 +242,76 @@ def _history(batch, out, lane, namespace) -> Dict[str, Any]:
     }
 
 
+def _sample_history(history, sample_times):
+    """Linearly interpolate every history channel onto ``sample_times``."""
+    source_times = np.asarray(history["time_s"], dtype=float)
+    sampled = {"time_s": np.asarray(sample_times, dtype=float)}
+    for name, values in history.items():
+        if name == "time_s":
+            continue
+        values = np.asarray(values)
+        if values.ndim == 1:
+            sampled[name] = np.interp(sample_times, source_times, values)
+            continue
+        flat = values.reshape((len(source_times), -1))
+        out = np.empty((len(sample_times), flat.shape[1]), dtype=values.dtype)
+        for column in range(flat.shape[1]):
+            out[:, column] = np.interp(sample_times, source_times, flat[:, column])
+        sampled[name] = out.reshape((len(sample_times),) + values.shape[1:])
+    return sampled
+
+
+def _history_for_policy(history, motor, policy):
+    """Apply the requested output history policy to an already assembled adaptive history."""
+    kind, count = parse_history_policy(policy)
+    if kind == "metrics":
+        return None
+    if kind == "full":
+        return history
+    if history is None:
+        raise ValueError(f"history policy {policy!r} requires accepted-step history")
+    time = np.asarray(history["time_s"], dtype=float)
+    if kind == "decimated":
+        points = min(count, len(time))
+        indices = np.linspace(0, len(time) - 1, points).round().astype(int)
+        return {name: np.asarray(values)[indices].copy() for name, values in history.items()}
+
+    grid = np.linspace(time[0], time[-1], count) if len(time) > 1 else np.full(count, time[0])
+    sampled = _sample_history(history, grid)
+    pressure = np.asarray(history["chamber_pressure_pa"], dtype=float)
+    thrust = np.asarray(history["thrust_n"], dtype=float)
+    pressure_gradient = np.gradient(pressure, time) if len(time) > 1 else np.zeros_like(pressure)
+    pressure_gradient_index = int(np.argmax(np.abs(pressure_gradient)))
+    diagnostics = {
+        "peak_thrust_time_s": float(time[int(np.argmax(thrust))]),
+        "max_abs_pressure_derivative_pa_s": float(np.max(np.abs(pressure_gradient))),
+        "max_abs_pressure_derivative_time_s": float(time[pressure_gradient_index]),
+    }
+    try:
+        from ..AxialFlow import evaluate_axial_mass_flux
+
+        diagnostics["axial_mass_flux"] = evaluate_axial_mass_flux(motor, history)["metrics"]
+    except (TypeError, ValueError) as exc:
+        diagnostics["axial_mass_flux"] = {"status": "unsupported", "reason": str(exc)}
+
+    channels = (
+        "time_s", "chamber_pressure_pa", "thrust_n", "mdot_generated_kg_s", "mdot_nozzle_kg_s",
+        "burn_area_m2", "generated_mass_integral_kg",
+    )
+    result = {name: sampled[name] for name in channels}
+    regression_rate = np.asarray(sampled["regression_rate_m_s"], dtype=float)
+    result["regression_rate_m_s"] = regression_rate.mean(axis=1) if regression_rate.ndim > 1 else regression_rate
+    result["diagnostics"] = diagnostics
+    return result
+
+
 def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """One canonical result mapping per lane from the solver outputs ``out``.
 
-    ``history`` is ``"metrics"`` (``result["history"]`` is ``None``) or ``"full"`` (the solver must have been run
-    with ``keep_history``). ``execution`` is the backend's part of ``provenance["execution"]``.
+    ``history`` is a metrics-only, full, decimated or fixed-time-grid policy. Every policy except metrics requires the
+    solver to have retained accepted points. ``execution`` is the backend's part of ``provenance["execution"]``.
     """
+    history_kind, _ = parse_history_policy(history)
     a = batch.arrays
     G = batch.g_max
     offset = 2 + G
@@ -342,7 +407,8 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
             },
         }
         results.append({
-            "history": _history(batch, out, lane, P) if history == "full" else None,
+            "history": _history_for_policy(_history(batch, out, lane, P), batch.motors[lane], history)
+            if history_kind != "metrics" else None,
             "metrics": metrics, "status": status,
             "efficiencies": {**applied, "efficiency_semantics": "native_split"}, "provenance": provenance,
         })

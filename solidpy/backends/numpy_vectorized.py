@@ -10,11 +10,14 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
-from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions, refused_lanes, unsupported_lane_error
+from ._protocol import (
+    BACKEND_API_VERSION, HISTORY_POLICY_TEMPLATES, SUPPORTED, Capabilities, SolveOptions, parse_history_policy,
+    refused_lanes, unsupported_lane_error,
+)
 
-#: Accepted points per lane when ``SolveOptions.max_steps`` is not given. The history buffer of ``"full"``
-#: reserves them for every lane, so that policy defaults to far fewer.
-DEFAULT_MAX_STEPS = {"metrics": 100000, "full": 5000}
+#: Accepted points per lane when ``SolveOptions.max_steps`` is not given. Policies that return a history keep this
+#: buffer transiently, so their default is far smaller than the metrics-only limit.
+DEFAULT_MAX_STEPS = {"metrics": 100000, "full": 5000, "decimated": 5000, "uniform": 5000}
 
 
 class NumpyBackend:
@@ -37,7 +40,7 @@ class NumpyBackend:
         self.last_timings: Dict[str, float] = {}
 
     def capabilities(self) -> Capabilities:
-        return Capabilities({f: SUPPORTED for f in self.SUPPORTED_FEATURES}, history_policies=("metrics", "full"),
+        return Capabilities({f: SUPPORTED for f in self.SUPPORTED_FEATURES}, history_policies=HISTORY_POLICY_TEMPLATES,
                             services=("thermal_ablation", "structural_response"))
 
     def devices(self) -> List[str]:
@@ -58,10 +61,12 @@ class NumpyBackend:
         refused = refused_lanes(batch, self.capabilities())
         if refused:
             raise unsupported_lane_error(self.name, refused)
-        full = options.history == "full"
-        config = solver.SolveConfig(keep_history=full, max_steps=options.max_steps or DEFAULT_MAX_STEPS[options.history])
-        # a full history is for inspection, not throughput: capped tiers would allocate and discard its buffers
-        tiers = options.tiers if options.tiers is not None else (() if full else DEFAULT_TIERS)
+        history_kind, _ = parse_history_policy(options.history)
+        stores_history = history_kind != "metrics"
+        config = solver.SolveConfig(keep_history=stores_history,
+                                    max_steps=options.max_steps or DEFAULT_MAX_STEPS[history_kind])
+        # Output policies need accepted points; capped tiers would allocate and discard those buffers.
+        tiers = options.tiers if options.tiers is not None else (() if stores_history else DEFAULT_TIERS)
 
         def run(sub, cap):
             return solver.solve_burn_and_blowdown(solver.numpy_driver(), sub.namespace(np), sub.initial_state(), config, cap)

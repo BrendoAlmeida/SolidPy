@@ -12,6 +12,7 @@ from solidpy.backends import SolveOptions, UnsupportedLane
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch, assemble
 from solidpy.batch.integrators import solver
+from solidpy.ensemble import simulate_burn
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 LIVE_FAMILIES = ("tubular", "star", "ends-star", "mixed", "erosive", "efficiency", "lowkn", "replicated")
@@ -27,6 +28,58 @@ def pack(cases):
 
 def solve(batch, **options):
     return backends.get_backend("cpu-vectorized").solve_burn(batch, SolveOptions(**options)).to_results()
+
+
+def test_decimated_history_keeps_native_accepted_points_from_every_channel(corpus_cases):
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"]])
+    full = solve(batch, history="full", max_steps=900)[0]["history"]
+    decimated = solve(batch, history="decimated:24", max_steps=900)[0]["history"]
+    indices = np.linspace(0, len(full["time_s"]) - 1, min(24, len(full["time_s"]))).round().astype(int)
+
+    assert len(decimated["time_s"]) <= 24
+    assert np.array_equal(decimated["time_s"], full["time_s"][indices])
+    assert set(decimated) == set(full)
+    for name in full:
+        np.testing.assert_array_equal(decimated[name], full[name][indices], err_msg=name)
+
+
+def test_uniform_history_interpolates_main_channels_and_reports_native_grid_diagnostics(corpus_cases):
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"]])
+    full = solve(batch, history="full", max_steps=900)[0]["history"]
+    uniform = solve(batch, history="uniform:32", max_steps=900)[0]["history"]
+    grid = np.linspace(full["time_s"][0], full["time_s"][-1], 32)
+
+    np.testing.assert_array_equal(uniform["time_s"], grid)
+    for name in ("chamber_pressure_pa", "thrust_n", "mdot_generated_kg_s", "mdot_nozzle_kg_s",
+                 "burn_area_m2", "generated_mass_integral_kg"):
+        np.testing.assert_allclose(uniform[name], np.interp(grid, full["time_s"], full[name]), rtol=1e-14, atol=0)
+    expected_regression_rate = np.mean(full["regression_rate_m_s"], axis=1)
+    np.testing.assert_allclose(uniform["regression_rate_m_s"], np.interp(grid, full["time_s"], expected_regression_rate),
+                               rtol=1e-14, atol=0)
+    diagnostics = uniform["diagnostics"]
+    assert diagnostics["peak_thrust_time_s"] == full["time_s"][np.argmax(full["thrust_n"])]
+    assert diagnostics["axial_mass_flux"]["max_axial_mass_flux_kg_m2_s"] > 0.0
+
+
+def test_cpu_reference_formats_uniform_history_from_its_scalar_history(corpus_cases):
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"]])
+    options = SolveOptions(history="uniform:24")
+    result = backends.get_backend("cpu-reference").solve_burn(batch, options).to_results()[0]
+
+    assert len(result["history"]["time_s"]) == 24
+    assert len(result["history"]["diagnostics"]["axial_mass_flux"]) > 0
+
+
+def test_uniform_history_is_preserved_when_a_lane_falls_back_to_the_reference(corpus_cases):
+    by_id, _ = corpus_cases
+    batch = pack([by_id["igniter-callable-000"]])
+    result = simulate_burn(batch, backend="cpu-vectorized", history="uniform:24").to_results()[0]
+
+    assert len(result["history"]["time_s"]) == 24
+    assert result["provenance"]["execution"]["fallback"]["lane_reason"]
 
 
 @pytest.fixture(scope="module")
@@ -279,7 +332,9 @@ def test_lanes_the_kernels_cannot_run_are_refused_by_name(corpus_cases):
     with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: .*igniter_callable; 2: .*activation_callable"):
         backends.get_backend("cpu-vectorized").solve_burn(batch)
     description = backends.describe("cpu-vectorized")
-    assert description["devices"] == ["cpu"] and set(description["history_policies"]) == {"metrics", "full"}
+    assert description["devices"] == ["cpu"] and set(description["history_policies"]) == {
+        "metrics", "full", "decimated:N", "uniform:N"
+    }
     assert "igniter_callable" not in description["capabilities"]  # Python callables stay on the reference
     assert description["capabilities"]["igniter_table"] == "supported"
 

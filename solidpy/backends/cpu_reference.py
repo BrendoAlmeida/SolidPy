@@ -12,7 +12,9 @@ import platform
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional
 
-from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions
+from ._protocol import (
+    BACKEND_API_VERSION, HISTORY_POLICY_TEMPLATES, SUPPORTED, Capabilities, SolveOptions, parse_history_policy,
+)
 from .._parallel import process_worker_count, safe_process_context, spawn_pickle_safe
 
 
@@ -69,7 +71,7 @@ class ReferenceBackend:
         # the scalar code runs every lane, including custom classes and instance-level overrides
         # the result always carries the full adaptive history, which contains everything "metrics" asks for
         return Capabilities({feature: SUPPORTED for feature in FEATURES + THERMAL_FEATURES},
-                            history_policies=("metrics", "full"),
+                            history_policies=HISTORY_POLICY_TEMPLATES,
                             services=("thermal_ablation", "structural_response"))
 
     def devices(self) -> List[str]:
@@ -78,7 +80,8 @@ class ReferenceBackend:
     def solve_burn(self, batch, options=None):
         """Solve every lane of ``batch`` with the scalar solver; ``options.workers`` > 1 uses a process pool.
 
-        The result always carries the full adaptive history, so ``options.history`` only has to be valid.
+        The scalar solver creates its full adaptive history. ``decimated:N`` and ``uniform:N`` are formatted from it
+        after the solve; ``metrics`` and ``full`` retain their existing reference results.
         Lanes that cannot be sent to a worker (a lambda igniter, an instance-level method override) are solved
         in this process, so a pool never loses the batch to a pickling error. An exception raised by the
         scalar solver for a lane propagates, as it does when calling ``BurnSimulation`` directly.
@@ -103,6 +106,13 @@ class ReferenceBackend:
         for i, job in enumerate(jobs):
             if results[i] is None:
                 results[i] = _run_lane(job)
+        history_kind, _ = parse_history_policy(options.history)
+        if history_kind in ("decimated", "uniform"):
+            from ..batch.assemble import _history_for_policy
+
+            for motor, result in zip(batch.motors, results):
+                if result.get("history") is not None:
+                    result["history"] = _history_for_policy(result["history"], motor, options.history)
         return BatchResult(results, self.name, self.provenance())
 
     def thermal_ablation(self, batch, options=None):

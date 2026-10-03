@@ -84,6 +84,8 @@ cannot run (Python callables as igniter or activation, analytical tail-off, subc
 a burn rate that can be negative or not finite)
 are solved by the reference and flagged in `provenance["execution"]["fallback"]`, or raise `UnsupportedLane` with
 `strict=True`. Igniter and activation profiles, tabulated burn rates and tabulated thermochemistry are supported.
+Use `history="decimated:256"` to keep up to 256 native accepted points, or `history="uniform:256"` for fixed-grid
+pressure, thrust, flow, burn-area and regression-rate curves with diagnostics from the native grid.
 
 The speedup comes from batch size: on an RTX 4060 in float64 the JAX backend runs 11.8x faster than the scalar
 solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a few hundred lanes. See

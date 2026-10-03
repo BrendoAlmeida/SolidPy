@@ -247,7 +247,7 @@ res = simulate_burn(
     dtype="float64",
     rtol=1e-8, atol=1e-10, max_step=0.01,    # same defaults as BurnSimulation
     tail_off="numerical",
-    history="metrics",                        # "full" | "decimated:N" | "metrics" (see 5.8)
+    history="metrics",                        # "full" | "decimated:N" | "uniform:N" | "metrics" (see 5.8)
     strict=False,                             # False: unsupported lanes fall back to CPU
 )
 results = res.to_results()                    # list of canonical result mappings (same schema as today)
@@ -412,9 +412,9 @@ unbounded histories for every lane, so output is configurable:
 | `history` | What is stored | Use |
 |---|---|---|
 | `"metrics"` | only the canonical `metrics`, `status`, `provenance` (computed on device from running reductions) | large ensembles; smallest memory |
-| `"decimated:N"` | metrics plus N points per lane (uniform in time or by arc-length of thrust) | surrogate/feature workflows |
+| `"decimated:N"` | metrics plus up to N native accepted points, spread evenly by accepted-point index, with all history channels | surrogate/feature workflows |
 | `"full"` | the accepted-step grid per lane, padded to `max_steps` with a per-lane length | parity tests, debugging, plots |
-| `"uniform:N"` (recommended for ensemble consumers) | metrics, the grid-sensitive diagnostics below, and the main channels resampled to N uniform time points | consumers that persist fixed-grid curves |
+| `"uniform:N"` (recommended for ensemble consumers) | metrics, seven main channels resampled to N uniform time points, and the diagnostics below | consumers that persist fixed-grid curves |
 
 **What a typical ensemble consumer actually needs.** An investigation of how a downstream consumer uses
 the CPU result found that it never keeps the raw adaptive history. It uses (a) the scalar `metrics`;
@@ -425,14 +425,15 @@ maximum (typically a few hundred points, never more than a few thousand); and (c
 computed **on the native adaptive grid**: the time of the thrust maximum, the maximum of
 `|gradient(pressure, time)|` (second-order differences on the irregular grid), and the axial mass-flux
 maximum, its time and its grain (the per-time, per-grain flux series is optional and large). `"uniform:N"`
-therefore computes (c) on device from the accepted-step buffer, resamples (b) with the same linear
-interpolation, and returns only the uniform curves and the diagnostics.
+therefore derives (c) from the native accepted-step buffer, resamples (b) with the same linear
+interpolation, and returns only the uniform curves and the diagnostics. The current implementation copies the retained
+accepted-step buffer to the host and computes the pressure derivative and axial-flow diagnostic there.
 
 Two consequences: the device must keep the accepted-step buffer *transiently* (about `max_steps x
-(7 + G)` values per lane, around 1 MB per lane in float64, so a 4,096-lane chunk needs ~4 GB; the host
-receives only the uniform curves, tens of KB per lane); and the native-grid diagnostics (time of the
-maximum, maximum pressure-rise rate, axial-flux maximum) depend on the accepted-step sequence, which is a
-second reason to port the scipy step controller exactly (5.3). They get their own parity limits
+(7 + G)` values per lane, around 1 MB per lane in float64, so a 4,096-lane chunk needs ~4 GB; the output
+contains only the uniform curves, tens of KB per lane, though host assembly temporarily receives the native grid too);
+and the native-grid diagnostics (time of the maximum, maximum pressure-rise rate, axial-flux maximum) depend on the
+accepted-step sequence, which is a second reason to port the scipy step controller exactly (5.3). They get their own parity limits
 (Appendix B): looser than integrals, tight for the `cpu-vectorized` backend.
 
 Memory budget (worked formula, float64): `lanes x max_steps x (G + 7 + extras) x 8 bytes`. Example: 4,096
@@ -953,8 +954,7 @@ stay on one CPU core (5.3 ms per lane, 90 % of the batched run).
 
 The CPU post-processing of advanced physics and robustness ensembles now accepts `workers > 1` and runs in a bounded,
 ordered process pool; measurements are in `docs/gpu_backend_benchmarks.md`. The general transient structural response over
-arbitrary curves and `decimated:N` / `uniform:N` histories remain unimplemented. W4 peak-pressure sampling and `xp=` for
-`surrogate_physics` are recorded in section 14.7.
+arbitrary curves remains unimplemented. W4 peak-pressure sampling and `xp=` for `surrogate_physics` are recorded in section 14.7.
 Couplings between the batched thermal code and the scalar model, and the 1e-3 quadrature error of the scalar heat load, are
 in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
 
@@ -998,6 +998,20 @@ The benchmarks are recorded in `docs/gpu_backend_benchmarks.md` and `benchmarks/
 
 This is parallel post-processing after a completed solve. The Phase 5 pipeline that overlaps accelerator solving,
 post-processing and packing remains pending.
+
+### 14.9 History output policies (2026-10-03)
+
+`simulate_burn(..., history="decimated:N")` now returns at most N native accepted points, evenly spaced by accepted-point
+index, with every canonical history channel. `history="uniform:N"` returns N uniformly spaced times, linearly interpolates
+the seven ensemble channels (pressure, thrust, generated and nozzle flow, burn area, mean regression rate and generated-mass
+integral), and includes diagnostics from the native grid: peak-thrust time, maximum absolute pressure derivative and the
+axial mass-flux maximum and its location. Both policies are available on `cpu-reference`, `cpu-vectorized` and JAX; the
+reference backend formats its scalar history, while the vectorized solvers retain accepted points up to `max_steps`.
+
+JAX chunks history-producing launches against the existing 2 GiB history budget. It currently copies each launch's native
+history to host memory for interpolation and axial diagnostics before discarding it; moving these operations onto the device
+remains a memory and throughput optimization. A lane that reaches `max_steps` still follows the existing overflow and
+reference-fallback behavior.
 
 ## Appendix A. State vector and padded batch schema
 

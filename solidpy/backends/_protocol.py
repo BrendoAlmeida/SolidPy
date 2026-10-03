@@ -13,6 +13,23 @@ SUPPORTED = "supported"
 PARTIAL = "partial"
 UNSUPPORTED = "unsupported"
 _LEVELS = (SUPPORTED, PARTIAL, UNSUPPORTED)
+HISTORY_POLICY_TEMPLATES = ("metrics", "full", "decimated:N", "uniform:N")
+
+
+def parse_history_policy(history: str) -> Tuple[str, Optional[int]]:
+    """Return the policy kind and point count for a canonical history policy string."""
+    if isinstance(history, str) and history in ("metrics", "full"):
+        return history, None
+    if isinstance(history, str):
+        kind, separator, raw_count = history.partition(":")
+        if separator and kind in ("decimated", "uniform") and raw_count.isdecimal():
+            count = int(raw_count)
+            if count >= 2:
+                return kind, count
+    raise ValueError(
+        "history must be 'metrics', 'full', 'decimated:N' or 'uniform:N' with N an integer of at least 2, "
+        f"got {history!r}"
+    )
 
 
 class UnsupportedLane(ValueError):
@@ -34,7 +51,8 @@ class Capabilities:
     ``features`` maps a lane feature name to ``"supported"``, ``"partial"`` or ``"unsupported"``. A feature
     that is not listed is unsupported: the router never assumes support (design principle 3). ``services`` lists
     the optional Tier 1 services the backend implements besides ``solve_burn`` (currently ``"thermal_ablation"``
-    and ``"structural_response"``).
+    and ``"structural_response"``). ``history_policies`` may use ``"decimated:N"`` and ``"uniform:N"`` templates
+    to advertise policies whose point count is chosen per solve.
     """
 
     features: Mapping[str, str] = field(default_factory=dict)
@@ -77,8 +95,8 @@ def unsupported_lane_error(backend: str, refused: Mapping[int, List[str]]) -> Un
 class SolveOptions:
     """Options of ``Backend.solve_burn`` that are not part of the problem itself.
 
-    ``history`` is the history policy (``"metrics"`` or ``"full"``), ``workers`` the number of processes a CPU
-    backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
+    ``history`` is the history policy (``"metrics"``, ``"full"``, ``"decimated:N"`` or ``"uniform:N"``),
+    ``workers`` the number of processes a CPU backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
     (``None``: the backend's default) and ``tiers`` the iteration caps of the capped tiers a batched backend runs
     before its uncapped one (``None``: ``batch.tiers.DEFAULT_TIERS``; ``()``: a single uncapped solve). A backend
     ignores an option that does not apply to it and says so in its docstring. CPU process pools use ``spawn``; scripts
@@ -101,8 +119,7 @@ class SolveOptions:
             isinstance(self.max_steps, bool) or not isinstance(self.max_steps, int) or self.max_steps < 2
         ):
             raise ValueError(f"max_steps must be an integer of at least 2 or None, got {self.max_steps!r}")
-        if self.history not in ("metrics", "full"):
-            raise ValueError(f"history must be 'metrics' or 'full', got {self.history!r}")
+        parse_history_policy(self.history)
         if self.workers is not None and (
             isinstance(self.workers, bool) or not isinstance(self.workers, int) or self.workers < 1
         ):
