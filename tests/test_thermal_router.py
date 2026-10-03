@@ -145,3 +145,14 @@ def test_a_degenerate_gas_falls_back_to_the_reference(scalar_fixed):
     assert result.to_results()[1] == scalar_thermal(lanes[1])
     close(result.to_results()[0], scalar_fixed[0])
     close(result.to_results()[2], scalar_fixed[1])
+
+
+def test_the_summary_keeps_what_the_backend_reported_for_each_chunk(fixed_batch):
+    result = simulate_thermal(fixed_batch, backend="cpu-vectorized", chunk_size=6)
+
+    assert len(result.execution["backend_executions"]) == result.execution["chunks"] == 3
+    for execution in result.execution["backend_executions"]:
+        assert execution["integrator"] == "radau-iia5" and execution["radau_steps"] >= 0 and execution["failed_lanes"] == []
+        assert execution["rtol"] == 1e-5 and execution["atol"] == 1e-6 and execution["service"] == "thermal_ablation"
+    assert sum(e["radau_steps"] for e in result.execution["backend_executions"]) > 0
+    assert simulate_thermal(fixed_batch, backend="cpu-reference").execution["backend_executions"][0]["service"] == "thermal_ablation"

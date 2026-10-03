@@ -218,10 +218,15 @@ def simulate_thermal(
     ``results[i]`` is the mapping ``Multiphysics.simulate_thermal_ablation`` returns for lane ``i``. ``backend`` is a
     name, ``"auto"`` (an accelerator from 128 lanes, else the reference) or ``None`` for the selected one. A lane the
     backend cannot take (a series that is not finite, series of different lengths, a backend without the thermal
-    service) and a lane whose integration did not finish are rerun on the scalar reference, or raise ``UnsupportedLane``
-    with ``strict=True`` (for the lanes it cannot take); ``result.execution["fallback_lanes"]`` lists them with their
-    reasons. ``workers`` is the process count of the reference, ``chunk_size`` bounds the lanes of one solve, and ``sort``
-    groups lanes of similar length into the same chunk when there are several.
+    service) are rerun on the scalar reference, or raise ``UnsupportedLane`` with ``strict=True``. A lane whose integration
+    did not finish is rerun on the reference even with ``strict=True`` (the scalar code decides what happens to it, as
+    ``simulate_burn`` does for a lane that ran out of steps). ``result.execution["fallback_lanes"]`` lists the lanes rerun,
+    with their reasons, and ``result.execution["backend_executions"]`` holds what the backend reported for each of its
+    chunks (integrator, tolerances, Radau steps and attempts, device, versions); ``effective_backend`` is the backend that
+    was asked to solve, so a batch whose lanes all fell back still names it. ``workers`` is the process count of the
+    reference, ``chunk_size`` bounds the lanes of one solve, and ``sort`` groups lanes of similar length into the same
+    chunk when there are several. The lanes keep references to the objects they were packed from, which the reference
+    reads when it reruns a lane: do not modify them between packing and solving.
     """
     if not isinstance(batch, ThermalBatch):
         raise TypeError("simulate_thermal needs a ThermalBatch; build one with ThermalBatch.from_objects")
@@ -253,13 +258,16 @@ def simulate_thermal(
     results: List[Optional[Dict[str, Any]]] = [None] * len(batch)
     supported = np.asarray([lane for lane in range(len(batch)) if lane not in refused], dtype=int)
     chunks: List[np.ndarray] = []
+    executions: List[Dict[str, Any]] = []
     if len(supported):
         launch_limit = getattr(chosen, "max_lanes", None)
         several = any(limit is not None and limit < len(supported) for limit in (chunk_size, launch_limit))
         order = supported[np.argsort(batch.arrays["n_intervals"][supported], kind="stable")] if sort and several else supported
         chunks = _chunks(order, chunk_size)
         for chunk in chunks:
-            returned = chosen.thermal_ablation(batch.select(chunk), options).to_results()
+            outcome = chosen.thermal_ablation(batch.select(chunk), options)
+            executions.append(outcome.execution)
+            returned = outcome.to_results()
             if len(returned) != len(chunk):
                 raise RuntimeError(f"backend {backend!r} returned {len(returned)} results for {len(chunk)} lanes")
             for lane, result in zip(chunk, returned):
@@ -274,7 +282,8 @@ def simulate_thermal(
         for lane, result in zip(lanes, reference.thermal_ablation(batch.select(lanes), options).to_results()):
             results[int(lane)] = result
     summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
-               "fallback_lanes": {int(i): reasons[i] for i in sorted(reasons)}, "chunks": len(chunks)}
+               "fallback_lanes": {int(i): reasons[i] for i in sorted(reasons)}, "chunks": len(chunks),
+               "backend_executions": executions}
     return BatchResult(results, backend, summary)
 
 
@@ -302,7 +311,10 @@ def run_advanced_physics_ensemble(
     or one per lane. Returns one flat metrics mapping per lane, the one ``simulate_advanced_physics`` returns for it: the
     wall conduction, which costs most of the advanced physics, runs through ``simulate_thermal`` on ``backend`` and the
     structural, CFD, ignition and flight models then run on the CPU for each lane from its thermal metrics. The scenario
-    factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. A dict passed as
+    factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. ``workers`` is the process
+    count of the ``cpu-reference`` thermal batch; the models after the thermal one run serially in this process, and at
+    thousands of lanes they are most of the time (5 ms per lane against 0.3 ms for the batched thermal ablation on the GPU).
+    A dict passed as
     ``timings`` receives the seconds packing (``pack_s``), in the thermal batch (``thermal_s``) and in the other models
     (``models_s``); one passed as ``execution`` receives the summary of ``simulate_thermal``.
     """
