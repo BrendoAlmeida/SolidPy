@@ -134,3 +134,14 @@ def test_workers_reach_the_reference(fixed_batch, scalar_fixed):
     result = simulate_thermal(fixed_batch, backend="cpu-reference", workers=2)
 
     assert result.to_results() == scalar_fixed
+
+
+def test_a_degenerate_gas_falls_back_to_the_reference(scalar_fixed):
+    lanes = [FIXED[0], dict(FIXED[0], gamma=1.0), FIXED[1]]
+
+    result = simulate_thermal(pack_lanes(lanes), backend="cpu-vectorized")
+
+    assert result.execution["fallback_lanes"] == {1: ["thermal_degenerate_gas"]}
+    assert result.to_results()[1] == scalar_thermal(lanes[1])
+    close(result.to_results()[0], scalar_fixed[0])
+    close(result.to_results()[2], scalar_fixed[1])

@@ -19,7 +19,10 @@ Array schema (``B`` = lane, ``N`` = padded wall cells, ``T`` = padded time steps
   ``max_recovery_temp_k``, ``burn_duration_s``, ``wall_thickness_m``, ``initial_temp_k``.
 
 A lane whose inputs the batched integration cannot reproduce (a series that is not finite, series of different
-lengths) carries a feature in ``ThermalBatch.features`` and is left to the scalar reference by the router.
+lengths, a gas with ``gamma`` within 1e-6 of 1) carries a feature in ``ThermalBatch.features`` and is left to the scalar
+reference by the router. A batch keeps references to the objects it was packed from (the reference backend and the
+fallback read them, as ``ProblemBatch`` does with its motors); the arrays are a snapshot, so do not modify those objects
+between packing and solving.
 """
 
 from __future__ import annotations
@@ -37,7 +40,14 @@ from ..Multiphysics import (
 
 NON_FINITE_INPUT = "non_finite_thermal_input"
 SERIES_MISMATCH = "thermal_series_mismatch"
-THERMAL_FEATURES = (NON_FINITE_INPUT, SERIES_MISMATCH)
+DEGENERATE_GAS = "thermal_degenerate_gas"
+THERMAL_FEATURES = (NON_FINITE_INPUT, SERIES_MISMATCH, DEGENERATE_GAS)
+
+#: A gas with ``gamma - 1`` below this has a specific heat that the scalar code only bounds by a clamp (``gamma = 1`` gives
+#: ``cp ~ 3e11``). The Bartz coefficient and so the stiffness of the wall problem are then so large that the batched
+#: factorization (no pivoting) takes a different step sequence than scipy's LU and the heat load, a trapezoid over the steps,
+#: moves by 4e-6; ``gamma - 1`` of 1e-7 still agrees to 1e-13.
+MIN_GAMMA_EXCESS = 1e-6
 
 #: Names of the per-lane arrays, in the order ``select`` slices them.
 LANE_ARRAYS = (
@@ -261,6 +271,8 @@ def _pack_lane(lane: Dict[str, Any]):
                 nozzle.ablation_mass_flux_exponent, lane["r_specific"], lane["liner_thickness_factor"])
     if not _finite(flame, gamma, start, *material):
         features.add(NON_FINITE_INPUT)
+    elif gamma - 1.0 < MIN_GAMMA_EXCESS:
+        features.add(DEGENERATE_GAS)
 
     if features:  # harmless placeholders: the router never sends this lane to a batched solve
         dx, k, rho_cp = np.full(4, 1e-3), np.full(4, 16.0), np.full(4, 7850.0 * 520.0)

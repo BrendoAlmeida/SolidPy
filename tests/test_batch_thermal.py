@@ -11,7 +11,7 @@ from solidpy.backends import _tolerances as tol
 from solidpy.batch import thermal as batch_thermal
 from solidpy.batch.integrators import radau
 from solidpy.batch.kernels import thermal as thermal_kernels
-from solidpy.batch.thermal import NON_FINITE_INPUT, SERIES_MISMATCH, ThermalBatch
+from solidpy.batch.thermal import DEGENERATE_GAS, NON_FINITE_INPUT, SERIES_MISMATCH, ThermalBatch
 from thermal_cases import CASES, case_lane, make_curve, make_geometry, pack_lanes, random_lanes, scalar_thermal
 
 FIXED = [case_lane(name) for name in CASES]
@@ -118,15 +118,18 @@ def test_lanes_the_batched_solve_cannot_reproduce_carry_a_feature():
     short = dict(make_curve(points=50))
     short["thrust_n"] = short["thrust_n"][:40]
     lanes = [FIXED[0], dict(FIXED[0], curve=make_curve(points=50, ablation_series=ablation)), dict(FIXED[0], curve=nan_thrust),
-             dict(FIXED[0], curve=short), dict(FIXED[0], flame_temp_k=float("nan"))]
+             dict(FIXED[0], curve=short), dict(FIXED[0], flame_temp_k=float("nan")), dict(FIXED[0], gamma=1.0),
+             dict(FIXED[0], gamma=1.0 + 5e-7), dict(FIXED[0], gamma=1.0 + 2e-6)]
 
     batch = pack_lanes(lanes)
 
-    assert [sorted(f) for f in batch.features] == [[], [NON_FINITE_INPUT], [NON_FINITE_INPUT], [SERIES_MISMATCH], [NON_FINITE_INPUT]]
+    expected = [[], [NON_FINITE_INPUT], [NON_FINITE_INPUT], [SERIES_MISMATCH], [NON_FINITE_INPUT], [DEGENERATE_GAS],
+                [DEGENERATE_GAS], []]
+    assert [sorted(f) for f in batch.features] == expected
     numpy_caps = backends.get_backend("cpu-vectorized").capabilities()
     reference_caps = backends.get_backend("cpu-reference").capabilities()
-    assert batch.unsupported(numpy_caps) == [[], [NON_FINITE_INPUT], [NON_FINITE_INPUT], [SERIES_MISMATCH], [NON_FINITE_INPUT]]
-    assert batch.unsupported(reference_caps) == [[]] * 5
+    assert batch.unsupported(numpy_caps) == expected
+    assert batch.unsupported(reference_caps) == [[]] * 8
     assert np.isfinite(batch.arrays["diag"]).all() and np.isfinite(batch.arrays["dt"]).all()  # placeholders stay finite
 
 
@@ -312,3 +315,14 @@ def test_a_wall_that_starts_hotter_than_the_recovery_temperature_only_cools():
 
     close(got, scalar_thermal(lane))
     assert got["simulation.advanced.thermal.throat_heat_flux_kw_m2"] == 0.0 and got["simulation.advanced.thermal.heat_load_kj_m2"] == 0.0
+
+
+def test_a_gas_at_gamma_one_is_left_to_the_scalar_model_and_a_gas_just_above_it_is_not():
+    """With gamma = 1 the Bartz coefficient is ~1e11 times its usual size and the batched factorization takes other steps
+    than scipy's; gamma - 1 = 1e-6 is the first value the batched path reproduces to the thermal limit."""
+    numpy_backend = backends.get_backend("cpu-vectorized")
+    near = dict(FIXED[0], gamma=1.0 + 2e-6)
+
+    close(numpy_backend.thermal_ablation(pack_lanes([near])).results[0], scalar_thermal(near))
+    with pytest.raises(UnsupportedLane, match="thermal_degenerate_gas"):
+        numpy_backend.thermal_ablation(pack_lanes([dict(FIXED[0], gamma=1.0)]))
