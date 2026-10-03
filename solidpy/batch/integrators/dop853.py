@@ -46,8 +46,11 @@ def rms(xp, x, size=None):
     return xp.sqrt(xp.sum(x * x, axis=-1)) / n**0.5
 
 
-def initial_step(xp, fun, t0, y0, f0, t_bound, max_step, rtol, atol, size=None):
-    """``select_initial_step`` per lane. Returns the initial ``|h|``. ``size``: real state size per lane."""
+def initial_step(xp, fun, t0, y0, f0, t_bound, max_step, rtol, atol, size=None, order=ERROR_ESTIMATOR_ORDER):
+    """``select_initial_step`` per lane. Returns the initial ``|h|``. ``size``: real state size per lane.
+
+    ``order`` is the order of the error estimate of the method that asks (7 for DOP853, 3 for Radau).
+    """
     interval = xp.abs(t_bound - t0)
     scale = atol[:, None] + xp.abs(y0) * rtol[:, None]
     d0 = rms(xp, y0 / scale, size)
@@ -60,7 +63,7 @@ def initial_step(xp, fun, t0, y0, f0, t_bound, max_step, rtol, atol, size=None):
     h1 = xp.where(
         (d1 <= 1e-15) & (d2 <= 1e-15),
         xp.maximum(1e-6, h0 * 1e-3),
-        (0.01 / xp.maximum(d1, d2)) ** (1.0 / (ERROR_ESTIMATOR_ORDER + 1)),
+        (0.01 / xp.maximum(d1, d2)) ** (1.0 / (order + 1)),
     )
     return xp.minimum(xp.minimum(100.0 * h0, h1), xp.minimum(interval, max_step))
 
