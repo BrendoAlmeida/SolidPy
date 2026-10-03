@@ -17,6 +17,7 @@ import importlib
 import json
 import platform
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,12 +40,26 @@ HISTORY_CHANNELS = (
 )
 
 
-_GIT_TTL_S = 30.0
-_git_cache: Dict[str, Any] = {"at": -1e9, "value": None}
+_GIT_TTL_S = 5.0
+_git_cache: Dict[str, Any] = {"stamp": None, "at": -1e9, "value": None}
+_git_lock = threading.Lock()
 
 
 def _source_stamp(paths) -> tuple:
-    return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths)
+    stats = [(p, p.stat()) for p in paths]
+    return tuple((str(p), st.st_mtime_ns, st.st_size) for p, st in stats)
+
+
+def _git_stamp() -> tuple:
+    """Changes when HEAD moves: the modification times of ``.git/HEAD`` and its reflog."""
+    root = Path(_burn_module.__file__).resolve().parent.parent
+    stamp = []
+    for name in (".git/HEAD", ".git/logs/HEAD"):
+        try:
+            stamp.append((name, (root / name).stat().st_mtime_ns))
+        except OSError:
+            stamp.append((name, None))
+    return tuple(stamp)
 
 
 @functools.lru_cache(maxsize=4)
@@ -64,11 +79,16 @@ def kernel_source_hash() -> str:
 
 
 def _git_sha() -> Optional[str]:
-    """The checkout's commit, found the way ``Burn._build_result`` finds it, re-read at most every 30 s."""
-    now = time.monotonic()
-    if now - _git_cache["at"] > _GIT_TTL_S:
-        _git_cache.update(at=now, value=_read_git_sha())
-    return _git_cache["value"]
+    """The checkout's commit, found the way ``Burn._build_result`` finds it.
+
+    It is read again as soon as ``.git/HEAD`` or its reflog changes, and at most every 5 s otherwise (a worktree,
+    where those files are elsewhere, relies on the time-to-live alone).
+    """
+    stamp, now = _git_stamp(), time.monotonic()
+    with _git_lock:
+        if stamp != _git_cache["stamp"] or now - _git_cache["at"] > _GIT_TTL_S:
+            _git_cache.update(stamp=stamp, at=now, value=_read_git_sha())
+        return _git_cache["value"]
 
 
 def _read_git_sha() -> Optional[str]:

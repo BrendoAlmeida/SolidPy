@@ -279,19 +279,27 @@ def test_the_unsupported_lane_helpers_name_lanes_and_features(corpus_cases):
     assert refused_lanes(batch, backends.get_backend("cpu-reference").capabilities()) == {}
 
 
-def test_the_git_sha_and_the_source_hashes_are_not_recomputed_for_every_batch(corpus_cases, monkeypatch):
+def test_the_git_sha_is_read_again_only_when_head_moves(monkeypatch):
     calls = []
-    real = assemble._read_git_sha
-    monkeypatch.setattr(assemble, "_read_git_sha", lambda: calls.append(1) or real())
-    monkeypatch.setitem(assemble._git_cache, "at", -1e9)
+    monkeypatch.setattr(assemble, "_read_git_sha", lambda: calls.append(1) or "sha")
+    monkeypatch.setattr(assemble, "_GIT_TTL_S", 1e9)
+    monkeypatch.setitem(assemble._git_cache, "stamp", None)
+    stamps = iter([("a",), ("a",), ("a",), ("b",)])  # the fourth call sees a new commit
+    monkeypatch.setattr(assemble, "_git_stamp", lambda: next(stamps))
+
+    shas = [assemble._git_sha() for _ in range(4)]
+
+    assert shas == ["sha"] * 4 and len(calls) == 2
+
+
+def test_the_source_hashes_are_not_recomputed_for_every_batch(corpus_cases):
     by_id, _ = corpus_cases
     batch = pack([by_id["tubular-000"]])
-    hashes_before = assemble._kernel_hash.cache_info().hits
+    hits = assemble._kernel_hash.cache_info().hits, assemble._source_bytes.cache_info().hits
 
     solve(batch)
     solve(batch)
     solve(batch)
 
-    assert len(calls) == 1  # within the time-to-live the commit is read once
-    assert assemble._kernel_hash.cache_info().hits >= hashes_before + 2
-    assert assemble._source_bytes.cache_info().hits >= 2
+    assert assemble._kernel_hash.cache_info().hits >= hits[0] + 2
+    assert assemble._source_bytes.cache_info().hits >= hits[1] + 2

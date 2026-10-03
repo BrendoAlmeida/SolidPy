@@ -356,7 +356,7 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
     burned_out = ~xp.any(burn["active"], axis=1) & burn["ok"]
     tail_off = P["tail_off_evaluation"] > 0.5  # per lane: BurnSimulation(tail_off_evaluation=...)
     no_active = xp.zeros_like(P["grain_valid"])
-    never = xp.full(b, xp.inf) * -1.0  # a cutoff of -inf: the pressure event cannot fire
+    never = xp.full(b, -xp.inf)  # a cutoff of -inf: p - cutoff is +inf, so the pressure event cannot fire
 
     # source-only stage: the igniter outlasts the burn, so the gas keeps being fed until it stops
     burn_end = burn["t"]

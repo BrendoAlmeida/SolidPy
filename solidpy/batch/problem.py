@@ -329,7 +329,22 @@ def _padded_tables(profiles):
     return times, values, count
 
 
-def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], features: FrozenSet[str]):
+def _table_parts(propellant, motor, features: FrozenSet[str], cache: Dict[tuple, Any]) -> Dict[str, Any]:
+    """The piecewise tables of a lane, fitted once per propellant and expansion ratio (lanes often share them)."""
+    key = (id(propellant), motor.expansion_ratio, BURN_RATE_TABLE in features, THERMO_TABLE in features)
+    if key not in cache:
+        rate = _piecewise_parts(propellant._burn_rate_interpolator) if BURN_RATE_TABLE in features else None
+        thermo = THERMO_TABLE in features
+        cache[key] = {
+            "rate": rate,
+            "tc": _piecewise_parts(propellant._temperature_func) if thermo else None,
+            "k": _piecewise_parts(propellant._gamma_func) if thermo else None,
+            "mach": _mach_parts(propellant, motor) if thermo else None,
+        }
+    return cache[key]
+
+
+def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], features: FrozenSet[str], parts):
     """Scalar inputs of one lane. Values the batched kernels cannot reproduce are NaN."""
     burn = Burn(
         motor.grains[0], motor, propellant, environment, eta_c=settings["eta_c"], eta_Cf=settings["eta_Cf"],
@@ -359,11 +374,11 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
     activation_mode, activation_value = _source_mode(settings["burn_area_activation"])
     power_law = BURN_RATE_POWER_LAW in features
     rate_table = BURN_RATE_TABLE in features
-    rate_below, rate_above = _piecewise_parts(propellant._burn_rate_interpolator)[2:] if rate_table else (0.0, 0.0)
+    rate_below, rate_above = parts["rate"][2:] if rate_table else (0.0, 0.0)
     thermo = not scalar_thermo
-    tc_below, tc_above = _piecewise_parts(propellant._temperature_func)[2:] if thermo else (0.0, 0.0)
-    k_below, k_above = _piecewise_parts(propellant._gamma_func)[2:] if thermo else (0.0, 0.0)
-    mach_below, mach_above = _mach_parts(propellant, motor)[2:] if thermo else (0.0, 0.0)
+    tc_below, tc_above = parts["tc"][2:] if thermo else (0.0, 0.0)
+    k_below, k_above = parts["k"][2:] if thermo else (0.0, 0.0)
+    mach_below, mach_above = parts["mach"][2:] if thermo else (0.0, 0.0)
     return dict(
         chamber_volume=float(motor.chamber_volume), free_volume=float(motor.free_volume),
         propellant_volume=float(motor.propellant_volume), throat_area=float(motor.nozzle_throat_area),
@@ -438,13 +453,16 @@ class ProblemBatch:
         environment_list = _broadcast(Environment() if environments is None else environments, count, "environments")
         setting_list = _broadcast({} if settings is None else settings, count, "settings")
 
-        resolved, features, rows = [], [], []
+        resolved, features, rows, parts_list = [], [], [], []
+        cache: Dict[tuple, Any] = {}
         for lane in range(count):
             try:
                 lane_settings = _resolve_settings(lane, setting_list[lane])
                 lane_feature_set = required_features(motor_list[lane], propellant_list[lane], lane_settings)
+                parts = _table_parts(propellant_list[lane], motor_list[lane], lane_feature_set, cache)
                 rows.append(_lane_values(motor_list[lane], propellant_list[lane], environment_list[lane],
-                                         lane_settings, lane_feature_set))
+                                         lane_settings, lane_feature_set, parts))
+                parts_list.append(parts)
             except (ValueError, TypeError) as exc:
                 if str(exc).startswith(f"lane {lane}:"):
                     raise
@@ -475,21 +493,14 @@ class ProblemBatch:
         arrays["activation_table_t"], arrays["activation_table_a"], arrays["activation_table_n"] = _padded_tables(
             activation
         )
-        rate_x, rate_c, rate_n = _padded_piecewise(
-            [_piecewise_parts(p._burn_rate_interpolator) if BURN_RATE_TABLE in f else None
-             for p, f in zip(propellant_list, features)]
-        )
+        rate_x, rate_c, rate_n = _padded_piecewise([parts["rate"] for parts in parts_list])
         arrays["rate_table_x"], arrays["rate_table_n"] = rate_x, rate_n
         for index in range(4):
             arrays[f"rate_table_c{index}"] = rate_c[index]
-        tabulated = [THERMO_TABLE in f for f in features]
-        tc_parts = [_piecewise_parts(p._temperature_func) if t else None for p, t in zip(propellant_list, tabulated)]
-        k_parts = [_piecewise_parts(p._gamma_func) if t else None for p, t in zip(propellant_list, tabulated)]
-        thermo_x, tc_c, thermo_n = _padded_piecewise(tc_parts)
-        _, k_c, _ = _padded_piecewise(k_parts)
+        thermo_x, tc_c, thermo_n = _padded_piecewise([parts["tc"] for parts in parts_list])
+        _, k_c, _ = _padded_piecewise([parts["k"] for parts in parts_list])
         arrays["thermo_x"], arrays["thermo_n"] = thermo_x, thermo_n
-        mach_parts = [_mach_parts(p, m) if t else None for p, m, t in zip(propellant_list, motor_list, tabulated)]
-        mach_x, mach_c, mach_n = _padded_piecewise(mach_parts)
+        mach_x, mach_c, mach_n = _padded_piecewise([parts["mach"] for parts in parts_list])
         arrays["mach_x"], arrays["mach_n"] = mach_x, mach_n
         for index in range(4):
             arrays[f"thermo_tc_c{index}"] = tc_c[index]
