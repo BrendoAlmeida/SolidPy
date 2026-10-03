@@ -144,3 +144,121 @@ def test_tabulated_burn_rates_get_a_finite_cost_in_the_range_of_the_power_law_on
     assert np.isfinite(cost).all() and (cost < 1e5).all() and (cost > 0).all()
     lanes.arrays["burn_rate_mode"][0] = 0.0  # a lane with neither a table nor power-law coefficients has no rate
     assert lane_cost(lanes)[0] == np.finfo(float).max
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.5, True])
+def test_a_chunk_size_that_is_not_a_positive_integer_is_an_error(batch, bad):
+    with pytest.raises(ValueError, match="chunk_size must be a positive integer or None"):
+        simulate_burn(batch.select([0]), backend="cpu-vectorized", chunk_size=bad)
+
+
+def test_sorting_is_skipped_when_one_chunk_holds_every_lane(batch, monkeypatch):
+    from solidpy import ensemble
+
+    def refuse(_):
+        raise AssertionError("lane_cost must not run for a single chunk")
+
+    monkeypatch.setattr(ensemble, "lane_cost", refuse)
+
+    result = simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized")
+
+    assert result.execution["chunks"] == 1
+    with pytest.raises(AssertionError, match="must not run"):
+        simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", chunk_size=1)
+
+
+class FakeAccelerator:
+    name = "fake-gpu"
+    api_version = backends.BACKEND_API_VERSION
+
+    def __init__(self, device=None):
+        self.device = device or "cuda:0"
+
+    def capabilities(self):
+        return backends.get_backend("cpu-vectorized").capabilities()
+
+    def devices(self):
+        return ["cuda:0"]
+
+    def solve_burn(self, batch, options):
+        return backends.get_backend("cpu-vectorized").solve_burn(batch, options)
+
+    def provenance(self):
+        return {"backend": self.name}
+
+
+def test_auto_counts_only_the_lanes_the_accelerator_can_run_and_records_what_was_asked(batch, monkeypatch):
+    from solidpy import ensemble
+
+    backends.register_backend("fake-gpu", FakeAccelerator, replace=True)
+    monkeypatch.setattr(ensemble, "AUTO_ACCELERATORS", ("fake-gpu",))
+    monkeypatch.setattr(ensemble, "AUTO_MIN_LANES", 4)
+    try:
+        enough = batch.select([0, 2, 4, 0])
+        too_few = batch.select([0, 1, 3, 4])  # two of the four lanes need the reference
+
+        assert ensemble._auto_backend(enough) == "fake-gpu"
+        assert ensemble._auto_backend(too_few) == "cpu-reference"
+        result = simulate_burn(enough, backend="auto")
+        assert result.execution["requested_backend"] == "auto" and result.execution["effective_backend"] == "fake-gpu"
+        assert {r["provenance"]["execution"]["requested_backend"] for r in result.to_results()} == {"auto"}
+        # an explicit device does not break a choice of the reference
+        assert simulate_burn(batch.select([0]), backend="auto", device="cuda:0").backend == "cpu-reference"
+    finally:
+        backends.unregister_backend("fake-gpu")
+
+
+def test_chunk_size_accepts_numpy_integers(batch):
+    result = simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", chunk_size=np.int64(2))
+
+    assert result.execution["chunks"] == 2
+
+
+def test_auto_returns_the_reference_early_for_a_small_batch_without_loading_any_accelerator(batch, monkeypatch):
+    from solidpy import ensemble
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the accelerator must not be initialised for a small batch")
+
+    monkeypatch.setattr(ensemble.backends, "get_backend", boom)
+
+    assert ensemble._auto_backend(batch) == "cpu-reference"
+    assert ensemble._auto_backend(batch, device="cuda:0") == "cpu-reference"
+
+
+def test_auto_honours_an_explicit_device_and_never_picks_an_accelerator_for_cpu(batch, monkeypatch):
+    from solidpy import ensemble
+
+    class TwoDevices(FakeAccelerator):
+        def devices(self):
+            return ["cuda:0", "cuda:1", "cpu"]
+
+    backends.register_backend("fake-gpu", TwoDevices, replace=True)
+    monkeypatch.setattr(ensemble, "AUTO_ACCELERATORS", ("fake-gpu",))
+    monkeypatch.setattr(ensemble, "AUTO_MIN_LANES", 2)
+    try:
+        lanes = batch.select(SUPPORTED_LANES)
+
+        assert ensemble._auto_backend(lanes) == "fake-gpu"
+        assert ensemble._auto_backend(lanes, "cuda:1") == "fake-gpu"
+        assert ensemble._auto_backend(lanes, "cuda:7") == "cpu-reference"
+        assert ensemble._auto_backend(lanes, "cpu") == "cpu-reference"
+    finally:
+        backends.unregister_backend("fake-gpu")
+
+
+def test_lanes_are_sorted_when_the_backend_splits_them_into_launches_itself(batch, monkeypatch):
+    from solidpy import ensemble
+
+    class Splitting(FakeAccelerator):
+        max_lanes = 2
+
+    seen = []
+    monkeypatch.setattr(ensemble, "lane_cost", lambda b: seen.append(len(b)) or np.arange(len(b))[::-1].astype(float))
+    backends.register_backend("fake-gpu", Splitting, replace=True)
+    try:
+        simulate_burn(batch.select(SUPPORTED_LANES), backend="fake-gpu")
+    finally:
+        backends.unregister_backend("fake-gpu")
+
+    assert seen == [3]  # three lanes against a launch limit of two: the cost estimate was used

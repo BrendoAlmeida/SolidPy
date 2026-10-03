@@ -14,6 +14,7 @@ works exactly as before.
 
 from __future__ import annotations
 
+import numbers
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -61,17 +62,23 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
     return np.where(np.isfinite(cost), cost, np.finfo(float).max)
 
 
-def _auto_backend(batch: ProblemBatch) -> str:
-    """An accelerator when one is usable and enough lanes can run on it to amortise it, else the reference."""
+def _auto_backend(batch: ProblemBatch, device: Optional[str] = None) -> str:
+    """An accelerator when one is usable and enough lanes can run on it to amortise it, else the reference.
+
+    An explicit ``device`` restricts the choice to a backend that lists it, and ``"cpu"`` never selects an accelerator.
+    """
+    if len(batch) < AUTO_MIN_LANES or device in ("cpu", "cpu:0"):
+        return "cpu-reference"
     status = backends.available()
     for name in AUTO_ACCELERATORS:
         if status.get(name) != "ok":
             continue
         try:
             accelerator = backends.get_backend(name)
-            usable = any(not d.startswith("cpu") for d in accelerator.devices())
+            devices = accelerator.devices()
         except ImportError:
             continue
+        usable = (device in devices) if device is not None else any(not d.startswith("cpu") for d in devices)
         if usable and len(batch) - len(refused_lanes(batch, accelerator.capabilities())) >= AUTO_MIN_LANES:
             return name
     return "cpu-reference"
@@ -109,11 +116,14 @@ def simulate_burn(
     """
     if not isinstance(batch, ProblemBatch):
         raise TypeError("simulate_burn needs a ProblemBatch; build one with ProblemBatch.from_objects")
-    if chunk_size is not None and (isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1):
+    if chunk_size is not None and (
+        isinstance(chunk_size, bool) or not isinstance(chunk_size, numbers.Integral) or chunk_size < 1
+    ):
         raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
+    chunk_size = None if chunk_size is None else int(chunk_size)
     requested = backend
     if backend == "auto":
-        backend = _auto_backend(batch)
+        backend = _auto_backend(batch, device)
         if device is not None and backend == "cpu-reference":
             device = None  # "auto" chose the reference, which has no other device
     if backend is None:
@@ -132,8 +142,9 @@ def simulate_burn(
     chunks: List[np.ndarray] = []
     tier_log: List[Any] = []
     if len(supported):
-        # sorting only matters when there are several chunks to fill; one chunk holds every lane whatever the order
-        several = chunk_size is not None and chunk_size < len(supported)
+        # sorting matters when lanes are split into several launches: by chunk_size, or by the backend itself
+        launch_limit = getattr(chosen, "max_lanes", None)
+        several = any(limit is not None and limit < len(supported) for limit in (chunk_size, launch_limit))
         order = supported[np.argsort(lane_cost(batch.select(supported)), kind="stable")] if sort and several else supported
         chunks = _chunks(order, chunk_size)
         for chunk in chunks:
