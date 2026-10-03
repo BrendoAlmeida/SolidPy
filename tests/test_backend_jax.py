@@ -74,6 +74,19 @@ def test_the_pure_helpers_bucket_lanes_and_grains():
     assert [jax_backend._bucket_grains(n) for n in (1, 4, 5, 8, 9, 24, 25, 33)] == [4, 4, 8, 8, 16, 24, 32, 33]
 
 
+def test_a_launch_never_pads_above_its_budget_and_a_full_history_launch_fits_the_memory_budget():
+    assert [jax_backend._floor_lanes(n) for n in (1, 63, 64, 100, 8192, 9000)] == [64, 64, 64, 64, 8192, 8192]
+    backend = backends.get_backend("jax", device="cpu")
+
+    metrics_lanes = backend._lanes_per_launch(8, False, 100000)
+    full_lanes = backend._lanes_per_launch(8, True, 5000)
+
+    assert metrics_lanes == jax_backend._floor_lanes(backend.max_lanes)
+    assert full_lanes & (full_lanes - 1) == 0 and full_lanes >= jax_backend.MIN_LANE_BUCKET
+    padded_bytes = jax_backend._bucket_lanes(full_lanes) * 2 * 5001 * 17 * 8
+    assert padded_bytes <= jax_backend.HISTORY_BUDGET_BYTES or full_lanes == jax_backend.MIN_LANE_BUCKET
+
+
 def test_the_backend_is_listed_described_and_selects_devices():
     assert backends.available()["jax"] == "ok"
 

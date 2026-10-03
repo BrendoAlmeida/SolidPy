@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
-from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions, UnsupportedLane
+from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions, refused_lanes, unsupported_lane_error
 
 #: Accepted points per lane when ``SolveOptions.max_steps`` is not given. The history buffer of ``"full"``
 #: reserves them for every lane, so that policy defaults to far fewer.
@@ -53,15 +53,13 @@ class NumpyBackend:
         options = SolveOptions() if options is None else options
         if not isinstance(options, SolveOptions):
             raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
-        problems = {lane: missing for lane, missing in enumerate(batch.unsupported(self.capabilities())) if missing}
-        if problems:
-            raise UnsupportedLane(
-                "the cpu-vectorized backend cannot run lane(s) "
-                + "; ".join(f"{lane}: {', '.join(missing)}" for lane, missing in problems.items())
-            )
+        refused = refused_lanes(batch, self.capabilities())
+        if refused:
+            raise unsupported_lane_error(self.name, refused)
         full = options.history == "full"
         config = solver.SolveConfig(keep_history=full, max_steps=options.max_steps or DEFAULT_MAX_STEPS[options.history])
-        tiers = DEFAULT_TIERS if options.tiers is None else options.tiers
+        # a full history is for inspection, not throughput: capped tiers would allocate and discard its buffers
+        tiers = options.tiers if options.tiers is not None else (() if full else DEFAULT_TIERS)
 
         def run(sub, cap):
             return solver.solve_burn_and_blowdown(solver.numpy_driver(), sub.namespace(np), sub.initial_state(), config, cap)
@@ -69,9 +67,10 @@ class NumpyBackend:
         start = time.perf_counter()
         out, info = solve_in_tiers(batch, run, tiers)
         solved = time.perf_counter()
-        results = assemble(batch, out, options.history, self.provenance())
+        provenance = self.provenance()
+        results = assemble(batch, out, options.history, provenance)
         self.last_timings = {"solve_s": solved - start, "assemble_s": time.perf_counter() - solved}
-        return BatchResult(results, self.name, {**self.provenance(), "tiers": info})
+        return BatchResult(results, self.name, {**provenance, "tiers": info})
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

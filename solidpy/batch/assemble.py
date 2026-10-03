@@ -11,11 +11,13 @@ result with a reference one. The hash of the kernel and integrator sources is in
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib
 import json
 import platform
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,18 +39,39 @@ HISTORY_CHANNELS = (
 )
 
 
-def kernel_source_hash() -> str:
-    """SHA-256 of the kernel and integrator sources that produce a batched result."""
-    root = Path(__file__).parent
+_GIT_TTL_S = 30.0
+_git_cache: Dict[str, Any] = {"at": -1e9, "value": None}
+
+
+def _source_stamp(paths) -> tuple:
+    return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths)
+
+
+@functools.lru_cache(maxsize=4)
+def _kernel_hash(stamp: tuple) -> str:
     digest = hashlib.sha256()
-    for path in sorted(list((root / "kernels").glob("*.py")) + list((root / "integrators").glob("*.py"))):
+    for name, _, _ in stamp:
+        path = Path(name)
         digest.update(path.name.encode())
         digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
     return digest.hexdigest()
 
 
+def kernel_source_hash() -> str:
+    """SHA-256 of the kernel and integrator sources that produce a batched result (cached until a file changes)."""
+    root = Path(__file__).parent
+    return _kernel_hash(_source_stamp(sorted(list((root / "kernels").glob("*.py")) + list((root / "integrators").glob("*.py")))))
+
+
 def _git_sha() -> Optional[str]:
-    """The checkout's commit, found the way ``Burn._build_result`` finds it (once per batch, not per lane)."""
+    """The checkout's commit, found the way ``Burn._build_result`` finds it, re-read at most every 30 s."""
+    now = time.monotonic()
+    if now - _git_cache["at"] > _GIT_TTL_S:
+        _git_cache.update(at=now, value=_read_git_sha())
+    return _git_cache["value"]
+
+
+def _read_git_sha() -> Optional[str]:
     try:
         checkout_root = Path(_burn_module.__file__).resolve().parent.parent
         top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=Path(_burn_module.__file__).parent,
@@ -117,9 +140,15 @@ def resolved_inputs(motor, propellant, environment, settings, row) -> Dict[str, 
     return resolved
 
 
+@functools.lru_cache(maxsize=4)
+def _source_bytes(stamp: tuple) -> bytes:
+    return b"".join(Path(name).read_bytes() for name, _, _ in stamp)
+
+
 def _scalar_source_bytes() -> bytes:
-    """The bytes of the three reference files, in hash order (read once per batch, not once per lane)."""
-    return b"".join((Path(_burn_module.__file__).parent / name).read_bytes() for name in SCALAR_SOURCES)
+    """The bytes of the three reference files, in hash order (read again only when one of them changes)."""
+    root = Path(_burn_module.__file__).parent
+    return _source_bytes(_source_stamp([root / name for name in SCALAR_SOURCES]))
 
 
 def _physics_hash(resolved: Dict[str, Any], sources: bytes) -> str:

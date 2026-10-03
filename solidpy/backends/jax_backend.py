@@ -19,7 +19,9 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ._protocol import BACKEND_API_VERSION, SUPPORTED, BackendUnavailable, Capabilities, SolveOptions, UnsupportedLane
+from ._protocol import (
+    BACKEND_API_VERSION, SUPPORTED, BackendUnavailable, Capabilities, SolveOptions, refused_lanes, unsupported_lane_error,
+)
 from .numpy_vectorized import DEFAULT_MAX_STEPS, NumpyBackend
 
 INSTALL_HINT = 'pip install "solidpy[jax-cuda12]"   (or "solidpy[jax]" for CPU only)'
@@ -33,6 +35,11 @@ DEFAULT_MAX_LANES = 8192
 
 def _bucket_lanes(count: int) -> int:
     return max(MIN_LANE_BUCKET, 1 << (count - 1).bit_length())
+
+
+def _floor_lanes(count: int) -> int:
+    """The largest lane bucket not above ``count`` (a launch is padded up to a bucket, so it must not start above)."""
+    return max(MIN_LANE_BUCKET, 1 << (max(int(count), 1).bit_length() - 1))
 
 
 def _bucket_grains(count: int) -> int:
@@ -82,6 +89,7 @@ class JaxBackend:
         #: Seconds of the last ``solve_burn``: ``device_s`` (padding, transfer, compute, copy back) and
         #: ``assemble_s`` (result mappings on the host). The first call of a shape includes compilation.
         self.last_timings: Dict[str, float] = {}
+        self._device_s = 0.0
 
     # -- devices ---------------------------------------------------------------------------------------------
     @staticmethod
@@ -127,10 +135,15 @@ class JaxBackend:
 
     # -- solving ---------------------------------------------------------------------------------------------
     def _lanes_per_launch(self, grains: int, full: bool, max_steps: int) -> int:
+        """Lanes per launch, a power of two so that padding to the bucket never exceeds the budget.
+
+        The stored history takes ``(max_steps + 1) x (grains + 9)`` doubles per lane (the times and the state),
+        twice over because the loop carry is held in and out.
+        """
         if not full:
-            return self.max_lanes
-        per_lane = (max_steps + 1) * (grains + 8) * 8
-        return max(1, min(self.max_lanes, HISTORY_BUDGET_BYTES // per_lane))
+            return _floor_lanes(self.max_lanes)
+        per_lane = 2 * (max_steps + 1) * (grains + 9) * 8
+        return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))
 
     def _run(self, sub, full: bool, max_steps: int, cap: Optional[int]):
         """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
@@ -161,14 +174,13 @@ class JaxBackend:
         options = SolveOptions() if options is None else options
         if not isinstance(options, SolveOptions):
             raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
-        problems = {lane: missing for lane, missing in enumerate(batch.unsupported(self.capabilities())) if missing}
-        if problems:
-            raise UnsupportedLane(
-                "the jax backend cannot run lane(s) " + "; ".join(f"{lane}: {', '.join(m)}" for lane, m in problems.items())
-            )
+        refused = refused_lanes(batch, self.capabilities())
+        if refused:
+            raise unsupported_lane_error(self.name, refused)
         full = options.history == "full"
         max_steps = options.max_steps or DEFAULT_MAX_STEPS[options.history]
-        tiers = DEFAULT_TIERS if options.tiers is None else options.tiers
+        # a full history is for inspection, not throughput: capped tiers would allocate and discard its buffers
+        tiers = options.tiers if options.tiers is not None else (() if full else DEFAULT_TIERS)
         grains = _bucket_grains(batch.g_max)
         per_launch = self._lanes_per_launch(grains, full, max_steps)
         provenance = self.provenance()

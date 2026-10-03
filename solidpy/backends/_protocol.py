@@ -55,6 +55,18 @@ class Capabilities:
         return [name for name in features if not self.supports(name)]
 
 
+def refused_lanes(batch, capabilities) -> Dict[int, List[str]]:
+    """``{lane: [features the backend does not fully support]}`` for the lanes it cannot run."""
+    return {lane: missing for lane, missing in enumerate(batch.unsupported(capabilities)) if missing}
+
+
+def unsupported_lane_error(backend: str, refused: Mapping[int, List[str]]) -> UnsupportedLane:
+    return UnsupportedLane(
+        f"backend {backend!r} cannot run lane(s) "
+        + "; ".join(f"{lane}: {', '.join(features)}" for lane, features in refused.items())
+    )
+
+
 @dataclass(frozen=True)
 class SolveOptions:
     """Options of ``Backend.solve_burn`` that are not part of the problem itself.

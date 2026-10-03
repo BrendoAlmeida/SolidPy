@@ -260,3 +260,34 @@ def test_solve_options_validate_max_steps_and_the_backend_the_device():
             SolveOptions(max_steps=bad)
     with pytest.raises(ValueError, match="only runs on 'cpu'"):
         backends.get_backend("cpu-vectorized", device="cuda:0")
+
+
+def test_the_unsupported_lane_helpers_name_lanes_and_features(corpus_cases):
+    from solidpy.backends._protocol import refused_lanes, unsupported_lane_error
+
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["ratetable-000"]])
+
+    refused = refused_lanes(batch, backends.get_backend("cpu-vectorized").capabilities())
+
+    assert refused == {1: ["igniter_callable"], 2: ["burn_rate_table"]}
+    assert "backend 'x' cannot run lane(s) 1: igniter_callable; 2: burn_rate_table" in str(unsupported_lane_error("x", refused))
+    assert refused_lanes(batch, backends.get_backend("cpu-reference").capabilities()) == {}
+
+
+def test_the_git_sha_and_the_source_hashes_are_not_recomputed_for_every_batch(corpus_cases, monkeypatch):
+    calls = []
+    real = assemble._read_git_sha
+    monkeypatch.setattr(assemble, "_read_git_sha", lambda: calls.append(1) or real())
+    monkeypatch.setitem(assemble._git_cache, "at", -1e9)
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"]])
+    hashes_before = assemble._kernel_hash.cache_info().hits
+
+    solve(batch)
+    solve(batch)
+    solve(batch)
+
+    assert len(calls) == 1  # within the time-to-live the commit is read once
+    assert assemble._kernel_hash.cache_info().hits >= hashes_before + 2
+    assert assemble._source_bytes.cache_info().hits >= 2
