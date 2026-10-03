@@ -170,11 +170,30 @@ def test_tiers_give_the_same_results_as_one_uncapped_launch_and_are_reported(sub
             assert t_b == pytest.approx(t_a, rel=tol.TIME_RTOL)
 
 
+def test_jax_runs_source_lanes_the_source_only_stage_and_the_blowdown_quirk_like_the_reference():
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+    cases = []
+    for family in ("igniter-scalar", "igniter-table", "igniter-after", "activation-scalar", "activation-table",
+                   "ramp", "combo-table", "quirk"):
+        members = [c for c in corpus if c["family"] == family]
+        cases.append(min(members, key=lambda c: reference[c["id"]]["history_points"]))
+
+    results = backends.get_backend("jax", device="cpu").solve_burn(pack(cases)).to_results()
+
+    assert compare_with_the_reference(cases, reference, results) == []
+    quirk = results[-1]
+    assert quirk["status"]["termination_reason"] == "blowdown_timeout"
+    for case, got in zip(cases, results):
+        stored = reference[case["id"]]["metrics"]["igniter_mass_injected_kg"]
+        assert got["metrics"]["igniter_mass_injected_kg"] == pytest.approx(stored, rel=tol.INTEGRAL_RTOL, abs=1e-12)
+
+
 def test_unsupported_lanes_are_refused_by_name():
     by_id = {c["id"]: c for c in gc.load_corpus()["cases"]}
-    batch = pack([by_id["tubular-000"], by_id["igniter-scalar-000"]])
+    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"]])
 
-    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_scalar"):
+    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_callable"):
         backends.get_backend("jax", device="cpu").solve_burn(batch)
 
 

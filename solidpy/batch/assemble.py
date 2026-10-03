@@ -156,7 +156,7 @@ def _history(batch, out, lane) -> Dict[str, Any]:
     # one lane, one time axis: lane arrays [1, 1], grain arrays [1, 1, G]
     view = {name: array[lane : lane + 1, None] for name, array in batch.namespace(np).items()}
     y = out["hy"][lane, :count][None]
-    q = rhs.state_quantities(np, y, None, view, detail=True)
+    q = rhs.state_quantities(np, y, None, view, detail=True, time=out["ht"][lane, :count][None])
     q = {key: value[0] for key, value in q.items()}
     offset = 2 + G
     grains = slice(0, n_grains)
@@ -170,7 +170,7 @@ def _history(batch, out, lane) -> Dict[str, Any]:
         "burn_area_grains_m2": q["areas"][:, grains],
         "mdot_generated_kg_s": q["generated"],
         "mdot_generated_grains_kg_s": q["generated_grains"][:, grains],
-        "mdot_igniter_kg_s": np.zeros(count),
+        "mdot_igniter_kg_s": q["igniter"],
         "mdot_nozzle_kg_s": q["nozzle"],
         "gas_mass_kg": y[0, :, 0],
         "gas_temperature_k": q["temperature"],

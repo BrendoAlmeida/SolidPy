@@ -244,13 +244,14 @@ def test_a_lane_that_runs_out_of_points_is_a_solver_failure_flagged_in_the_prove
 
 def test_lanes_the_kernels_cannot_run_are_refused_by_name(corpus_cases):
     by_id, _ = corpus_cases
-    batch = pack([by_id["tubular-000"], by_id["igniter-scalar-000"], by_id["ratetable-000"]])
+    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["ratetable-000"]])
 
-    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: .*igniter_scalar; 2: .*burn_rate_table"):
+    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: .*igniter_callable; 2: .*burn_rate_table"):
         backends.get_backend("cpu-vectorized").solve_burn(batch)
     description = backends.describe("cpu-vectorized")
     assert description["devices"] == ["cpu"] and set(description["history_policies"]) == {"metrics", "full"}
-    assert "igniter_scalar" not in description["capabilities"]  # not advertised until the kernels reproduce it
+    assert "igniter_callable" not in description["capabilities"]  # Python callables stay on the reference
+    assert description["capabilities"]["igniter_table"] == "supported"
 
 
 def test_solve_options_validate_max_steps_and_the_backend_the_device():

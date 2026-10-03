@@ -7,9 +7,16 @@ state per lane); finished lanes are masked. The structure follows ``BurnSimulati
 1. Burn stage: a terminal event per active grain (regression crossing its burnout depth, direction +1). The
    event time is located on the dense output, the step is cut there, grains within ``64 eps`` of their burnout
    depth are snapped to it and deactivated, and the lane restarts with a fresh initial step, as the scalar
-   code calls ``solve_ivp`` again. The stage ends when every grain is burned out or at ``burn_timeout_s``.
-2. Blowdown stage: a terminal event when the chamber pressure falls through
-   ``ambient + 0.01 * max(burn-stage peak - ambient, 0)`` (direction -1), or ``tail_off_timeout_s``.
+   code calls ``solve_ivp`` again. The stage is cut into segments at the source breakpoints (igniter and
+   activation table knots, the end of the igniter, the end of the ignition ramp), each a new call with a fresh
+   initial step, and ends when every grain is burned out or at ``burn_timeout_s``.
+2. Source-only stage: when the igniter outlasts the burn, the segments up to its end (or the blowdown
+   timeout), with no events. Its points count towards the pressure peak the cutoff is built from.
+3. Blowdown stage: a terminal event when the chamber pressure falls through
+   ``ambient + 0.01 * max(peak - ambient, 0)`` (direction -1), or ``burn end + tail_off_timeout_s``. Only the
+   first segment is integrated: ``BurnSimulation._integrate_stage`` stops its breakpoint loop there when no
+   grain is active, so a source breakpoint between burnout and cutoff ends the blowdown early. This is
+   reproduced because the scalar code is the oracle.
 
 The functions are pure over the array namespace ``xp``. What differs between NumPy and a compiled driver (the
 loop, the conditional and scatter into the history buffers) comes from a ``Driver``.
@@ -74,8 +81,20 @@ class SolveConfig:
     max_steps: int = 100000  # accepted points per lane across both stages; a lane past it is failed
 
 
-def _fun(xp, P, active):
-    return lambda t, y: rhs.conservative_rhs(xp, y, active, P)
+def _next_boundary(xp, P, t, stop):
+    """The end of the segment that starts at ``t``: the next source breakpoint, or the stage stop."""
+    candidate = xp.min(xp.where(P["breakpoints"] > t[:, None], P["breakpoints"], xp.inf), axis=1)
+    return xp.minimum(candidate, stop)
+
+
+def _fun(xp, P, active, t_seg):
+    """The right-hand side of a segment: sources are evaluated just below the segment end at the end."""
+
+    def fun(t, y):
+        source_time = xp.where(t >= t_seg, xp.nextafter(t_seg, -xp.inf), t)
+        return rhs.conservative_rhs(xp, y, active, P, time=source_time)
+
+    return fun
 
 
 def _track_flow(xp, c, name, flow, t_point, write):
@@ -101,7 +120,7 @@ def _record(driver, c, P, cfg, write, t_point, y_point):
     xp = driver.xp
     full = write & (c["hn"] >= cfg.max_steps)
     write = write & ~full
-    q = rhs.state_quantities(xp, y_point, None, P)
+    q = rhs.state_quantities(xp, y_point, None, P, time=t_point)
     out = dict(c)
     out["pmax"] = xp.where(write, xp.maximum(c["pmax"], q["pressure"]), c["pmax"])
     out["tmax"] = xp.where(write, xp.maximum(c["tmax"], q["thrust"]), c["tmax"])
@@ -126,7 +145,7 @@ def initial_carry(driver, P, y0, cfg):
     g = P["grain_valid"].shape[-1]
     zeros = xp.zeros(b)
     flag = xp.zeros(b, dtype=bool)
-    q0 = rhs.state_quantities(xp, y0, None, P)
+    q0 = rhs.state_quantities(xp, y0, None, P, time=xp.zeros(b))
     hist = cfg.max_steps + 1 if cfg.keep_history else 1
     ht = xp.zeros((b, hist))
     hy = xp.zeros((b, hist, n))
@@ -134,7 +153,8 @@ def initial_carry(driver, P, y0, cfg):
         hy = driver.store(hy, xp.arange(b), xp.zeros(b, dtype=int), y0)
     carry = dict(
         t=zeros, y=y0, f=xp.zeros_like(y0), h_abs=zeros, rejected=flag, need_init=~flag, t_start=zeros,
-        t_bound=P["burn_timeout_s"], active=P["grain_valid"], burn_t=xp.full((b, g), xp.nan),
+        t_seg=_next_boundary(xp, P, zeros, P["burn_timeout_s"]), t_stop=P["burn_timeout_s"],
+        active=P["grain_valid"], burn_t=xp.full((b, g), xp.nan),
         g_prev=xp.zeros((b, g)), done=flag, ok=~flag, overflow=flag, hn=xp.ones(b, dtype=int),
         prev_time=zeros, pmax=q0["pressure"], tmax=q0["thrust"], gmax=q0["generated"], nmax=q0["nozzle"],
         ht=ht, hy=hy, iterations=xp.zeros((), dtype=int),
@@ -151,10 +171,10 @@ def _init_block(driver, c, P, active, mode, cutoff=None):
     """Initial step and event baseline for lanes that start, or restart, an integration call."""
     xp = driver.xp
     size = P["n_valid_grains"] + 7
-    fun = _fun(xp, P, active)
+    fun = _fun(xp, P, active, c["t_seg"])
     m = c["need_init"] & ~c["done"]
     f0 = fun(c["t"], c["y"])
-    h0 = dop853.initial_step(xp, fun, c["t"], c["y"], f0, c["t_bound"], P["max_step_size"], P["rtol"], P["atol"], size)
+    h0 = dop853.initial_step(xp, fun, c["t"], c["y"], f0, c["t_seg"], P["max_step_size"], P["rtol"], P["atol"], size)
     if mode == "burn":
         g = c["y"][:, 2 : 2 + P["grain_valid"].shape[-1]] - P["burnout_depth"]
         mask_g = m[:, None]
@@ -193,10 +213,10 @@ def burn_body(driver, c, P, cfg):
     c = driver.branch(
         xp.any(c["need_init"] & ~c["done"]), lambda cc: _init_block(driver, cc, P, active, "burn"), lambda cc: cc, c
     )
-    fun = _fun(xp, P, active)
+    fun = _fun(xp, P, active, c["t_seg"])
     run = ~c["done"] & ~c["need_init"]
     a = dop853.attempt(
-        xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_bound"], P["max_step_size"], P["rtol"],
+        xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_seg"], P["max_step_size"], P["rtol"],
         P["atol"], run, size,
     )
     depth = P["burnout_depth"]
@@ -232,7 +252,9 @@ def burn_body(driver, c, P, cfg):
     y_point = xp.where(event_lane[:, None], y_event, a["y_new"])
     out = _record(driver, c, P, cfg, accept, t_point, y_point)
 
-    reached_bound = plain & (a["t_new"] >= c["t_bound"])
+    at_segment_end = plain & (a["t_new"] >= c["t_seg"])
+    reached_bound = at_segment_end & (c["t_seg"] >= c["t_stop"])
+    next_segment = at_segment_end & ~reached_bound
     finished = event_lane & ~any_left
     fail = a["too_small"] | no_progress | (accept & out["overflow"])
     out["t"] = xp.where(accept, t_point, c["t"])
@@ -240,7 +262,8 @@ def burn_body(driver, c, P, cfg):
     out["f"] = xp.where(plain[:, None], a["f_new"], c["f"])
     out["h_abs"] = xp.where(accept | run, a["h_next"], c["h_abs"])
     out["rejected"] = xp.where(event_lane, False, a["rejected_next"])
-    out["need_init"] = c["need_init"] | (event_lane & any_left & ~fail)
+    out["need_init"] = c["need_init"] | (event_lane & any_left & ~fail) | (next_segment & ~fail)
+    out["t_seg"] = xp.where(next_segment, _next_boundary(xp, P, t_point, c["t_stop"]), c["t_seg"])
     out["active"] = active_next
     out["burn_t"] = xp.where(snap, t_event[:, None], c["burn_t"])
     out["g_prev"] = xp.where(plain[:, None], g_new, c["g_prev"])
@@ -250,7 +273,12 @@ def burn_body(driver, c, P, cfg):
     return out
 
 
-def tail_body(driver, c, P, cfg, cutoff):
+def stage_body(driver, c, P, cfg, cutoff, first_segment_only):
+    """The source-only and blowdown stages: no active grain, an optional pressure event, segments to ``t_stop``.
+
+    ``cutoff`` is the pressure the blowdown event waits for (``-inf``: no event). With ``first_segment_only``
+    the stage ends at the end of its first segment, as the scalar blowdown does.
+    """
     xp = driver.xp
     size = P["n_valid_grains"] + 7
     active = xp.zeros_like(P["grain_valid"])
@@ -260,10 +288,10 @@ def tail_body(driver, c, P, cfg, cutoff):
         lambda cc: cc,
         c,
     )
-    fun = _fun(xp, P, active)
+    fun = _fun(xp, P, active, c["t_seg"])
     run = ~c["done"] & ~c["need_init"]
     a = dop853.attempt(
-        xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_bound"], P["max_step_size"], P["rtol"],
+        xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_seg"], P["max_step_size"], P["rtol"],
         P["atol"], run, size,
     )
     accept = a["accept"]
@@ -287,16 +315,21 @@ def tail_body(driver, c, P, cfg, cutoff):
     out = _record(driver, c, P, cfg, accept, t_point, y_point)
 
     plain = accept & ~trigger
-    reached_bound = plain & (a["t_new"] >= c["t_bound"])
+    at_segment_end = plain & (a["t_new"] >= c["t_seg"])
+    at_stop = at_segment_end & (c["t_seg"] >= c["t_stop"])
+    next_segment = at_segment_end & ~at_stop & (not first_segment_only)
+    stage_done = at_segment_end if first_segment_only else at_stop
     fail = a["too_small"] | (accept & out["overflow"])
     out["t"] = xp.where(accept, t_point, c["t"])
     out["y"] = xp.where(accept[:, None], y_point, c["y"])
     out["f"] = xp.where(plain[:, None], a["f_new"], c["f"])
     out["h_abs"] = xp.where(accept | run, a["h_next"], c["h_abs"])
     out["rejected"] = a["rejected_next"]
+    out["need_init"] = c["need_init"] | (next_segment & ~fail)
+    out["t_seg"] = xp.where(next_segment, _next_boundary(xp, P, t_point, c["t_stop"]), c["t_seg"])
     out["g_prev"] = xp.where(plain, g_new, c["g_prev"])
     out["reached_cutoff"] = c["reached_cutoff"] | trigger
-    out["done"] = c["done"] | trigger | reached_bound | fail
+    out["done"] = c["done"] | trigger | stage_done | fail
     out["ok"] = c["ok"] & ~fail
     out["iterations"] = c["iterations"] + 1
     return out
@@ -321,23 +354,44 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
         lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap), lambda c: burn_body(driver, c, P, cfg), carry
     )
     burned_out = ~xp.any(burn["active"], axis=1) & burn["ok"]
-
-    # blowdown cutoff from the burn-stage pressure peak (burn points only, as in the scalar code)
-    pa = P["ambient_pressure"]
-    peak_burn = burn["pmax"]
-    cutoff = pa + 0.01 * xp.maximum(peak_burn - pa, 0.0)
-    p_start = rhs.pressure_of(xp, burn["y"], P)
-    immediate = burned_out & (p_start <= cutoff)
     tail_off = P["tail_off_evaluation"] > 0.5  # per lane: BurnSimulation(tail_off_evaluation=...)
-    run_tail = burned_out & ~immediate & tail_off
-    tail = dict(burn)
+    no_active = xp.zeros_like(P["grain_valid"])
+    never = xp.full(b, xp.inf) * -1.0  # a cutoff of -inf: the pressure event cannot fire
+
+    # source-only stage: the igniter outlasts the burn, so the gas keeps being fed until it stops
+    burn_end = burn["t"]
+    stop_blowdown = burn_end + P["tail_off_timeout_s"]
+    source_stop = xp.minimum(P["source_end_time"], stop_blowdown)
+    run_sources = burned_out & tail_off & (P["source_end_time"] > burn_end)
+    stage = dict(burn)
+    stage.update(
+        t_stop=source_stop, t_seg=_next_boundary(xp, P, burn_end, source_stop), need_init=run_sources,
+        done=~run_sources, rejected=xp.zeros(b, dtype=bool), reached_cutoff=xp.zeros(b, dtype=bool), active=no_active,
+        g_prev=xp.zeros(b), iterations=xp.zeros((), dtype=int),
+    )
+    sources = driver.loop(
+        lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap),
+        lambda c: stage_body(driver, c, P, cfg, never, False), stage,
+    )
+
+    # blowdown cutoff from the pressure peak of the burn stage and the source-only stage (not the blowdown itself)
+    pa = P["ambient_pressure"]
+    peak_burn = sources["pmax"]
+    cutoff = pa + 0.01 * xp.maximum(peak_burn - pa, 0.0)
+    p_start = rhs.pressure_of(xp, sources["y"], P)
+    alive = burned_out & tail_off & sources["ok"]
+    past_stop = sources["t"] >= stop_blowdown
+    immediate = alive & ~past_stop & (p_start <= cutoff)
+    run_tail = alive & ~past_stop & ~immediate
+    tail = dict(sources)
     tail.update(
-        t_bound=burn["t"] + P["tail_off_timeout_s"], need_init=run_tail, done=~run_tail, rejected=xp.zeros(b, dtype=bool),
-        reached_cutoff=immediate & tail_off, active=xp.zeros_like(P["grain_valid"]), g_prev=xp.zeros(b),
+        t_stop=stop_blowdown, t_seg=_next_boundary(xp, P, sources["t"], stop_blowdown), need_init=run_tail,
+        done=~run_tail, rejected=xp.zeros(b, dtype=bool), reached_cutoff=immediate, g_prev=xp.zeros(b),
         iterations=xp.zeros((), dtype=int),
     )
     tail = driver.loop(
-        lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap), lambda c: tail_body(driver, c, P, cfg, cutoff), tail
+        lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap),
+        lambda c: stage_body(driver, c, P, cfg, cutoff, True), tail,
     )
     return {
         "t": tail["t"], "y": tail["y"], "y0": y0, "n_points": tail["hn"], "ht": tail["ht"], "hy": tail["hy"],
@@ -346,5 +400,6 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
         "noz_end": tail["noz_end"], "burn_t": burn["burn_t"], "burn_ok": burn["ok"], "burned_out": burned_out,
         "tail_ok": tail["ok"], "reached_cutoff": tail["reached_cutoff"], "cutoff": cutoff, "peak_burn": peak_burn,
         "overflow": tail["overflow"], "burn_end": burn["t"], "burn_iterations": burn["iterations"],
-        "tail_iterations": tail["iterations"], "unfinished": ~burn["done"] | ~tail["done"],
+        "tail_iterations": tail["iterations"], "source_iterations": sources["iterations"],
+        "unfinished": ~burn["done"] | ~sources["done"] | ~tail["done"],
     }

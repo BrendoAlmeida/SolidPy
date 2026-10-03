@@ -6,7 +6,7 @@ from solidpy import backends
 from solidpy.backends import UnsupportedLane
 from solidpy.ensemble import ProblemBatch, lane_cost, simulate_burn
 
-IDS = ("tubular-000", "igniter-scalar-000", "star-001", "ratetable-000", "tubular-002")
+IDS = ("tubular-000", "igniter-callable-000", "star-001", "ratetable-000", "tubular-002")
 SUPPORTED_LANES = [0, 2, 4]
 FALLBACK_LANES = [1, 3]
 
@@ -49,7 +49,7 @@ def test_a_backend_that_cannot_run_every_lane_falls_back_and_says_so(batch, scal
         execution = results[lane]["provenance"]["execution"]
         assert execution["backend"] == "cpu-vectorized" and execution["fallback"] is None
         assert execution["requested_backend"] == "cpu-vectorized"
-    for lane, reason in zip(FALLBACK_LANES, ("igniter_scalar", "burn_rate_table")):
+    for lane, reason in zip(FALLBACK_LANES, ("igniter_callable", "burn_rate_table")):
         execution = results[lane]["provenance"]["execution"]
         assert execution["backend"] == "cpu-reference" and execution["requested_backend"] == "cpu-vectorized"
         assert execution["fallback"] == {"lane_reason": [reason], "ran_on": "cpu-reference"}
@@ -59,7 +59,7 @@ def test_a_backend_that_cannot_run_every_lane_falls_back_and_says_so(batch, scal
 
 
 def test_strict_mode_refuses_instead_of_falling_back(batch):
-    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_scalar; 3: burn_rate_table"):
+    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_callable; 3: burn_rate_table"):
         simulate_burn(batch, backend="cpu-vectorized", strict=True)
     simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", strict=True)  # all supported: fine
 
