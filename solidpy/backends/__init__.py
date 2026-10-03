@@ -209,7 +209,7 @@ def get_backend(name: Optional[str] = None, device: Optional[str] = None) -> Bac
 
 
 def describe(name: str, device: Optional[str] = None) -> Dict[str, Any]:
-    """Describe a backend: version, devices, capability matrix and provenance fragment.
+    """Describe a backend: version, devices, capability matrix, optional services and provenance fragment.
 
     This instantiates the backend, so for accelerator backends it imports the library.
     """
@@ -222,6 +222,7 @@ def describe(name: str, device: Optional[str] = None) -> Dict[str, Any]:
         "capabilities": dict(capabilities.features),
         "dtypes": list(capabilities.dtypes),
         "history_policies": list(capabilities.history_policies),
+        "services": list(capabilities.services),
         "provenance": backend.provenance(),
     }
 

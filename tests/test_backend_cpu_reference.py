@@ -5,6 +5,7 @@ import golden_corpus as gc
 from solidpy import BurnSimulation, backends
 from solidpy.backends import SolveOptions
 from solidpy.batch import FEATURES, ProblemBatch
+from solidpy.batch.thermal import THERMAL_FEATURES
 
 CASE_IDS = ("tubular-000", "star-001", "ends-star-000")
 
@@ -43,7 +44,8 @@ def test_the_reference_backend_is_registered_and_is_the_default():
     description = backends.describe("cpu-reference")
 
     assert description["devices"] == ["cpu"]
-    assert set(description["capabilities"]) == set(FEATURES)
+    assert set(description["capabilities"]) == set(FEATURES) | set(THERMAL_FEATURES)  # burn and thermal lanes
+    assert description["services"] == ["thermal_ablation"]
     assert set(description["capabilities"].values()) == {"supported"}
     assert description["provenance"]["backend"] == "cpu-reference"
     assert description["provenance"]["dtype"] == "float64"
