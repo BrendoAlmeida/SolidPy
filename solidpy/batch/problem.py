@@ -53,16 +53,19 @@ TAIL_OFF_OMITTED = "tail_off_omitted"
 INSTANCE_OVERRIDE = "instance_override"
 CUSTOM_CLASS = "custom_class"
 UNKNOWN_GEOMETRY = "unknown_geometry"
+INVALID_BURN_RATE = "invalid_burn_rate"
 
 FEATURES = (
     TUBULAR_GRAIN, STAR_GRAIN, ENDS_BURN, BURN_RATE_POWER_LAW, BURN_RATE_TABLE, EROSIVE_BURNING,
     THERMO_SCALAR, THERMO_TABLE, IGNITER_SCALAR, IGNITER_TABLE, IGNITER_CALLABLE, ACTIVATION_SCALAR,
     ACTIVATION_TABLE, ACTIVATION_CALLABLE, IGNITION_RAMP, TAIL_OFF_NUMERICAL, TAIL_OFF_ANALYTICAL,
-    TAIL_OFF_OMITTED, INSTANCE_OVERRIDE, CUSTOM_CLASS, UNKNOWN_GEOMETRY,
+    TAIL_OFF_OMITTED, INSTANCE_OVERRIDE, CUSTOM_CLASS, UNKNOWN_GEOMETRY, INVALID_BURN_RATE,
 )
 
-#: Features no batched backend will ever run: the reference solver handles those lanes.
-REFERENCE_ONLY = frozenset({INSTANCE_OVERRIDE, CUSTOM_CLASS, UNKNOWN_GEOMETRY})
+#: Features no batched backend will ever run: the reference solver handles those lanes. ``INVALID_BURN_RATE`` marks a
+#: lane whose burn rate can be negative or not finite: ``BurnSimulation`` raises ``ValueError`` when it computes one,
+#: and a compiled loop cannot raise, so the reference decides (it raises, or never reaches the bad region).
+REFERENCE_ONLY = frozenset({INSTANCE_OVERRIDE, CUSTOM_CLASS, UNKNOWN_GEOMETRY, INVALID_BURN_RATE})
 
 GRAIN_FIELDS = (
     "outer_radius", "inner_radius0", "height0", "ends_burn", "is_star", "n_points", "epsilon",
@@ -277,6 +280,36 @@ def _piecewise_parts(interpolator):
     return x, coefficients, below, above
 
 
+def _lowest_value(x, coefficients):
+    """The smallest value a table's cubic or linear pieces reach inside their knots (ends and interior extrema)."""
+    lowest = math.inf
+    for j in range(coefficients.shape[1]):
+        c3, c2, c1, c0 = coefficients[:, j]
+        width = float(x[j + 1] - x[j])
+        points = [0.0, width]
+        if c3 != 0.0:  # the derivative 3 c3 d^2 + 2 c2 d + c1 vanishes at the interior extrema
+            discriminant = 4.0 * c2 * c2 - 12.0 * c3 * c1
+            if discriminant >= 0.0:
+                root = math.sqrt(discriminant)
+                points += [(-2.0 * c2 + root) / (6.0 * c3), (-2.0 * c2 - root) / (6.0 * c3)]
+        elif c2 != 0.0:
+            points.append(-c1 / (2.0 * c2))
+        for d in points:
+            if 0.0 <= d <= width:
+                lowest = min(lowest, ((c3 * d + c2) * d + c1) * d + c0)
+    return lowest
+
+
+def _burn_rate_may_be_invalid(propellant, rate_parts):
+    """Whether ``Propellant.evaluate_burn_rate`` can return a negative or non-finite value."""
+    if rate_parts is None:
+        a, n = float(propellant.burn_rate_a), float(propellant.burn_rate_n)
+        return not (math.isfinite(a) and math.isfinite(n) and a >= 0.0)
+    x, coefficients, below, above = rate_parts
+    ends = (below, above)
+    return not (all(math.isfinite(v) and v >= 0.0 for v in ends) and _lowest_value(x, coefficients) >= 0.0)
+
+
 def _mach_parts(propellant, motor):
     """The supersonic exit Mach number against ``k`` as a cubic on a grid, for a propellant with a ``k`` table.
 
@@ -337,6 +370,7 @@ def _table_parts(propellant, motor, features: FrozenSet[str], cache: Dict[tuple,
         thermo = THERMO_TABLE in features
         cache[key] = {
             "rate": rate,
+            "rate_invalid": _burn_rate_may_be_invalid(propellant, rate),
             "tc": _piecewise_parts(propellant._temperature_func) if thermo else None,
             "k": _piecewise_parts(propellant._gamma_func) if thermo else None,
             "mach": _mach_parts(propellant, motor) if thermo else None,
@@ -460,6 +494,8 @@ class ProblemBatch:
                 lane_settings = _resolve_settings(lane, setting_list[lane])
                 lane_feature_set = required_features(motor_list[lane], propellant_list[lane], lane_settings)
                 parts = _table_parts(propellant_list[lane], motor_list[lane], lane_feature_set, cache)
+                if parts["rate_invalid"]:
+                    lane_feature_set = lane_feature_set | {INVALID_BURN_RATE}
                 rows.append(_lane_values(motor_list[lane], propellant_list[lane], environment_list[lane],
                                          lane_settings, lane_feature_set, parts))
                 parts_list.append(parts)

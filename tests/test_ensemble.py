@@ -64,6 +64,18 @@ def test_strict_mode_refuses_instead_of_falling_back(batch):
     simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", strict=True)  # all supported: fine
 
 
+def test_a_lane_whose_burn_rate_can_be_invalid_is_not_run_by_a_batched_backend():
+    from test_batch_problem import make_stack  # a negative coefficient: the reference raises when it computes a rate
+
+    motor, propellant = make_stack(burn_rate_a=-7.36)
+    bad = ProblemBatch.from_objects(motor, propellant)
+
+    with pytest.raises(UnsupportedLane, match="invalid_burn_rate"):
+        simulate_burn(bad, backend="cpu-vectorized", strict=True)
+    with pytest.raises(ValueError, match="burn rate must be finite and non-negative"):
+        simulate_burn(bad, backend="cpu-vectorized")  # falls back to the reference, which raises as it does alone
+
+
 def test_the_selected_backend_is_used_when_none_is_named(batch):
     with backends.use_backend("cpu-vectorized"):
         result = simulate_burn(batch.select(SUPPORTED_LANES))

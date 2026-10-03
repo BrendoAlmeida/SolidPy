@@ -378,3 +378,42 @@ def test_select_may_repeat_a_lane_to_fill_a_compiled_bucket():
     padded = batch.select([0, 1, 0, 0])
 
     assert padded.arrays["rtol"].tolist() == [1e-6, 1e-9, 1e-6, 1e-6]
+
+
+def _rate_table(tmp_path, rows):
+    path = tmp_path / "rates.csv"
+    path.write_text('"Chamber Pressure (MPa)", "Burn Rate (mm/s)"\n' + "\n".join(f"{p},{r}" for p, r in rows) + "\n")
+    return make_stack(interpolation_list=str(path), burn_rate_a=None, burn_rate_n=None)
+
+
+@pytest.mark.parametrize("a, n", [(-7.36, 0.32), (float("nan"), 0.32), (7.36, float("nan"))])
+def test_a_power_law_that_gives_a_negative_or_nan_rate_is_left_to_the_reference(a, n):
+    motor, propellant = make_stack(burn_rate_a=a, burn_rate_n=n)
+
+    features = pack(motor, propellant).lane_features[0]
+
+    assert pb.INVALID_BURN_RATE in features and pb.REFERENCE_ONLY & features
+    with pytest.raises(ValueError, match="burn rate must be finite and non-negative"):
+        BurnSimulation(motor.grains[0], motor, propellant).result
+
+
+@pytest.mark.parametrize("rows", [
+    [(0.5, 3.0), (3.0, -1.0), (9.0, 9.5)],  # a negative value at a knot
+    [(0.5, 3.0), (2.0, 0.01), (3.0, 8.0), (9.0, 9.0), (10.0, 9.5)],  # the cubic dips below zero between two knots
+    [(0.5, 3.0), (9.0, 9.5), (12.0, -2.0)],  # a negative end value is held beyond the table
+])
+def test_a_burn_rate_table_that_goes_negative_is_left_to_the_reference(tmp_path, rows):
+    motor, propellant = _rate_table(tmp_path, rows)
+
+    features = pack(motor, propellant).lane_features[0]
+
+    assert pb.INVALID_BURN_RATE in features and pb.BURN_RATE_TABLE in features
+
+
+def test_burn_rate_tables_and_power_laws_that_stay_positive_are_not_flagged(tmp_path):
+    motor, table = _rate_table(tmp_path, [(0.5, 3.0), (2.0, 6.0), (3.0, 8.0), (9.0, 9.0), (10.0, 9.5)])
+    _, flat = _rate_table(tmp_path, [(0.5, 0.0), (9.0, 9.5)])  # a zero rate is valid
+    _, power = make_stack(burn_rate_a=0.0)  # and so is a zero coefficient
+
+    for propellant in (table, flat, power):
+        assert pb.INVALID_BURN_RATE not in pack(motor, propellant).lane_features[0]
