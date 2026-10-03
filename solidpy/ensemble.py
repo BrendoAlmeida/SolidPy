@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import numbers
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -185,6 +186,10 @@ def simulate_burn(
     return BatchResult(results, backend, summary)
 
 
+#: What a lane keeps with ``keep_series=False``: the scalar outputs and the identification of the scenario.
+_SCALAR_KEYS = ("summary", "status", "provenance", "schema_version", "gamma", "scenario_id", "scenario_kind",
+                "scenario_factors", "valid")
+
 #: Arguments of ``run_detailed_ballistics`` that shape its post-processing and not the burn.
 _DETAIL_ARGUMENTS = ("resample_step", "nozzle_ablation_scale", "ablation_pressure_exponent", "ablation_mass_flow_exponent")
 
@@ -214,6 +219,8 @@ def run_robustness_ensemble(
     workers: Optional[int] = None,
     max_steps: Optional[int] = None,
     chunk_lanes: int = 4096,
+    timings: Optional[Dict[str, float]] = None,
+    keep_series: bool = True,
     **simulation_kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """Robustness analysis of many designs: every (design, scenario) pair is a lane of one batch.
@@ -228,7 +235,14 @@ def run_robustness_ensemble(
     the full history; the detailed ballistics of every lane is then built on the CPU from the lane's result, so the
     reports are what the scalar path gives within the numerical tolerances of ``solidpy.backends._tolerances``.
     ``chunk_lanes`` bounds how many lanes are solved and held at once. Invalid inputs raise when the batch is packed,
-    before any burn is solved; the scalar path raises as it reaches them.
+    before any burn is solved; the scalar path raises as it reaches them. A dict passed as ``timings`` receives the
+    seconds spent packing (``pack_s``), solving (``solve_s``), building the detailed ballistics (``postprocess_s``) and
+    assembling the reports (``report_s``).
+
+    Every lane of a report holds its full series and canonical history, about 200 kB each for a four-grain design, as
+    the scalar path's does.
+    For thousands of lanes pass ``keep_series=False``: each lane then keeps only ``summary``, ``status``, ``provenance``
+    and the scenario fields (and ``valid``), and the report, its statistics and its validity ratio are unchanged.
     """
     from .batch.simulation_view import SimulationView
     from .DetailedBallistics import _validate_dry_hardware, build_detailed_ballistics
@@ -246,10 +260,12 @@ def run_robustness_ensemble(
     for _, motor, _, _, _ in parsed:
         _validate_dry_hardware(motor)
 
+    clock = {"pack_s": 0.0, "solve_s": 0.0, "postprocess_s": 0.0, "report_s": 0.0}
     reports: List[Dict[str, Any]] = []
     designs_per_chunk = max(1, int(chunk_lanes) // lanes_per_design)
     for start in range(0, len(parsed), designs_per_chunk):
         chunk = parsed[start : start + designs_per_chunk]
+        mark = time.perf_counter()
         motors, propellants, environments, settings, factors, details = [], [], [], [], [], []
         for grain, motor, propellant, environment, own in chunk:
             merged = {**simulation_kwargs, **own}
@@ -285,25 +301,35 @@ def run_robustness_ensemble(
                 details.append(detail_i)
 
         batch = ProblemBatch.from_objects(motors, propellants, environments, settings, burn_rate_factor=factors)
+        clock["pack_s"] += time.perf_counter() - mark
+        mark = time.perf_counter()
         solved = simulate_burn(batch, backend=backend, device=device, history="full", strict=strict, workers=workers,
                                max_steps=max_steps).to_results()
-        detailed = []
-        for lane, canonical in enumerate(solved):
-            view = SimulationView.from_lane(batch, lane, canonical)
+        clock["solve_s"] += time.perf_counter() - mark
+        mark = time.perf_counter()
+        results: List[Dict[str, Any]] = []
+        for lane in range(len(solved)):
+            scenario = None if lane % lanes_per_design == 0 else scenario_list[lane % lanes_per_design - 1]
+            view = SimulationView.from_lane(batch, lane, solved[lane])
+            solved[lane] = None  # the view holds it; with keep_series=False nothing does once the lane is summarised
             result = build_detailed_ballistics(view, **details[lane])
             result["simulation"] = view
-            detailed.append(result)
-        for design in range(len(chunk)):
-            lane0 = design * lanes_per_design
-            results = detailed[lane0 : lane0 + lanes_per_design]
-            results[0]["scenario_id"] = "nominal"
-            results[0]["scenario_kind"] = "nominal"
-            for scenario, result in zip(scenario_list, results[1:]):
+            if scenario is None:
+                result["scenario_id"] = "nominal"
+                result["scenario_kind"] = "nominal"
+            else:
                 _rescale_thrust(result, scenario.isp_factor)
                 result["scenario_id"] = scenario.scenario_id
                 result["scenario_kind"] = scenario.scenario_kind
                 result["scenario_factors"] = scenario.__dict__.copy()
                 if validator is not None:
                     result["valid"] = bool(validator(result))
-            reports.append(_build_report(results, validator))
+            results.append(result if keep_series else {key: result[key] for key in _SCALAR_KEYS if key in result})
+        clock["postprocess_s"] += time.perf_counter() - mark
+        mark = time.perf_counter()
+        for design in range(len(chunk)):
+            reports.append(_build_report(results[design * lanes_per_design : (design + 1) * lanes_per_design], validator))
+        clock["report_s"] += time.perf_counter() - mark
+    if timings is not None:
+        timings.update(clock)
     return reports

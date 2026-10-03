@@ -163,6 +163,24 @@ def test_several_designs_are_one_batch_and_each_report_matches_its_own_run():
     assert together[0]["nominal"]["propellant_mass_kg"].shape != together[1]["nominal"]["propellant_mass_kg"].shape
 
 
+def test_dropping_the_series_keeps_every_scalar_output_and_the_statistics():
+    designs = [make_motor_stack()]
+    options = dict(scenarios=scenarios()[:3], max_step_size=0.03, max_time_points=200, backend="cpu-vectorized",
+                   validator=lambda result: result["summary"]["simulation.nominal.peak_thrust_n"] > 0.0)
+
+    full = run_robustness_ensemble(designs, **options)[0]
+    slim = run_robustness_ensemble(designs, keep_series=False, **options)[0]
+
+    assert slim["summary"] == full["summary"] and slim["status"] == full["status"]
+    assert slim["provenance"] == full["provenance"] and slim["scenario_ids"] == full["scenario_ids"]
+    for a, b in zip([slim["nominal"]] + slim["scenarios"], [full["nominal"]] + full["scenarios"]):
+        assert set(a) <= set(ensemble._SCALAR_KEYS) and "thrust_n" not in a and "canonical_result" not in a
+        assert a["summary"] == b["summary"] and a["status"] == b["status"] and a["scenario_id"] == b["scenario_id"]
+        assert a.get("valid") == b.get("valid") and a.get("scenario_factors") == b.get("scenario_factors")
+        assert a["provenance"]["physics_provider_hash"] == b["provenance"]["physics_provider_hash"]
+    assert all("valid" in r for r in slim["scenarios"]) and "valid" not in slim["nominal"]
+
+
 def test_chunking_does_not_change_the_reports():
     designs = [make_motor_stack(), second_design()]
     options = dict(scenarios=scenarios()[:2], max_step_size=0.03, max_time_points=200, backend="cpu-vectorized")
