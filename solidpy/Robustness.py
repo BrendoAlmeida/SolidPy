@@ -233,6 +233,32 @@ def summarize_robustness(scenario_results):
     return output
 
 
+def _scenario_simulation_kwargs(simulation_kwargs, scenario):
+    """The ``BurnSimulation`` keyword arguments of one scenario: the caller's, with the igniter scaled by its factor."""
+    scenario_kwargs = dict(simulation_kwargs)
+    scenario_kwargs.update({
+        "igniter_mass_flow": simulation_kwargs.get("igniter_mass_flow"),
+        "igniter_burn_time": simulation_kwargs.get("igniter_burn_time", 0.0)
+        * float(scenario.igniter_energy_factor),
+        "igniter_temperature": simulation_kwargs.get("igniter_temperature"),
+        "burn_area_activation": simulation_kwargs.get("burn_area_activation"),
+        "ignition_ramp_time": simulation_kwargs.get("ignition_ramp_time", 0.0),
+        "tail_off_method": simulation_kwargs.get("tail_off_method", "numerical"),
+    })
+    return scenario_kwargs
+
+
+def _finish_scenario_result(result, scenario, validator=None):
+    """Apply the specific-impulse factor to a scenario's detailed result and label it."""
+    result = _rescale_thrust(result, scenario.isp_factor)
+    result["scenario_id"] = scenario.scenario_id
+    result["scenario_kind"] = scenario.scenario_kind
+    result["scenario_factors"] = scenario.__dict__.copy()
+    if validator is not None:
+        result["valid"] = bool(validator(result))
+    return result
+
+
 def _build_report(results, validator=None):
     """The robustness report of ``results``: the nominal run first, then one result per scenario."""
     nominal = results[0]
@@ -336,16 +362,7 @@ def run_robustness_analysis(
         scenario_grain, scenario_motor, scenario_propellant, scenario_environment = (
             _apply_scenario(grain, motor, propellant, environment, scenario)
         )
-        scenario_kwargs = dict(simulation_kwargs)
-        scenario_kwargs.update({
-            "igniter_mass_flow": simulation_kwargs.get("igniter_mass_flow"),
-            "igniter_burn_time": simulation_kwargs.get("igniter_burn_time", 0.0)
-            * float(scenario.igniter_energy_factor),
-            "igniter_temperature": simulation_kwargs.get("igniter_temperature"),
-            "burn_area_activation": simulation_kwargs.get("burn_area_activation"),
-            "ignition_ramp_time": simulation_kwargs.get("ignition_ramp_time", 0.0),
-            "tail_off_method": simulation_kwargs.get("tail_off_method", "numerical"),
-        })
+        scenario_kwargs = _scenario_simulation_kwargs(simulation_kwargs, scenario)
         result = run_detailed_ballistics(
             scenario_grain,
             scenario_motor,
@@ -356,12 +373,6 @@ def run_robustness_analysis(
             nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor),
             **scenario_kwargs,
         )
-        result = _rescale_thrust(result, scenario.isp_factor)
-        result["scenario_id"] = scenario.scenario_id
-        result["scenario_kind"] = scenario.scenario_kind
-        result["scenario_factors"] = scenario.__dict__.copy()
-        if validator is not None:
-            result["valid"] = bool(validator(result))
-        results.append(result)
+        results.append(_finish_scenario_result(result, scenario, validator))
 
     return _build_report(results, validator)

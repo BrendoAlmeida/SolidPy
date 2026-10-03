@@ -249,7 +249,8 @@ def run_robustness_ensemble(
     from .DetailedBallistics import _validate_dry_hardware, build_detailed_ballistics
     from .Environment import Environment
     from .Robustness import (
-        _build_report, _rescale_thrust, _scenario_objects, build_latin_hypercube_scenarios, default_robustness_scenarios,
+        _build_report, _finish_scenario_result, _scenario_objects, _scenario_simulation_kwargs,
+        build_latin_hypercube_scenarios, default_robustness_scenarios,
     )
 
     if isinstance(chunk_lanes, bool) or not isinstance(chunk_lanes, numbers.Integral) or chunk_lanes < 1:
@@ -282,15 +283,8 @@ def run_robustness_ensemble(
                 _, scenario_motor, scenario_propellant, scenario_environment, factor = _scenario_objects(
                     grain, motor, propellant, environment, scenario
                 )
-                lane_kwargs = dict(burn_kwargs)
-                lane_kwargs.update({
-                    "igniter_mass_flow": merged.get("igniter_mass_flow"),
-                    "igniter_burn_time": merged.get("igniter_burn_time", 0.0) * float(scenario.igniter_energy_factor),
-                    "igniter_temperature": merged.get("igniter_temperature"),
-                    "burn_area_activation": merged.get("burn_area_activation"),
-                    "ignition_ramp_time": merged.get("ignition_ramp_time", 0.0),
-                    "tail_off_method": merged.get("tail_off_method", "numerical"),
-                })
+                lane_kwargs = {"max_step_size": step, "tail_off_evaluation": burn_kwargs["tail_off_evaluation"],
+                               **_scenario_simulation_kwargs(merged, scenario)}
                 lane_detail = dict(detail, nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor))
                 lanes.append((scenario_motor, scenario_propellant, scenario_environment, lane_kwargs, factor, lane_detail))
             for motor_i, propellant_i, environment_i, kwargs_i, factor_i, detail_i in lanes:
@@ -319,12 +313,7 @@ def run_robustness_ensemble(
                 result["scenario_id"] = "nominal"
                 result["scenario_kind"] = "nominal"
             else:
-                _rescale_thrust(result, scenario.isp_factor)
-                result["scenario_id"] = scenario.scenario_id
-                result["scenario_kind"] = scenario.scenario_kind
-                result["scenario_factors"] = scenario.__dict__.copy()
-                if validator is not None:
-                    result["valid"] = bool(validator(result))
+                _finish_scenario_result(result, scenario, validator)
             results.append(result if keep_series else {key: result[key] for key in _SCALAR_KEYS if key in result})
         clock["postprocess_s"] += time.perf_counter() - mark
         mark = time.perf_counter()
