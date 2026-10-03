@@ -99,7 +99,13 @@ def build_latin_hypercube_scenarios(sample_count=16, seed=20260504):
     return scenarios
 
 
-def _apply_scenario(grain, motor, propellant, environment, scenario):
+def _scenario_objects(grain, motor, propellant, environment, scenario):
+    """Copies of the inputs with the scenario applied, and the scenario's effective burn rate factor.
+
+    Density, throat area and ambient pressure are applied to the copies. The burn rate factor is returned and not
+    installed on the propellant, so that a batch backend can carry it as a lane constant;
+    :func:`_apply_scenario` installs it as the ``evaluate_burn_rate`` override the scalar solver runs with.
+    """
     grain, motor, propellant, environment = copy.deepcopy(
         (grain, motor, propellant, environment)
     )
@@ -110,12 +116,6 @@ def _apply_scenario(grain, motor, propellant, environment, scenario):
         float(scenario.initial_temperature_k) - BURN_RATE_TEMP_REFERENCE_K
     )
     burn_rate_factor = max(float(scenario.burn_rate_factor) * temperature_factor, 0.1)
-    original_burn_rate = propellant.evaluate_burn_rate
-    propellant.evaluate_burn_rate = (
-        lambda chamber_pressure, port_mass_flux=0.0,
-        _orig=original_burn_rate, _factor=burn_rate_factor:
-        _factor * _orig(chamber_pressure, port_mass_flux)
-    )
 
     density_factor = max(float(scenario.density_factor), 0.01)
     propellant.density *= density_factor
@@ -127,6 +127,19 @@ def _apply_scenario(grain, motor, propellant, environment, scenario):
     if scenario.ambient_pressure_pa is not None:
         environment.atmospheric_pressure = max(float(scenario.ambient_pressure_pa), 0.0)
 
+    return grain, motor, propellant, environment, burn_rate_factor
+
+
+def _apply_scenario(grain, motor, propellant, environment, scenario):
+    grain, motor, propellant, environment, burn_rate_factor = _scenario_objects(
+        grain, motor, propellant, environment, scenario
+    )
+    original_burn_rate = propellant.evaluate_burn_rate
+    propellant.evaluate_burn_rate = (
+        lambda chamber_pressure, port_mass_flux=0.0,
+        _orig=original_burn_rate, _factor=burn_rate_factor:
+        _factor * _orig(chamber_pressure, port_mass_flux)
+    )
     return grain, motor, propellant, environment
 
 
