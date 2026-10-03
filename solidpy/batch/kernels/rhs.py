@@ -6,10 +6,10 @@
 ``[gas mass, thermal inventory, regression_0 .. regression_{G-1}, generated mass, igniter mass, nozzle mass,
 unscaled thrust impulse, pressure * throat area integral]``.
 
-Scope: lanes without igniter, activation profile or ignition ramp. The scalar code scales the regression rates
-and the burn area by an activation factor that depends on time; these kernels take no time and apply none,
-so a lane that needs it (``ProblemBatch.lane_features``) must be routed to a backend that declares it. A
-batched backend only advertises the features its kernels reproduce.
+Sources: with ``time`` the igniter mass flow and the activation factor (scalar, table or built-in ramp) are
+applied as in the scalar code; without it the lane has none (activation 1, no igniter). Callable sources are
+not reproduced (their mode is NaN, so the results are NaN rather than plausible); a backend only advertises the
+features its kernels reproduce.
 
 The kernels are shape agnostic: with lane arrays of shape ``S`` and grain arrays of shape ``S + (G,)`` they
 return quantities of shape ``S``. ``S = (B,)`` is the solver case; ``S = (B, T)`` evaluates a stored history
@@ -19,6 +19,8 @@ return quantities of shape ``S``. ``S = (B,)`` is the solver case; ``S = (B, T)`
 from .geometry import burn_area, ordered_sum, port_area, remaining_volume
 from .nozzle import TINY, nozzle_mass_flow, thrust_components
 from .propellant import burn_rate, gas_properties
+from .sources import activation as activation_factor
+from .sources import igniter_flow as igniter_flow_at
 
 
 def pressure_of(xp, y, P):
@@ -28,12 +30,13 @@ def pressure_of(xp, y, P):
     return P["gas_constant"] * xp.maximum(y[..., 1], TINY) / (P["chamber_volume"] - remaining)
 
 
-def state_quantities(xp, y, active, P, detail=False):
+def state_quantities(xp, y, active, P, detail=False, time=None):
     """Derived quantities at a state.
 
     ``active`` is the per-grain boolean mask the integrator carries, or ``None`` to derive it from the
     regressions as the scalar post-processing does. Padded grains are never active. ``detail`` adds the exit
-    velocity and exit pressure used by stored histories.
+    velocity and exit pressure used by stored histories. ``time`` (same shape as the pressure) switches the
+    igniter and the activation on.
     """
     g = P["grain_valid"].shape[-1]
     valid = P["grain_valid"]
@@ -61,7 +64,11 @@ def state_quantities(xp, y, active, P, detail=False):
     port_mass_flux = 0.5 * nozzle / xp.maximum(port_mean, 1e-9)
     rate = burn_rate(xp, xp.maximum(pressure, P["ambient_pressure"]), port_mass_flux, P)
     rate = xp.where(xp.any(active, axis=-1), rate, 0.0)
-    rates = xp.where(active, rate[..., None], 0.0)
+    if time is None:
+        activation, igniter = xp.ones_like(rate), xp.zeros_like(rate)
+    else:
+        activation, igniter = activation_factor(xp, time, P), igniter_flow_at(xp, time, P)
+    rates = xp.where(active, (rate * activation)[..., None], 0.0)
 
     generated_grains = P["density"][..., None] * areas * rates
     generated = xp.sum(generated_grains, axis=-1)
@@ -73,9 +80,11 @@ def state_quantities(xp, y, active, P, detail=False):
         "temperature": temperature,
         "source_temperature": source_temperature,
         "regression_rates": rates,
-        "areas": areas,
+        "areas": areas * activation[..., None],
         "generated_grains": generated_grains,
         "generated": generated,
+        "igniter": igniter,
+        "activation": activation,
         "nozzle": nozzle,
         "momentum_ideal": ideal,
         "momentum": momentum,
@@ -87,10 +96,10 @@ def state_quantities(xp, y, active, P, detail=False):
     return quantities
 
 
-def conservative_rhs(xp, y, active, P, igniter_flow=None):
-    """Time derivative of the conservative state, same shape as ``y``."""
-    q = state_quantities(xp, y, active, P)
-    igniter = xp.zeros_like(q["generated"]) if igniter_flow is None else igniter_flow
+def conservative_rhs(xp, y, active, P, time=None):
+    """Time derivative of the conservative state, same shape as ``y``; ``time`` switches the sources on."""
+    q = state_quantities(xp, y, active, P, time=time)
+    igniter = q["igniter"]
     mass_rate = q["generated"] + igniter - q["nozzle"]
     thermal_rate = (
         q["generated"] * q["source_temperature"] + igniter * P["igniter_temperature"] - q["nozzle"] * q["temperature"]

@@ -73,7 +73,13 @@ LANE_FIELDS = (
     "eta_c", "eta_cf", "discharge_coefficient", "ambient_pressure", "burn_rate_a", "burn_rate_n",
     "erosive_coefficient", "erosive_alpha", "n_valid_grains", "igniter_temperature", "igniter_burn_time",
     "ignition_ramp_time", "max_step_size", "rtol", "atol", "burn_timeout_s", "tail_off_timeout_s",
-    "tail_off_evaluation",
+    "tail_off_evaluation", "igniter_mode", "igniter_value", "activation_mode", "activation_value",
+    "source_end_time",
+)
+#: Per-lane tables ``[B, K]`` (padded) and their real lengths ``[B]``, plus the segment boundaries ``[B, Kb]``.
+TABLE_FIELDS = (
+    "igniter_table_t", "igniter_table_m", "igniter_table_n", "activation_table_t", "activation_table_a",
+    "activation_table_n", "breakpoints",
 )
 
 # Geometry of a padded (non-existent) grain. It never burns and holds no volume; the values only need to
@@ -218,6 +224,47 @@ def _grain_row(grain) -> Dict[str, Any]:
     )
 
 
+def _source_mode(source):
+    """``(mode, scalar value)`` of an igniter or activation source: 0 none, 1 scalar, 2 table, NaN callable."""
+    if source is None:
+        return 0.0, 0.0
+    if callable(source):
+        return float("nan"), float("nan")
+    if np.isscalar(source):
+        return 1.0, float(source)
+    return 2.0, 0.0
+
+
+def _source_end_time(settings) -> float:
+    """``BurnSimulation._source_end_time``: when the igniter stops (0 without one)."""
+    source = settings["igniter_mass_flow"]
+    if source is None:
+        return 0.0
+    if callable(source) or np.isscalar(source):
+        return float(settings["igniter_burn_time"])
+    return float(np.asarray(source, dtype=float)[-1, 0])
+
+
+def _profile(source):
+    """The ``(times, values)`` columns of a table source, or empty arrays."""
+    if source is None or callable(source) or np.isscalar(source):
+        return np.zeros(0), np.zeros(0)
+    table = np.asarray(source, dtype=float)
+    return table[:, 0], table[:, 1]
+
+
+def _padded_tables(profiles):
+    """Pad the abscissae of several tables with finite, increasing values, and the ordinates with zeros."""
+    count = np.asarray([len(t) for t, _ in profiles], dtype=int)
+    k = max(int(count.max(initial=0)), 1)
+    times = np.zeros((len(profiles), k))
+    values = np.zeros((len(profiles), k))
+    for lane, (t, v) in enumerate(profiles):
+        times[lane] = np.concatenate([t, (t[-1] if len(t) else -1.0) + np.arange(1, k - len(t) + 1)])
+        values[lane, : len(v)] = v
+    return times, values, count
+
+
 def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], features: FrozenSet[str]):
     """Scalar inputs of one lane. Values the batched kernels cannot reproduce are NaN."""
     burn = Burn(
@@ -242,6 +289,8 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
     angle = motor.nozzle_angle
     divergence = 1.0 if angle is None or angle <= 0.0 else 0.5 * (1.0 + math.cos(float(angle)))
     nan = float("nan")
+    igniter_mode, igniter_value = _source_mode(settings["igniter_mass_flow"])
+    activation_mode, activation_value = _source_mode(settings["burn_area_activation"])
     power_law = BURN_RATE_POWER_LAW in features
     return dict(
         chamber_volume=float(motor.chamber_volume), free_volume=float(motor.free_volume),
@@ -263,6 +312,8 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
         max_step_size=settings["max_step_size"], rtol=settings["rtol"], atol=settings["atol"],
         burn_timeout_s=settings["burn_timeout_s"], tail_off_timeout_s=settings["tail_off_timeout_s"],
         tail_off_evaluation=1.0 if settings["tail_off_evaluation"] else 0.0,
+        igniter_mode=igniter_mode, igniter_value=igniter_value, activation_mode=activation_mode,
+        activation_value=activation_value, source_end_time=_source_end_time(settings),
     )
 
 
@@ -344,6 +395,19 @@ class ProblemBatch:
                     arrays[name][lane, slot] = value
         for name in LANE_FIELDS:
             arrays[name] = np.asarray([row[name] for row in rows], dtype=float)
+        igniter = [_profile(s["igniter_mass_flow"]) for s in resolved]
+        activation = [_profile(s["burn_area_activation"]) for s in resolved]
+        arrays["igniter_table_t"], arrays["igniter_table_m"], arrays["igniter_table_n"] = _padded_tables(igniter)
+        arrays["activation_table_t"], arrays["activation_table_a"], arrays["activation_table_n"] = _padded_tables(
+            activation
+        )
+        boundaries = [
+            sorted({float(x) for x in (*igniter[i][0], *activation[i][0], rows[i]["source_end_time"],
+                                       rows[i]["ignition_ramp_time"]) if x > 0.0})
+            for i in range(count)
+        ]
+        width = max(max(len(b) for b in boundaries), 1)
+        arrays["breakpoints"] = np.asarray([b + [np.inf] * (width - len(b)) for b in boundaries], dtype=float)
         return cls(arrays, features, n_grains, motor_list, propellant_list, environment_list, resolved)
 
     def namespace(self, xp) -> Dict[str, Any]:
