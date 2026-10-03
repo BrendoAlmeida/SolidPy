@@ -99,6 +99,29 @@ for the kernel logic and as the portable backend where JAX cannot be imported.
 * JAX on the CPU device and on the GPU match the reference with the same limits, agree with the NumPy backend, and
   `evaluate_numerical_acceptance(batched, reference)` is `passed` with an identical `physics_provider_hash`.
 
+## Whole-corpus parity on the GPU (2026-10-03, after tables and sources)
+
+`pytest tests/test_batch_parity.py --runslow -k jax` on the RTX 4060 (JAX 0.11.2, float64): all 323 corpus designs
+the JAX backend supports, one `simulate_burn` call with `strict=True`, 267 s including compilation. Tiers: 326 lanes
+launched with the 2,048-iteration cap, 9 rerun with the 16,384 cap, 2 uncapped. Every lane ends with the stored
+termination reason and the same completion flags, and the grain burnout set matches. Relative differences against
+the stored reference (maximum, median):
+
+| Quantity | Max | Median | Limit |
+|---|---|---|---|
+| total impulse | 2.5e-06 | 7e-10 | 1e-5 |
+| generated / nozzle mass integral | 1.4e-06 | 4e-10 / 5e-10 | 1e-5 |
+| igniter mass injected | 4.6e-15 | 5e-16 | 1e-5 |
+| peak chamber pressure, peak thrust, max nozzle flow | 3.8e-04, 4.4e-04, 3.8e-04 | 3e-09, 4e-09, 3e-09 | 5e-3 |
+| gas mass at cutoff | 1.3e-04 | 4e-10 | 5e-3 |
+| max generated mass flow | 7.9e-03 | 3e-09 | 1.5e-2 |
+| grain burnout times | 6.3e-07 | 4e-10 | 5e-6 |
+| nozzle flow end | 1.8e-06 | 5e-10 | 5e-6 |
+
+The largest differences sit in the stored reference, not in the kernels: the reference's own error against a refined
+run is of the same size (comments in `solidpy/backends/_tolerances.py`, version 3). The NumPy backend passed the same
+test on 2026-10-03 (892 s).
+
 ## Not covered yet
 
 The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
