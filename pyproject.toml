@@ -53,4 +53,5 @@ pythonpath = [
 addopts = "--strict-markers"
 markers = [
   "gpu: needs an accelerator device; skipped when none is available",
+  "slow: minutes long (the whole golden corpus); skipped unless --runslow is given",
 ]

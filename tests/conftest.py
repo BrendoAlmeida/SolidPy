@@ -21,12 +21,23 @@ def _accelerator_status():
     return False, "jax only sees CPU devices"
 
 
-def pytest_collection_modifyitems(config, items):
-    """Skip ``@pytest.mark.gpu`` tests when no accelerator device is present.
+def pytest_addoption(parser):
+    parser.addoption("--runslow", action="store_true", default=False,
+                     help="also run tests marked slow (minutes long, e.g. the whole-corpus parity)")
 
-    Set ``SOLIDPY_REQUIRE_GPU=1`` (for a GPU runner) to turn that skip into an error, so a broken device
-    cannot make the gpu tests silently disappear.
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``@pytest.mark.slow`` tests unless ``--runslow`` is given, and gpu tests when no device is present.
+
+    A skipped slow test says how to run it, so naming it explicitly never looks like a green run. Set
+    ``SOLIDPY_REQUIRE_GPU=1`` (for a GPU runner) to turn the missing-device skip into an error, so a broken
+    device cannot make the gpu tests silently disappear.
     """
+    if not config.getoption("--runslow"):
+        skip_slow = pytest.mark.skip(reason="slow: run with --runslow")
+        for item in items:
+            if item.get_closest_marker("slow"):
+                item.add_marker(skip_slow)
     gpu_items = [item for item in items if item.get_closest_marker("gpu")]
     if not gpu_items:
         return
