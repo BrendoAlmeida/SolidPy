@@ -52,6 +52,9 @@ class _Registration:
 _BUILTIN: Dict[str, _Registration] = {
     "cpu-reference": _Registration("cpu-reference", "solidpy.backends.cpu_reference:ReferenceBackend"),
     "cpu-vectorized": _Registration("cpu-vectorized", "solidpy.backends.numpy_vectorized:NumpyBackend"),
+    "jax": _Registration(
+        "jax", "solidpy.backends.jax_backend:JaxBackend", ("jax",), 'pip install "solidpy[jax-cuda12]"'
+    ),
 }
 _REGISTERED: Dict[str, _Registration] = {}
 _INSTANCES: Dict[Tuple[str, Optional[str]], Backend] = {}
