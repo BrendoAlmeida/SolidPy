@@ -845,13 +845,17 @@ evaluated by bisection and Horner), canonical results with the reference `physic
 `cpu-reference`, `cpu-vectorized` and `jax` backends, `simulate_burn` with capability routing and fallback,
 iteration-capped tiers (a result of the measurements: section 6.3 expected cost-sorted chunks, but sorting cannot
 help when the per-iteration cost is flat; capping iterations and rerunning the unfinished lanes in smaller batches
-does), and the benchmark suite. Lanes with callables, analytical tail-off, custom classes or instance overrides
-still run on the reference (or raise with `strict=True`).
+does), and the benchmark suite. Lanes with callables, analytical tail-off, custom classes, instance overrides or a
+burn rate that can be negative or not finite (the scalar code raises `ValueError` for those, which a compiled loop
+cannot do) still run on the reference (or raise with `strict=True`).
 
 Parity is checked per kernel at 1e-12 and per simulation with the versioned limits in
 `solidpy/backends/_tolerances.py` (version 3). The stored reference is the inexact side of those comparisons, which
 was verified against a refined run; each limit carries the cause in a comment. The whole-corpus test
 (`pytest tests/test_batch_parity.py --runslow`) takes minutes and is skipped by default.
+
+Known cost, not yet removed: the running reductions re-evaluate the model at every accepted point, about one in
+fourteen of the evaluations a step makes; the derivative evaluation at the end of the step could be reused.
 
 Not implemented, in the order they matter: the `uniform:N` and `decimated:N` history policies; the
 heterogeneous CPU+GPU executor (the last tier is latency bound and suits spare CPU cores, benchmarks section

@@ -11,7 +11,11 @@ A byte changed in the three files above changes the hash of every result and mak
 corpus stale. In one commit, or a short series:
 
 1. Change the scalar code.
-2. Mirror it in the batched kernels (the file named in each item), so the batch stays equal to the oracle.
+2. Mirror it in the batched kernels (the file named in each item), so the batch stays equal to the oracle. Two places
+   copy scalar internals instead of calling them: `_mach_parts` in `solidpy/batch/problem.py` calls
+   `Burn.evaluate_exit_mach` on a stand-in object that supplies `_parameters_at_pressure`, `motor.expansion_ratio`,
+   `_exit_mach_cache` and `exit_mach`, so a change to that method's inputs breaks packing of thermo-table lanes;
+   and `_burn_rate_may_be_invalid` there mirrors the guard in `_state_quantities_uncached`.
 3. `python tools/make_golden_corpus.py`, review the diff of `tests/golden/reference_v1.json` like a physics change
    (`tests/golden/README.md`); `tests/test_golden_corpus.py` fails until the manifest SHA matches.
 4. Re-run the parity suites, including `pytest tests/test_batch_parity.py --runslow`, and check whether the limits in

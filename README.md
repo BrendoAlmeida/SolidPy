@@ -80,7 +80,8 @@ results = simulate_burn(batch, backend="jax", device="cuda:0").to_results()     
 `results[i]` has the same `history`, `metrics`, `status`, `efficiencies` and `provenance` as `BurnSimulation.result`
 for lane `i`, with the same `physics_provider_hash`, plus `provenance["execution"]` (backend, device, versions).
 Backends are `cpu-reference` (the scalar solver, the default), `cpu-vectorized` (NumPy) and `jax`. Lanes a backend
-cannot run (Python callables as igniter or activation, analytical tail-off, subclasses, instance-level overrides)
+cannot run (Python callables as igniter or activation, analytical tail-off, subclasses, instance-level overrides,
+a burn rate that can be negative or not finite)
 are solved by the reference and flagged in `provenance["execution"]["fallback"]`, or raise `UnsupportedLane` with
 `strict=True`. Igniter and activation profiles, tabulated burn rates and tabulated thermochemistry are supported.
 
