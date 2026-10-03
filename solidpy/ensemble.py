@@ -27,12 +27,18 @@ from .backends._protocol import refused_lanes, unsupported_lane_error
 from .batch import ProblemBatch
 from .batch.kernels.tables import evaluate as evaluate_table
 from .batch.result import BatchResult
+from .batch.thermal import ThermalBatch
 
-__all__ = ["ProblemBatch", "SolveOptions", "UnsupportedLane", "lane_cost", "run_robustness_ensemble", "simulate_burn"]
+__all__ = [
+    "ProblemBatch", "SolveOptions", "ThermalBatch", "UnsupportedLane", "lane_cost", "run_advanced_physics_ensemble",
+    "run_robustness_ensemble", "simulate_burn", "simulate_thermal",
+]
 
 #: Backends ``backend="auto"`` may pick, best first, and the smallest batch worth sending to one.
 AUTO_ACCELERATORS = ("jax",)
 AUTO_MIN_LANES = 2048
+#: A thermal lane costs about a tenth of a second on the scalar code, so an accelerator pays off from far fewer lanes.
+AUTO_MIN_THERMAL_LANES = 128
 
 
 def lane_cost(batch: ProblemBatch) -> np.ndarray:
@@ -65,12 +71,15 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
     return np.where(np.isfinite(cost), cost, np.finfo(float).max)
 
 
-def _auto_backend(batch: ProblemBatch, device: Optional[str] = None) -> str:
+def _auto_backend(batch, device: Optional[str] = None, service: Optional[str] = None,
+                  minimum: Optional[int] = None) -> str:
     """An accelerator when one is usable and enough lanes can run on it to amortise it, else the reference.
 
     An explicit ``device`` restricts the choice to a backend that lists it, and ``"cpu"`` never selects an accelerator.
+    With a ``service`` the backend must provide it; ``minimum`` defaults to ``AUTO_MIN_LANES``.
     """
-    if len(batch) < AUTO_MIN_LANES or device in ("cpu", "cpu:0"):
+    minimum = AUTO_MIN_LANES if minimum is None else minimum
+    if len(batch) < minimum or device in ("cpu", "cpu:0"):
         return "cpu-reference"
     status = backends.available()
     for name in AUTO_ACCELERATORS:
@@ -81,8 +90,11 @@ def _auto_backend(batch: ProblemBatch, device: Optional[str] = None) -> str:
             devices = accelerator.devices()
         except ImportError:
             continue
+        capabilities = accelerator.capabilities()
         usable = (device in devices) if device is not None else any(not d.startswith("cpu") for d in devices)
-        if usable and len(batch) - len(refused_lanes(batch, accelerator.capabilities())) >= AUTO_MIN_LANES:
+        if service is not None and not capabilities.provides(service):
+            continue
+        if usable and len(batch) - len(refused_lanes(batch, capabilities)) >= minimum:
             return name
     return "cpu-reference"
 
@@ -186,6 +198,151 @@ def simulate_burn(
     summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
                "fallback_lanes": sorted(int(i) for i in reasons), "chunks": len(chunks), "tiers": tier_log}
     return BatchResult(results, backend, summary)
+
+
+THERMAL_SERVICE = "thermal_ablation"
+
+
+def simulate_thermal(
+    batch: ThermalBatch,
+    backend: Optional[str] = None,
+    device: Optional[str] = None,
+    *,
+    strict: bool = False,
+    workers: Optional[int] = None,
+    chunk_size: Optional[int] = None,
+    sort: bool = True,
+) -> BatchResult:
+    """The wall conduction and throat ablation of every lane of ``batch``, in lane order.
+
+    ``results[i]`` is the mapping ``Multiphysics.simulate_thermal_ablation`` returns for lane ``i``. ``backend`` is a
+    name, ``"auto"`` (an accelerator from 128 lanes, else the reference) or ``None`` for the selected one. A lane the
+    backend cannot take (a series that is not finite, series of different lengths, a backend without the thermal
+    service) and a lane whose integration did not finish are rerun on the scalar reference, or raise ``UnsupportedLane``
+    with ``strict=True`` (for the lanes it cannot take); ``result.execution["fallback_lanes"]`` lists them with their
+    reasons. ``workers`` is the process count of the reference, ``chunk_size`` bounds the lanes of one solve, and ``sort``
+    groups lanes of similar length into the same chunk when there are several.
+    """
+    if not isinstance(batch, ThermalBatch):
+        raise TypeError("simulate_thermal needs a ThermalBatch; build one with ThermalBatch.from_objects")
+    if chunk_size is not None and (
+        isinstance(chunk_size, bool) or not isinstance(chunk_size, numbers.Integral) or chunk_size < 1
+    ):
+        raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
+    chunk_size = None if chunk_size is None else int(chunk_size)
+    requested = backend
+    if backend == "auto":
+        backend = _auto_backend(batch, device, THERMAL_SERVICE, AUTO_MIN_THERMAL_LANES)
+        if device is not None and backend == "cpu-reference":
+            device = None
+    if backend is None:
+        backend, selected_device = backends.current_backend()
+        requested = backend
+        device = device if device is not None else selected_device
+    chosen = backends.get_backend(backend, device)
+    options = SolveOptions(workers=workers)
+
+    capabilities = chosen.capabilities()
+    if capabilities.provides(THERMAL_SERVICE):
+        refused = refused_lanes(batch, capabilities)
+    else:
+        refused = {lane: [f"service:{THERMAL_SERVICE}"] for lane in range(len(batch))}
+    if refused and strict:
+        raise unsupported_lane_error(backend, refused)
+
+    results: List[Optional[Dict[str, Any]]] = [None] * len(batch)
+    supported = np.asarray([lane for lane in range(len(batch)) if lane not in refused], dtype=int)
+    chunks: List[np.ndarray] = []
+    if len(supported):
+        launch_limit = getattr(chosen, "max_lanes", None)
+        several = any(limit is not None and limit < len(supported) for limit in (chunk_size, launch_limit))
+        order = supported[np.argsort(batch.arrays["n_intervals"][supported], kind="stable")] if sort and several else supported
+        chunks = _chunks(order, chunk_size)
+        for chunk in chunks:
+            returned = chosen.thermal_ablation(batch.select(chunk), options).to_results()
+            if len(returned) != len(chunk):
+                raise RuntimeError(f"backend {backend!r} returned {len(returned)} results for {len(chunk)} lanes")
+            for lane, result in zip(chunk, returned):
+                results[int(lane)] = result
+    reasons: Dict[int, List[str]] = {lane: list(features) for lane, features in refused.items()}
+    for lane in supported:
+        if results[int(lane)] is None:  # the integration did not finish: the scalar code decides what happens
+            reasons[int(lane)] = ["integration_failed"]
+    if reasons:
+        reference = backends.get_backend("cpu-reference")
+        lanes = np.asarray(sorted(reasons), dtype=int)
+        for lane, result in zip(lanes, reference.thermal_ablation(batch.select(lanes), options).to_results()):
+            results[int(lane)] = result
+    summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
+               "fallback_lanes": {int(i): reasons[i] for i in sorted(reasons)}, "chunks": len(chunks)}
+    return BatchResult(results, backend, summary)
+
+
+def _scenario_thermal_factors(curve):
+    """The liner thickness factor and initial temperature ``simulate_advanced_physics`` reads from a curve."""
+    factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
+    return (float(factors.get("liner_thickness_factor", 1.0) or 1.0),
+            float(factors.get("initial_temperature_k", 298.15) or 298.15))
+
+
+def run_advanced_physics_ensemble(
+    geometries,
+    curves,
+    *,
+    casing_material=None,
+    nozzle_material=None,
+    flame_temp_k=2800.0,
+    r_specific=287.0,
+    gamma=None,
+    backend: Optional[str] = "auto",
+    device: Optional[str] = None,
+    strict: bool = False,
+    workers: Optional[int] = None,
+    chunk_size: Optional[int] = None,
+    timings: Optional[Dict[str, float]] = None,
+    execution: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, float]]:
+    """``simulate_advanced_physics`` for many designs: the thermal ablation of all of them is one batch.
+
+    ``geometries`` and ``curves`` are lists with one entry per lane (one geometry or curve is broadcast), and
+    ``casing_material``, ``nozzle_material``, ``flame_temp_k``, ``r_specific`` and ``gamma`` are one value for every lane
+    or one per lane. Returns one flat metrics mapping per lane, the one ``simulate_advanced_physics`` returns for it: the
+    wall conduction, which costs most of the advanced physics, runs through ``simulate_thermal`` on ``backend`` and the
+    structural, CFD, ignition and flight models then run on the CPU for each lane from its thermal metrics. The scenario
+    factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. A dict passed as
+    ``timings`` receives the seconds packing (``pack_s``), in the thermal batch (``thermal_s``) and in the other models
+    (``models_s``); one passed as ``execution`` receives the summary of ``simulate_thermal``.
+    """
+    from .batch.thermal import _lane_count, _per_lane
+    from .Multiphysics import _advanced_after_thermal, _require_casing_material, _resolve_gamma
+
+    mark = time.perf_counter()
+    count = _lane_count(geometries, curves, casing_material, nozzle_material, flame_temp_k, r_specific, gamma)
+    geometries = _per_lane(geometries, count, "geometries")
+    curves = _per_lane(curves, count, "curves")
+    casings = [_require_casing_material(m) for m in _per_lane(casing_material, count, "casing_material")]
+    flames = _per_lane(flame_temp_k, count, "flame_temp_k")
+    specifics = _per_lane(r_specific, count, "r_specific")
+    gammas = [float(_resolve_gamma(curve, g)) for curve, g in zip(curves, _per_lane(gamma, count, "gamma"))]
+    scenario = [_scenario_thermal_factors(curve) for curve in curves]
+    batch = ThermalBatch.from_objects(
+        geometries, curves, casings, nozzle_material, flame_temp_k=flames, r_specific=specifics, gamma=gammas,
+        initial_temperature_k=[temperature for _, temperature in scenario],
+        liner_thickness_factor=[liner for liner, _ in scenario],
+    )
+    packed = time.perf_counter()
+    outcome = simulate_thermal(batch, backend=backend, device=device, strict=strict, workers=workers, chunk_size=chunk_size)
+    solved = time.perf_counter()
+    thermal = outcome.to_results()
+    results = [
+        _advanced_after_thermal(geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
+        for i in range(count)
+    ]
+    if timings is not None:
+        timings.update(pack_s=packed - mark, thermal_s=solved - packed, models_s=time.perf_counter() - solved)
+    if execution is not None:
+        execution.update(outcome.execution)
+    return results
 
 
 #: What a lane drops with ``keep_series=False``, besides every array: the canonical history and the simulation view.

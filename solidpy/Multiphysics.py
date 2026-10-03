@@ -2302,6 +2302,15 @@ def simulate_advanced_physics(
         liner_thickness_factor=float(scenario_factors.get("liner_thickness_factor", 1.0) or 1.0),
         initial_temperature_k=float(scenario_factors.get("initial_temperature_k", 298.15) or 298.15),
     )
+    return _advanced_after_thermal(
+        geometry, curve, thermal, casing_material, flame_temp_k, r_specific, gamma_resolved
+    )
+
+
+def _advanced_after_thermal(geometry, curve, thermal, casing_material, flame_temp_k, r_specific, gamma_resolved):
+    """The structural, CFD, ignition and flight models and the metadata of ``simulate_advanced_physics``, given the
+    thermal metrics (computed by the scalar model or by a batched backend)."""
+    scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
     structural = simulate_structural_response(
         geometry,
         curve,

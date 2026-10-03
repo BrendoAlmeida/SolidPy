@@ -368,6 +368,30 @@ def test_jax_chunks_a_thermal_batch_that_does_not_fit_one_launch(thermal_lanes):
     assert_thermal_close(result.results, scalar)
 
 
+def test_the_ensemble_runs_the_advanced_physics_on_jax(thermal_lanes):
+    from solidpy import CasingMaterial
+    from solidpy.ensemble import run_advanced_physics_ensemble
+    from test_advanced_ensemble import scalar as advanced_scalar
+    from test_robustness import make_motor_stack
+
+    from solidpy import geometry_from_components, run_detailed_ballistics
+
+    grain, motor, propellant, environment = make_motor_stack()
+    geometry = geometry_from_components(grain, motor, propellant, casing_wall_thickness_m=0.004, dry_mass_kg=3.0)
+    curve = run_detailed_ballistics(grain, motor, propellant, environment, max_step_size=0.03, max_time_points=1000)
+    casing = CasingMaterial(liner_thickness_m=0.002)
+
+    got = run_advanced_physics_ensemble(
+        geometry, [curve, curve], casing_material=casing, flame_temp_k=propellant.combustion_temperature,
+        r_specific=propellant.products_constant, backend="jax", device="cpu",
+    )
+
+    want = advanced_scalar(geometry, curve, propellant, casing)
+    for result in got:
+        for key, value in want.items():
+            assert result[key] == pytest.approx(value, rel=1e-8, abs=1e-9), key
+
+
 @pytest.mark.gpu
 def test_on_the_accelerator_the_thermal_ablation_matches_the_scalar_model(thermal_lanes):
     batch, scalar = thermal_lanes
@@ -376,3 +400,16 @@ def test_on_the_accelerator_the_thermal_ablation_matches_the_scalar_model(therma
 
     assert result.execution["failed_lanes"] == [] and result.execution["device"] == "cuda:0"
     assert_thermal_close(result.results, scalar)
+
+
+@pytest.mark.gpu
+def test_on_the_accelerator_auto_sends_a_large_thermal_batch_to_the_device(thermal_lanes):
+    from solidpy.ensemble import AUTO_MIN_THERMAL_LANES, simulate_thermal
+
+    batch, scalar = thermal_lanes
+    lanes = np.arange(AUTO_MIN_THERMAL_LANES) % len(batch)
+
+    result = simulate_thermal(batch.select(lanes), backend="auto")
+
+    assert result.execution["effective_backend"] == "jax" and result.execution["fallback_lanes"] == {}
+    assert_thermal_close(result.to_results()[:len(scalar)], scalar)
