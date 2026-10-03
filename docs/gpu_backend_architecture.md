@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: design proposal; Phases 0 to 3 are implemented (section 14.4). Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.11). Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -462,20 +462,25 @@ unit test against the scalar function.
 ### 6.2 Heterogeneous executor (`solidpy.executor`)
 
 The first scheduler is implemented by `solidpy.executor.HeterogeneousExecutor` and exposed as a list passed to
-`simulate_burn`, for example `backend=[("jax", "cuda:0"), ("cpu-reference", 6)]`. Each backend/device gets one
-feeder thread. Feeders pull compatible lanes from a shared queue ordered by the existing `lane_cost` estimate; a
-feeder that finishes a chunk can claim another, so faster engines naturally take more work. Accelerator chunks
-default to at most 2,048 lanes (and respect the backend's own memory cap); reference chunks default to 64 lanes per
-worker. Callers can set `chunk_size` to bound either kind of chunk.
+`simulate_burn` or `simulate_thermal`, for example `backend=[("jax", "cuda:0"), ("cpu-reference", 6)]`. Each
+backend/device gets one feeder thread. Feeders pull compatible lanes from a shared queue ordered by `lane_cost` for
+burns or series length for thermal work; a feeder that finishes a chunk can claim another, so faster engines naturally
+take more work. Accelerator chunks default to at most 2,048 lanes (and respect the backend's own memory cap); reference
+chunks default to 64 lanes per worker. Callers can set `chunk_size` to bound either kind of chunk.
 
 Multiple devices can run concurrently because each device is a distinct backend instance and feeder. There is no
 cross-device data exchange. Lanes unsupported by all selected engines go to `cpu-reference` unless `strict=True`;
 an engine exception, missing result or `step_overflow` is isolated and retried on the reference. Each lane records the
 selected backend or fallback reason, and output order matches input order. The scheduler uses chunk completion to
-adapt the split; it does not run a separate throughput-calibration solve.
+adapt the split and reports observed assigned lanes per second for each feeder; it does not run a separate
+throughput-calibration solve, which would repeat work for the same measurement. A CPU reference process pool is reused for
+all chunks assigned to that feeder. Worker processes cap native math-library threading at one. `reserved_cores` limits
+the worker count to leave host cores free for accelerator feeders; by default it reserves one core per non-CPU device.
+The W2/W3 pipelines also hold one host thread for the producer and one reference fallback worker when sizing their
+post-processing pool.
 
-Still open in this section: configurable core reservation and native-thread limits for worker processes. The CPU
-reference worker pool currently follows the existing `workers` option and host process cap.
+Still open in this section: validation of concurrent JAX launches on actual multi-GPU hardware. `workers` remains capped
+by CPU affinity, a library-wide ceiling of 16, and the configured core reservation.
 
 ### 6.3 Batching policy
 
@@ -483,17 +488,18 @@ reference worker pool currently follows the existing `workers` option and host p
   Backend-specific grain and table padding still happens when the chunk is prepared.
 * Accelerator chunk size respects the backend memory cap and defaults to at most 2,048 lanes; a caller may set a
   smaller `chunk_size` when memory or latency requires it.
-* **Refill** (continuous batching), where a finished lane is replaced inside an active device batch, is not
-  implemented. Feeders currently submit fixed chunks from the shared queue.
+* Feeders refill at chunk boundaries: after a solve returns, each claims the next compatible chunk from the shared queue.
+  Replacing a finished lane inside an active device launch is not supported by the current fixed-shape JAX batch contract.
+  It remains a possible follow-up if measurements show chunk-level refill leaves substantial device capacity unused.
 
 ### 6.4 Overlapping accelerator and CPU work
 
-After the batched ODE the remaining per-lane work (derived metrics that stay on the host, result assembly, user
-callbacks, writing outputs) can dominate. The advanced-physics and robustness ensemble APIs accept `workers > 1` for
-bounded CPU post-processing. The heterogeneous burn scheduler can overlap separate backend chunks, including a
-device solve and a CPU reference chunk; the high-level W2/W3 APIs still wait for the complete batch result before
-starting their CPU post-processing. There is not yet a producer/consumer pipeline that overlaps solve chunk `k`,
-post-processes chunk `k-1` and packs chunk `k+1` as one flow.
+The advanced-physics and robustness ensemble APIs accept `workers > 1` for bounded CPU post-processing. W2 now feeds
+thermal chunks into the process window as they finish; while CPU workers process one chunk, the caller packs and solves
+the next. W3 applies the same bounded producer/consumer flow across design chunks. `workers` sets the CPU post-processing
+pool size; a concurrent reference fallback uses one worker. `pack_s`, `thermal_s`/`solve_s` and `models_s`/`postprocess_s`
+report cumulative stage times, so solve and model work may overlap. These pipelines preserve lane and design order, and
+use one spawned process pool per call.
 
 ## 7. Coverage map (what runs where)
 
@@ -757,10 +763,9 @@ JAX's NumPy-compatible namespace. The loop driver is the only backend-specific p
 | 5. Heterogeneous executor and polish | CPU+GPU executor, multi-GPU, refill batching, overlap pipeline, docs, install guides, optional GPU CI | benchmark suite results published; documentation complete | 3-4 wk |
 | 6. Optional | PyTorch backend, flight ODE (T2), Diffrax variant, autodiff APIs, float32 profile, custom-kernel backend | each justified by measurements | open |
 
-**Status 2026-10-02:** a time-boxed spike of Phases 1-3 for the tubular/star, scalar-thermochemistry,
-no-igniter case exists and passed its checks (Appendix D); the go/no-go numbers for a consumer GPU are
-in. Igniter/activation profiles, tabulated properties, full-history modes, packaging and the scheduler
-remain.
+**Spike result (2026-10-02):** a time-boxed spike of Phases 1-3 for the tubular/star, scalar-thermochemistry,
+no-igniter case passed its checks (Appendix D); consumer-GPU go/no-go numbers are recorded there. The later status
+sections below supersede the spike's list of remaining work.
 
 Effort figures are planning estimates, not commitments; Phase 2 carries most of the risk (event
 localization and exact dense output) and Phase 3 decides the future of the rest.
@@ -995,8 +1000,9 @@ ballistics took 0.557 s serially and 1.542 s with workers, with total runtime in
 Keep the default serial on this host; the process option remains available for workloads and hosts that benefit from it.
 The benchmarks are recorded in `docs/gpu_backend_benchmarks.md` and `benchmarks/results/postprocess_*.json`.
 
-This is parallel post-processing after a completed solve. The Phase 5 pipeline that overlaps accelerator solving,
-post-processing and packing remains pending.
+Post-processing now runs through the bounded pipeline described in section 6.4 when `workers > 1`: solve chunks,
+CPU model jobs and packing of the next chunk can overlap. A single chunk has no work to overlap, and `workers=None` or
+`1` keeps the path serial.
 
 ### 14.9 History output policies (2026-10-03)
 
@@ -1014,20 +1020,46 @@ reference-fallback behavior.
 
 ### 14.10 Heterogeneous burn scheduling (2026-10-03)
 
-`simulate_burn` accepts an engine list such as `[("jax", "cuda:0"), ("cpu-reference", 6)]`. The new
+`simulate_burn` and `simulate_thermal` accept an engine list such as `[("jax", "cuda:0"), ("cpu-reference", 6)]`.
 `solidpy.executor.HeterogeneousExecutor` starts one feeder thread per backend/device, pulls compatible cost-sorted lanes
 from a shared dynamic queue, returns lanes in their original order, and records backend selection and fallback reasons.
 Capability misses are sent to the reference unless strict mode is requested. A backend exception, missing result or
-`step_overflow` retries the affected chunk or lanes on the reference. Multiple fake devices were tested concurrently;
-the result ordering and mass mapping were checked through the CPU-vectorized implementation.
+solver failure retries the affected chunk or lanes on the reference. Multiple fake devices were tested concurrently;
+the result ordering and burn mass mapping were checked through the CPU-vectorized implementation. Thermal scheduling
+was checked against the CPU-vectorized batch result.
 
 The focused review suite passed (`69 passed, 1 skipped` across executor, ensemble, registry and batch-result tests).
 This host has no JAX installation or GPU driver, so a real JAX multi-device run is still required before relying on
 concurrent accelerator launches in production.
 
-Remaining Phase 5 work: heterogeneous thermal services, process-pool reuse and native-thread/core reservation controls,
-continuous refill of active device batches, and a chunk pipeline that overlaps W2/W3 CPU post-processing with device
-solves. The scheduler dynamically shares queued chunks based on completion time; it does not perform a calibration pass.
+W2/W3 now use a bounded pipeline when `workers > 1`. Reference pools persist across chunks, worker native-threading is
+limited, and configurable `reserved_cores` leaves capacity for device feeders. The scheduler dynamically shares queued
+chunks based on completion time; it does not perform a separate calibration pass.
+
+### 14.11 W2/W3 producer-consumer scheduling and worker budgets (2026-10-03)
+
+`run_advanced_physics_ensemble(..., workers=N)` now submits each solved thermal chunk into a bounded ordered process
+window while the producer prepares and solves the next chunk. `run_robustness_ensemble` uses the same pattern across
+design chunks, so detailed ballistics can run while the next burn batch is solved. Both preserve the scalar result schema
+and lane/design order; timings report cumulative stage work and can overlap. When `workers > 1`, the producer keeps the
+reference solve to one worker and reserves two host cores from the post-processing pool for the producer and a possible
+reference fallback. Heterogeneous engines also support `reserved_cores`; the default reservation is one core per
+non-CPU feeder. Native math-library threads in spawned workers are limited to one.
+
+Thermal heterogeneous execution keeps per-lane routing and fallback details in `BatchResult.execution`, so the thermal
+result mappings remain unchanged for `simulate_advanced_physics` compatibility. Engine summaries include the observed
+assigned lanes per second from actual chunks. This completion-based feedback naturally lets faster feeders claim more
+work without a separate calibration batch.
+
+Fake multi-device CPU backends cover concurrency and ordering. The focused regression suite passed (`88 passed, 1
+skipped`), followed by the full suite (`1089 passed, 8 skipped` in 8m29s). The current host has no JAX installation or
+working GPU driver, so concurrent accelerator launches and the W2/W3 pipeline throughput on a real GPU remain
+unverified.
+
+Inter-chunk refill and the W2/W3 process pipeline are implemented. Intra-launch lane replacement is deferred because
+the compiled JAX batch has a fixed lane shape. An optional manually dispatched GPU workflow is in
+`.github/workflows/gpu-backend.yml`; it requires a self-hosted Linux runner labelled `gpu`. Real multi-GPU verification
+and the W4 GPU benchmark remain hardware-dependent.
 
 ## Appendix A. State vector and padded batch schema
 

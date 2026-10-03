@@ -219,6 +219,18 @@ def test_several_designs_are_one_batch_and_each_report_matches_its_own_run():
     assert together[0]["nominal"]["propellant_mass_kg"].shape != together[1]["nominal"]["propellant_mass_kg"].shape
 
 
+def test_postprocessing_pipeline_preserves_reports_across_solve_chunks():
+    designs = [make_motor_stack(), second_design()]
+    options = dict(scenarios=[], max_step_size=0.05, max_time_points=120, backend="cpu-vectorized")
+
+    together = run_robustness_ensemble(designs, workers=2, chunk_lanes=1, **options)
+    alone = [run_robustness_ensemble([design], workers=1, **options)[0] for design in designs]
+
+    assert len(together) == 2
+    for got, expected in zip(together, alone):
+        assert_reports_close(got, expected)
+
+
 def test_dropping_the_series_keeps_every_scalar_output_and_the_statistics():
     designs = [make_motor_stack()]
     options = dict(scenarios=scenarios()[:3], max_step_size=0.03, max_time_points=200, backend="cpu-vectorized",

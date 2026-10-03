@@ -312,17 +312,18 @@ def run_robustness_analysis(
     backend=None,
     device=None,
     workers=None,
+    reserved_cores=None,
     **simulation_kwargs,
 ):
     """Run nominal and perturbed detailed ballistics, then aggregate statistics.
 
     By default every scenario is simulated in turn with ``BurnSimulation``. With ``backend`` (a name from
     ``solidpy.backends``, or ``"auto"``) the nominal run and the scenarios are solved together as lanes of one batch
-    (``solidpy.ensemble.run_robustness_ensemble``), and ``device`` and ``workers`` go to that backend. A single design
+    (``solidpy.ensemble.run_robustness_ensemble``), and ``device``, ``workers`` and ``reserved_cores`` go to that backend. A single design
     is only about 27 lanes, so a GPU backend pays off for many designs at once: use ``run_robustness_ensemble``.
     """
-    if backend is None and (device is not None or workers is not None):
-        raise ValueError("device and workers apply to a batch backend: pass backend= as well")
+    if backend is None and (device is not None or workers is not None or reserved_cores is not None):
+        raise ValueError("device, workers and reserved_cores apply to a batch backend: pass backend= as well")
     if backend is not None:
         from .ensemble import run_robustness_ensemble
 
@@ -337,6 +338,7 @@ def run_robustness_analysis(
             backend=backend,
             device=device,
             workers=workers,
+            reserved_cores=reserved_cores,
             **simulation_kwargs,
         )[0]
     scenario_list = list(scenarios) if scenarios is not None else default_robustness_scenarios()

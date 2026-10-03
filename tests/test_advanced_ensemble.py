@@ -45,7 +45,7 @@ def test_the_numpy_backend_agrees_on_every_key_and_the_models_after_the_thermal_
 
     got = run_advanced_physics_ensemble(
         geometry, curves, casing_material=casing, flame_temp_k=propellant.combustion_temperature,
-        r_specific=propellant.products_constant, backend="cpu-vectorized", workers=2,
+        r_specific=propellant.products_constant, backend=["cpu-vectorized", "cpu-reference"], workers=2, chunk_size=1,
         timings=timings, execution=execution,
     )
 
@@ -55,7 +55,9 @@ def test_the_numpy_backend_agrees_on_every_key_and_the_models_after_the_thermal_
         for key, value in want.items():
             assert got[lane][key] == pytest.approx(value, rel=1e-8, abs=1e-9), key
     assert set(timings) == {"pack_s", "thermal_s", "models_s"} and all(v >= 0.0 for v in timings.values())
-    assert execution["effective_backend"] == "cpu-vectorized" and execution["lanes"] == 2
+    assert execution["effective_backend"] == "heterogeneous" and execution["lanes"] == 2
+    assert execution["schedule"] == "thermal_postprocess_pipeline" and execution["overlap"] is True
+    assert set(execution["lane_backends"]) == {0, 1}
 
 
 def test_the_scenario_factors_of_a_curve_change_the_thermal_metrics_like_the_scalar_function_says(designs):

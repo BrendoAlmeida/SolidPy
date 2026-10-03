@@ -120,3 +120,17 @@ def spawn_pickle_safe(value, *, skip_numeric_arrays=False):
 def safe_process_context():
     """Choose a fresh process context so workers cannot inherit initialized accelerator state."""
     return multiprocessing.get_context("spawn")
+
+
+def process_worker_initializer():
+    """Keep native math libraries from starting one thread per CPU inside each worker process."""
+    for name in (
+        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[name] = "1"
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        return
+    threadpool_limits(limits=1)

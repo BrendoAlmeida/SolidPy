@@ -30,7 +30,9 @@ from .batch import ProblemBatch
 from .batch.kernels.tables import evaluate as evaluate_table
 from .batch.result import BatchResult
 from .batch.thermal import ThermalBatch
-from ._parallel import process_worker_count, safe_process_context, spawn_pickle_safe
+from ._parallel import (
+    available_cpu_count, process_worker_count, process_worker_initializer, safe_process_context, spawn_pickle_safe,
+)
 
 __all__ = [
     "ProblemBatch", "SolveOptions", "ThermalBatch", "UnsupportedLane", "lane_cost", "run_advanced_physics_ensemble",
@@ -119,6 +121,55 @@ def _validate_workers(workers: Optional[int]) -> Optional[int]:
     return int(workers)
 
 
+def _pipeline_worker_counts(workers: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    """Keep one reference worker available while the requested pool processes completed chunks."""
+    if workers is None or workers <= 1:
+        return workers, workers
+    return 1, workers
+
+
+def _process_reserved_cores(backend, device, requested, lane_count, service=None) -> int:
+    """Choose how many host cores process pools should leave for accelerator feeder threads."""
+    if requested is not None:
+        if not isinstance(backend, (list, tuple)):
+            raise ValueError("reserved_cores applies only when backend is a heterogeneous engine list")
+        if isinstance(requested, bool) or not isinstance(requested, numbers.Integral) or requested < 0:
+            raise ValueError(f"reserved_cores must be a non-negative integer or None, got {requested!r}")
+        return int(requested)
+    if backend is None:
+        backend, selected = backends.current_backend()
+        device = device if device is not None else selected
+    if isinstance(backend, (list, tuple)):
+        from .executor import HeterogeneousExecutor
+
+        return HeterogeneousExecutor(backend)._reserved_default()
+    if backend == "auto":
+        minimum = AUTO_MIN_THERMAL_LANES if service == THERMAL_SERVICE else AUTO_MIN_LANES
+        if lane_count < minimum or device in ("cpu", "cpu:0"):
+            return 0
+        for name in AUTO_ACCELERATORS:
+            if backends.available().get(name) != "ok":
+                continue
+            try:
+                candidate = backends.get_backend(name)
+                devices = candidate.devices()
+            except ImportError:
+                continue
+            if service is not None and not candidate.capabilities().provides(service):
+                continue
+            usable = (device in devices) if device is not None else any(
+                not item.startswith("cpu") for item in devices
+            )
+            if usable:
+                return 0 if device is not None and device.startswith("cpu") else 1
+        return 0
+    if backend == "cpu-reference":
+        return 0
+    candidate = backends.get_backend(backend, device)
+    selected_device = str(getattr(candidate, "device", device or "cpu"))
+    return 0 if selected_device.startswith("cpu") else 1
+
+
 def _pickle_safe(value) -> bool:
     """Check spawn importability and serialization without copying numeric histories."""
     return spawn_pickle_safe(value, skip_numeric_arrays=True)
@@ -126,14 +177,15 @@ def _pickle_safe(value) -> bool:
 
 def _detailed_ballistics_process_safe(job) -> bool:
     """Check picklability without serializing the large history arrays in a ``SimulationView``."""
-    _, view, scenario, options = job
+    _, view, scenario, options = job[:4]
     return _pickle_safe((view.motor, view.propellant, view.environment_pressure, view._activation_inputs,
                          view.result, scenario, options))
 
 
 def _bounded_process_batches(
     worker: Callable[[List[Any]], List[Any]], jobs: Iterable[Any], job_count: int, workers: Optional[int],
-    *, process_safe: Optional[Callable[[Any], bool]] = None, batch_size: int = 8,
+    *, process_safe: Optional[Callable[[Any], bool]] = None, batch_size: int = 8, reserved_cores: int = 0,
+    schedule: Optional[Dict[str, int]] = None,
 ) -> Iterator[Tuple[Any, Any]]:
     """Yield ``(job, result)`` in input order with a bounded, lazily filled process window.
 
@@ -143,6 +195,8 @@ def _bounded_process_batches(
     """
     if job_count < 1:
         return
+    if schedule is not None:
+        schedule["process_batches"] = 0
     job_iterator = iter(jobs)
     if workers is None or workers <= 1 or job_count == 1:
         while True:
@@ -155,7 +209,8 @@ def _bounded_process_batches(
             yield from zip(batch, results)
         return
 
-    process_count = process_worker_count(workers, job_count)
+    worker_budget = max(1, available_cpu_count() - int(reserved_cores))
+    process_count = process_worker_count(min(workers, worker_budget), job_count)
     batch_size = min(batch_size, max(1, job_count // (2 * process_count)))
     window = min(8 * process_count, max(1, MAX_POSTPROCESS_IN_FLIGHT_JOBS // batch_size))
     slots = {}
@@ -169,12 +224,16 @@ def _bounded_process_batches(
             return False
         safe = process_safe is None or all(process_safe(job) for job in batch)
         future = pool.submit(worker, batch) if safe else None
+        if future is not None and schedule is not None:
+            schedule["process_batches"] += 1
         slots[next_submit] = (batch, future, None)
         next_submit += 1
         return True
 
     # JAX may have initialized CUDA in the parent; use isolated workers rather than fork the runtime state.
-    with ProcessPoolExecutor(max_workers=process_count, mp_context=safe_process_context()) as pool:
+    with ProcessPoolExecutor(
+        max_workers=process_count, mp_context=safe_process_context(), initializer=process_worker_initializer
+    ) as pool:
         while next_submit < window and submit_one(pool):
             pass
         while next_output < next_submit:
@@ -199,18 +258,26 @@ def _bounded_process_batches(
                 pass
 
 
-def _advanced_after_thermal_batch(jobs):
-    """Run an ordered group of post-thermal advanced-physics lanes in one worker process."""
+def _timed_advanced_after_thermal_batch(jobs):
+    """Return each advanced-physics result with its worker-side CPU time."""
     from .Multiphysics import _advanced_after_thermal
 
-    return [_advanced_after_thermal(*job) for job in jobs]
+    results = []
+    for job in jobs:
+        started = time.perf_counter()
+        results.append((_advanced_after_thermal(*job), time.perf_counter() - started))
+    return results
 
 
-def _detailed_ballistics_batch(jobs):
-    """Build detailed ballistics for an ordered group of already-solved lanes."""
+def _timed_detailed_ballistics_batch(jobs):
+    """Build each lane's detailed ballistics and report its worker-side CPU time."""
     from .DetailedBallistics import build_detailed_ballistics
 
-    return [build_detailed_ballistics(job[1], **job[3]) for job in jobs]
+    results = []
+    for job in jobs:
+        started = time.perf_counter()
+        results.append((build_detailed_ballistics(job[1], **job[3]), time.perf_counter() - started))
+    return results
 
 
 def _execution(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -226,6 +293,7 @@ def simulate_burn(
     history: str = "metrics",
     strict: bool = False,
     workers: Optional[int] = None,
+    reserved_cores: Optional[int] = None,
     max_steps: Optional[int] = None,
     tiers: Optional[tuple] = None,
     chunk_size: Optional[int] = None,
@@ -259,10 +327,16 @@ def simulate_burn(
 
         if device is not None:
             raise ValueError("device cannot be combined with heterogeneous backend specs; put it in each engine spec")
+        if reserved_cores is not None and (
+            isinstance(reserved_cores, bool) or not isinstance(reserved_cores, numbers.Integral) or reserved_cores < 0
+        ):
+            raise ValueError(f"reserved_cores must be a non-negative integer or None, got {reserved_cores!r}")
         options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
-        return HeterogeneousExecutor(backend, default_workers=workers).solve_burn(
+        return HeterogeneousExecutor(backend, default_workers=workers, reserved_cores=reserved_cores).solve_burn(
             batch, options, requested=backend, device=device, chunk_size=chunk_size, sort=sort, strict=strict
         )
+    if reserved_cores is not None:
+        raise ValueError("reserved_cores applies only when backend is a heterogeneous engine list")
     requested = backend
     if backend == "auto":
         backend = _auto_backend(batch, device)
@@ -327,18 +401,20 @@ THERMAL_SERVICE = "thermal_ablation"
 
 def simulate_thermal(
     batch: ThermalBatch,
-    backend: Optional[str] = None,
+    backend: Optional[Any] = None,
     device: Optional[str] = None,
     *,
     strict: bool = False,
     workers: Optional[int] = None,
+    reserved_cores: Optional[int] = None,
     chunk_size: Optional[int] = None,
     sort: bool = True,
 ) -> BatchResult:
     """The wall conduction and throat ablation of every lane of ``batch``, in lane order.
 
     ``results[i]`` is the mapping ``Multiphysics.simulate_thermal_ablation`` returns for lane ``i``. ``backend`` is a
-    name, ``"auto"`` (an accelerator from 128 lanes, else the reference) or ``None`` for the selected one. A lane the
+    name, ``"auto"`` (an accelerator from 128 lanes, else the reference), ``None`` for the selected one, or a list of
+    backend engine specs for heterogeneous scheduling. A lane the
     backend cannot take (a series that is not finite, series of different lengths, a backend without the thermal
     service) are rerun on the scalar reference, or raise ``UnsupportedLane`` with ``strict=True``. A lane whose integration
     did not finish is rerun on the reference even with ``strict=True`` (the scalar code decides what happens to it, as
@@ -357,6 +433,21 @@ def simulate_thermal(
     ):
         raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
     chunk_size = None if chunk_size is None else int(chunk_size)
+    if isinstance(backend, (list, tuple)):
+        from .executor import HeterogeneousExecutor
+
+        if device is not None:
+            raise ValueError("device cannot be combined with heterogeneous backend specs; put it in each engine spec")
+        if reserved_cores is not None and (
+            isinstance(reserved_cores, bool) or not isinstance(reserved_cores, numbers.Integral) or reserved_cores < 0
+        ):
+            raise ValueError(f"reserved_cores must be a non-negative integer or None, got {reserved_cores!r}")
+        options = SolveOptions(workers=workers)
+        return HeterogeneousExecutor(backend, default_workers=workers, reserved_cores=reserved_cores).solve_thermal(
+            batch, options, requested=backend, chunk_size=chunk_size, sort=sort, strict=strict
+        )
+    if reserved_cores is not None:
+        raise ValueError("reserved_cores applies only when backend is a heterogeneous engine list")
     requested = backend
     if backend == "auto":
         backend = _auto_backend(batch, device, THERMAL_SERVICE, AUTO_MIN_THERMAL_LANES)
@@ -418,10 +509,11 @@ def run_advanced_physics_ensemble(
     flame_temp_k=2800.0,
     r_specific=287.0,
     gamma=None,
-    backend: Optional[str] = "auto",
+    backend: Optional[Any] = "auto",
     device: Optional[str] = None,
     strict: bool = False,
     workers: Optional[int] = None,
+    reserved_cores: Optional[int] = None,
     chunk_size: Optional[int] = None,
     timings: Optional[Dict[str, float]] = None,
     execution: Optional[Dict[str, Any]] = None,
@@ -433,14 +525,17 @@ def run_advanced_physics_ensemble(
     or one per lane. Returns one flat metrics mapping per lane, the one ``simulate_advanced_physics`` returns for it: the
     wall conduction, which costs most of the advanced physics, runs through ``simulate_thermal`` on ``backend`` and the
     structural, CFD, ignition and flight models then run on the CPU for each lane from its thermal metrics. The scenario
-    factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. ``workers`` is the process
-    count for the ``cpu-reference`` thermal solve and the CPU models after it. ``None`` or ``1`` keeps post-processing
-    serial; values above one run it in an ordered process pool. At thousands of lanes, those models can dominate
+    factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. ``workers`` sets the
+    CPU model process count. ``None`` or ``1`` keeps post-processing serial; values above one run it in an ordered
+    process pool. While the bounded thermal pipeline is active, reference fallbacks use one process so the requested
+    workers stay available for post-processing. ``reserved_cores`` is available with a heterogeneous engine list; by
+    default the executor leaves one host core for each non-CPU feeder. At thousands of lanes, those models can dominate
     (about 5 ms per lane against 0.3 ms for batched thermal ablation on the GPU). CPU process pools use ``spawn``, so
     scripts must call this function under ``if __name__ == "__main__":`` when ``workers > 1``.
     A dict passed as
-    ``timings`` receives the seconds packing (``pack_s``), in the thermal batch (``thermal_s``) and in the other models
-    (``models_s``); one passed as ``execution`` receives the summary of ``simulate_thermal``.
+    ``timings`` receives cumulative seconds packing (``pack_s``), in thermal solves (``thermal_s``) and in CPU models
+    (``models_s``); solve and model times can overlap. One passed as ``execution`` receives the summary of the thermal
+    chunks.
     """
     workers = _validate_workers(workers)
     from .batch.thermal import _lane_count, _per_lane
@@ -461,22 +556,115 @@ def run_advanced_physics_ensemble(
         liner_thickness_factor=[liner for liner, _ in scenario],
     )
     packed = time.perf_counter()
-    outcome = simulate_thermal(batch, backend=backend, device=device, strict=strict, workers=workers, chunk_size=chunk_size)
-    solved = time.perf_counter()
-    thermal = outcome.to_results()
-    jobs = (
-        (geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
-        for i in range(count)
-    )
-    results = [
-        result for _, result in _bounded_process_batches(
-            _advanced_after_thermal_batch, jobs, count, workers, process_safe=_pickle_safe
+    requested_backend = backend
+    selected_backend, selected_device = backend, device
+    if backend == "auto":
+        selected_backend = _auto_backend(batch, device, THERMAL_SERVICE, AUTO_MIN_THERMAL_LANES)
+        if selected_backend == "cpu-reference":
+            selected_device = None
+    elif backend is None:
+        selected_backend, configured_device = backends.current_backend()
+        selected_device = device if device is not None else configured_device
+        requested_backend = selected_backend
+
+    heterogeneous = isinstance(selected_backend, (list, tuple))
+    reference_only = selected_backend == "cpu-reference"
+    if chunk_size is not None and (
+        isinstance(chunk_size, bool) or not isinstance(chunk_size, numbers.Integral) or chunk_size < 1
+    ):
+        raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
+    pipeline = workers is not None and workers > 1 and not reference_only
+    thermal_workers, postprocess_workers = _pipeline_worker_counts(workers) if pipeline else (workers, workers)
+    postprocess_reserved_cores = _process_reserved_cores(
+        selected_backend, selected_device, reserved_cores, count, service=THERMAL_SERVICE
+    ) + (2 if pipeline else 0)
+    thermal_elapsed = 0.0
+    model_elapsed = 0.0
+    chunk_pack_elapsed = 0.0
+    final_execution: Dict[str, Any]
+
+    if pipeline and count:
+        thermal_chunk_size = int(chunk_size) if chunk_size is not None else 2048
+        execution_chunks = []
+        fallback_lanes: Dict[int, Any] = {}
+        fallback_errors: Dict[int, Any] = {}
+        lane_backends: Dict[int, Any] = {}
+        postprocess_schedule: Dict[str, int] = {}
+
+        def jobs():
+            nonlocal thermal_elapsed, chunk_pack_elapsed
+            for start in range(0, count, thermal_chunk_size):
+                end = min(start + thermal_chunk_size, count)
+                chunk_start = time.perf_counter()
+                sub_batch = batch.select(np.arange(start, end))
+                chunk_pack_elapsed += time.perf_counter() - chunk_start
+                solve_start = time.perf_counter()
+                outcome = simulate_thermal(
+                    sub_batch, backend=selected_backend, device=selected_device, strict=strict,
+                    workers=thermal_workers,
+                    reserved_cores=reserved_cores, chunk_size=chunk_size, sort=True,
+                )
+                thermal_elapsed += time.perf_counter() - solve_start
+                execution_chunks.append(outcome.execution)
+                for lane, reasons in outcome.execution.get("fallback_lanes", {}).items():
+                    fallback_lanes[start + int(lane)] = reasons
+                for lane, error in outcome.execution.get("fallback_errors", {}).items():
+                    fallback_errors[start + int(lane)] = error
+                for lane, backend_info in outcome.execution.get("lane_backends", {}).items():
+                    lane_backends[start + int(lane)] = backend_info
+                thermal = outcome.to_results()
+                for local_lane, result in enumerate(thermal):
+                    i = start + local_lane
+                    yield (geometries[i], curves[i], result, casings[i], flames[i], specifics[i], gammas[i])
+
+        results = []
+        for _, (result, elapsed) in _bounded_process_batches(
+            _timed_advanced_after_thermal_batch, jobs(), count, postprocess_workers, process_safe=_pickle_safe,
+            reserved_cores=postprocess_reserved_cores, schedule=postprocess_schedule,
+        ):
+            results.append(result)
+            model_elapsed += elapsed
+        final_execution = {
+            "requested_backend": requested_backend,
+            "effective_backend": "heterogeneous" if heterogeneous else selected_backend,
+            "lanes": count,
+            "chunks": len(execution_chunks),
+            "fallback_lanes": fallback_lanes,
+            "fallback_errors": fallback_errors,
+            "lane_backends": lane_backends,
+            "backend_executions": [
+                execution for chunk_execution in execution_chunks
+                for execution in chunk_execution.get("backend_executions", [chunk_execution])
+            ],
+            "schedule": "thermal_postprocess_pipeline",
+            "overlap": len(execution_chunks) > 1 and postprocess_schedule["process_batches"] > 0,
+        }
+    else:
+        outcome = simulate_thermal(
+            batch, backend=backend, device=device, strict=strict, workers=workers, reserved_cores=reserved_cores,
+            chunk_size=chunk_size,
         )
-    ]
+        solved = time.perf_counter()
+        thermal = outcome.to_results()
+        jobs = (
+            (geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
+            for i in range(count)
+        )
+        results = []
+        for _, (result, elapsed) in _bounded_process_batches(
+            _timed_advanced_after_thermal_batch, jobs, count, workers, process_safe=_pickle_safe,
+            reserved_cores=postprocess_reserved_cores,
+        ):
+            results.append(result)
+            model_elapsed += elapsed
+        thermal_elapsed = solved - packed
+        final_execution = outcome.execution
+
     if timings is not None:
-        timings.update(pack_s=packed - mark, thermal_s=solved - packed, models_s=time.perf_counter() - solved)
+        timings.update(pack_s=packed - mark + chunk_pack_elapsed,
+                       thermal_s=thermal_elapsed, models_s=model_elapsed)
     if execution is not None:
-        execution.update(outcome.execution)
+        execution.update(final_execution)
     return results
 
 
@@ -506,10 +694,11 @@ def run_robustness_ensemble(
     max_step_size: float = 0.01,
     max_time_points: Optional[int] = 1000,
     validator=None,
-    backend: Optional[str] = "auto",
+    backend: Optional[Any] = "auto",
     device: Optional[str] = None,
     strict: bool = False,
     workers: Optional[int] = None,
+    reserved_cores: Optional[int] = None,
     max_steps: Optional[int] = None,
     chunk_lanes: int = 4096,
     timings: Optional[Dict[str, float]] = None,
@@ -524,13 +713,14 @@ def run_robustness_ensemble(
     ``max_time_points``). The scenarios are the same for every
     design (the default ones, or ``scenarios``, plus ``monte_carlo_sample_count`` Latin-hypercube samples).
 
-    The burns run on ``backend`` (a name, ``"auto"``, or ``None`` for the selected one; see ``simulate_burn``) with
+    The burns run on ``backend`` (a name, ``"auto"``, a heterogeneous engine list, or ``None`` for the selected one;
+    see ``simulate_burn``) with
     the full history; the detailed ballistics of every lane is then built on the CPU from the lane's result, so the
     reports are what the scalar path gives within the numerical tolerances of ``solidpy.backends._tolerances``.
     Invalid inputs raise when the batch is packed,
     before any burn is solved; the scalar path raises as it reaches them. A dict passed as ``timings`` receives the
-    seconds spent packing (``pack_s``), solving (``solve_s``), building the detailed ballistics (``postprocess_s``) and
-    assembling the reports (``report_s``).
+    seconds spent packing (``pack_s``), solving chunks (``solve_s``), worker CPU time for detailed ballistics
+    (``postprocess_s``) and assembling reports (``report_s``); solve and post-process work may overlap.
 
     Every lane of a report holds its full series and canonical history, about 200 kB each for a four-grain design, as
     the scalar path's does.
@@ -539,8 +729,9 @@ def run_robustness_ensemble(
     ``valid``), and the report, its statistics and its validity ratio are unchanged.
 
     ``chunk_lanes`` is the most lanes a launch holds, except that a design is never split: a chunk is at least one design
-    (27 lanes with the defaults, more with many Latin-hypercube samples). ``workers`` is the process count for the
-    ``cpu-reference`` solve and detailed-ballistics post-processing; ``None`` or ``1`` keeps post-processing serial.
+    (27 lanes with the defaults, more with many Latin-hypercube samples). ``workers`` is the process count for detailed-
+    ballistics post-processing; while chunks overlap, reference solves use one process. ``reserved_cores`` optionally
+    reserves host cores for accelerator feeders when using a heterogeneous list. ``None`` or ``1`` keeps post-processing serial.
     Process pools use ``spawn``, so scripts must call this function under ``if __name__ == "__main__":`` when
     ``workers > 1``.
     """
@@ -565,73 +756,93 @@ def run_robustness_ensemble(
     clock = {"pack_s": 0.0, "solve_s": 0.0, "postprocess_s": 0.0, "report_s": 0.0}
     reports: List[Dict[str, Any]] = []
     designs_per_chunk = max(1, int(chunk_lanes) // lanes_per_design)
-    for start in range(0, len(parsed), designs_per_chunk):
-        chunk = parsed[start : start + designs_per_chunk]
-        mark = time.perf_counter()
-        motors, propellants, environments, settings, factors, details = [], [], [], [], [], []
-        for grain, motor, propellant, environment, own in chunk:
-            merged = {**simulation_kwargs, **own}
-            step = merged.pop("max_step_size", max_step_size)
-            detail = {name: merged.pop(name) for name in _DETAIL_ARGUMENTS if name in merged}
-            detail.setdefault("resample_step", step)
-            detail["max_time_points"] = merged.pop("max_time_points", max_time_points)
-            burn_kwargs = {"max_step_size": step, "tail_off_evaluation": merged.pop("tail_off_evaluation", True), **merged}
-            nominal = copy.deepcopy((grain, motor, propellant, environment))
-            lanes = [(nominal[1], nominal[2], nominal[3] if nominal[3] is not None else Environment(), burn_kwargs, 1.0,
-                      detail)]
-            for scenario in scenario_list:
-                _, scenario_motor, scenario_propellant, scenario_environment, factor = _scenario_objects(
-                    grain, motor, propellant, environment, scenario
-                )
-                lane_kwargs = {"max_step_size": step, "tail_off_evaluation": burn_kwargs["tail_off_evaluation"],
-                               **_scenario_simulation_kwargs(merged, scenario)}
-                lane_detail = dict(detail, nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor))
-                lanes.append((scenario_motor, scenario_propellant, scenario_environment, lane_kwargs, factor, lane_detail))
-            for motor_i, propellant_i, environment_i, kwargs_i, factor_i, detail_i in lanes:
-                motors.append(motor_i)
-                propellants.append(propellant_i)
-                environments.append(environment_i)
-                settings.append(kwargs_i)
-                factors.append(factor_i)
-                details.append(detail_i)
+    total_lanes = len(parsed) * lanes_per_design
+    solver_workers, postprocess_workers = _pipeline_worker_counts(workers)
 
-        batch = ProblemBatch.from_objects(motors, propellants, environments, settings, burn_rate_factor=factors)
-        clock["pack_s"] += time.perf_counter() - mark
-        mark = time.perf_counter()
-        solved = simulate_burn(batch, backend=backend, device=device, history="full", strict=strict, workers=workers,
-                               max_steps=max_steps).to_results()
-        clock["solve_s"] += time.perf_counter() - mark
-        mark = time.perf_counter()
-        def lane_jobs():
+    def lane_jobs():
+        for start in range(0, len(parsed), designs_per_chunk):
+            chunk = parsed[start : start + designs_per_chunk]
+            mark = time.perf_counter()
+            motors, propellants, environments, settings, factors, details = [], [], [], [], [], []
+            for grain, motor, propellant, environment, own in chunk:
+                merged = {**simulation_kwargs, **own}
+                step = merged.pop("max_step_size", max_step_size)
+                detail = {name: merged.pop(name) for name in _DETAIL_ARGUMENTS if name in merged}
+                detail.setdefault("resample_step", step)
+                detail["max_time_points"] = merged.pop("max_time_points", max_time_points)
+                burn_kwargs = {
+                    "max_step_size": step, "tail_off_evaluation": merged.pop("tail_off_evaluation", True), **merged
+                }
+                nominal = copy.deepcopy((grain, motor, propellant, environment))
+                lanes = [(nominal[1], nominal[2], nominal[3] if nominal[3] is not None else Environment(),
+                          burn_kwargs, 1.0, detail)]
+                for scenario in scenario_list:
+                    _, scenario_motor, scenario_propellant, scenario_environment, factor = _scenario_objects(
+                        grain, motor, propellant, environment, scenario
+                    )
+                    lane_kwargs = {
+                        "max_step_size": step, "tail_off_evaluation": burn_kwargs["tail_off_evaluation"],
+                        **_scenario_simulation_kwargs(merged, scenario),
+                    }
+                    lane_detail = dict(detail, nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor))
+                    lanes.append((scenario_motor, scenario_propellant, scenario_environment, lane_kwargs, factor,
+                                  lane_detail))
+                for motor_i, propellant_i, environment_i, kwargs_i, factor_i, detail_i in lanes:
+                    motors.append(motor_i)
+                    propellants.append(propellant_i)
+                    environments.append(environment_i)
+                    settings.append(kwargs_i)
+                    factors.append(factor_i)
+                    details.append(detail_i)
+
+            batch = ProblemBatch.from_objects(motors, propellants, environments, settings, burn_rate_factor=factors)
+            clock["pack_s"] += time.perf_counter() - mark
+            mark = time.perf_counter()
+            solved = simulate_burn(
+                batch, backend=backend, device=device, history="full", strict=strict, workers=solver_workers,
+                reserved_cores=reserved_cores, max_steps=max_steps,
+            ).to_results()
+            clock["solve_s"] += time.perf_counter() - mark
             for lane in range(len(solved)):
-                scenario = None if lane % lanes_per_design == 0 else scenario_list[lane % lanes_per_design - 1]
+                local_design, scenario_index = divmod(lane, lanes_per_design)
+                scenario = None if scenario_index == 0 else scenario_list[scenario_index - 1]
                 view = SimulationView.from_lane(batch, lane, solved[lane])
-                if not keep_series:
-                    solved[lane] = None  # the bounded worker window now owns this lane's history
-                yield lane, view, scenario, details[lane]
+                solved[lane] = None  # the bounded window now owns the lane's result and history
+                yield (lane, view, scenario, details[lane], start + local_design, scenario_index)
+            solved = None
 
-        processed = _bounded_process_batches(
-            _detailed_ballistics_batch, lane_jobs(), len(solved), workers,
-            process_safe=_detailed_ballistics_process_safe,
+    design_results: List[Dict[str, Any]] = []
+    postprocess_reserved_cores = _process_reserved_cores(backend, device, reserved_cores, total_lanes)
+    if workers is not None and workers > 1:
+        postprocess_reserved_cores += 2  # keep a producer core and one reference fallback worker available
+    for job, (result, elapsed) in _bounded_process_batches(
+        _timed_detailed_ballistics_batch, lane_jobs(), total_lanes, postprocess_workers,
+        process_safe=_detailed_ballistics_process_safe, reserved_cores=postprocess_reserved_cores,
+    ):
+        _, view, scenario, _, design_index, local_lane = job
+        if design_index != len(reports):
+            raise RuntimeError(
+                f"robustness post-processing changed design order: expected {len(reports)}, got {design_index}"
+            )
+        clock["postprocess_s"] += elapsed
+        if keep_series:
+            result["simulation"] = view
+        if scenario is None:
+            result["scenario_id"] = "nominal"
+            result["scenario_kind"] = "nominal"
+        else:
+            _finish_scenario_result(result, scenario, validator)
+        design_results.append(
+            result if keep_series else {
+                key: value for key, value in result.items()
+                if key not in _HEAVY_KEYS and not isinstance(value, np.ndarray)
+            }
         )
-        results: List[Dict[str, Any]] = []
-        for job, result in processed:
-            lane, view, scenario, _ = job
-            if keep_series:
-                result["simulation"] = view
-                solved[lane] = None
-            if scenario is None:
-                result["scenario_id"] = "nominal"
-                result["scenario_kind"] = "nominal"
-            else:
-                _finish_scenario_result(result, scenario, validator)
-            results.append(result if keep_series else {key: value for key, value in result.items()
-                                                       if key not in _HEAVY_KEYS and not isinstance(value, np.ndarray)})
-        clock["postprocess_s"] += time.perf_counter() - mark
-        mark = time.perf_counter()
-        for design in range(len(chunk)):
-            reports.append(_build_report(results[design * lanes_per_design : (design + 1) * lanes_per_design], validator))
-        clock["report_s"] += time.perf_counter() - mark
+        if local_lane == lanes_per_design - 1:
+            mark = time.perf_counter()
+            reports.append(_build_report(design_results, validator))
+            clock["report_s"] += time.perf_counter() - mark
+            design_results = []
     if timings is not None:
         timings.update(clock)
     return reports

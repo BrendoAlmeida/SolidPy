@@ -95,35 +95,40 @@ results = simulate_burn(batch, backend=[("jax", "cuda:0"), ("cpu-reference", 6)]
 
 Each engine pulls chunks from a shared cost-ordered queue; results remain in input order, and unsupported or failed
 accelerator lanes are retried on `cpu-reference` with the reason recorded in their provenance. Pass `strict=True` to
-reject lanes no selected engine supports. This executor currently applies to burn batches; thermal batching still
-accepts one backend at a time. CPU worker pools use `spawn`, so applications should call the API under an
-`if __name__ == "__main__":` guard when process workers are enabled.
+reject lanes no selected engine supports. `simulate_thermal` and `run_advanced_physics_ensemble` accept the same engine
+list. With `workers > 1`, advanced-physics thermal chunks and CPU models flow through a bounded pipeline; robustness
+does the same for burn and detailed-ballistics chunks. `reserved_cores` can reserve host cores for accelerator feeders.
+CPU worker pools use `spawn`, so applications should call the API under an `if __name__ == "__main__":` guard when
+process workers are enabled.
 
 The speedup comes from batch size: on an RTX 4060 in float64 the JAX backend runs 11.8x faster than the scalar
 solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a few hundred lanes. See
 `docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
 Robustness analysis uses the same machinery: `run_robustness_analysis(..., backend="cpu-vectorized")` solves the nominal
 run and the scenarios as lanes of one batch, and `solidpy.ensemble.run_robustness_ensemble(designs, backend="jax")` does it
-for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). With `workers > 1`, the
-detailed-ballistics post-processing runs in an ordered process pool; the default remains serial. Without `backend` the
-analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass `workers > 1` must call these APIs
-inside an `if __name__ == "__main__":` guard.
+for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). With `workers > 1`,
+burn/design chunks and detailed-ballistics post-processing flow through an ordered, bounded process pipeline; the default
+remains serial. Without `backend` the analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass
+`workers > 1` must call these APIs inside an `if __name__ == "__main__":` guard.
 
 The wall conduction and throat ablation of the advanced physics (`Multiphysics.simulate_thermal_ablation`, a Radau solve per
 time step) is batched the same way: `solidpy.ensemble.run_advanced_physics_ensemble(geometries, curves, casing_material=...,
 backend="jax")` returns what `simulate_advanced_physics` returns for each design, with the thermal ablation of all of them
 as one batch (`simulate_thermal(ThermalBatch.from_objects(...))` is the thermal model alone). The batched integrator takes the
 same steps as scipy's, so the results agree with the scalar ones to 1e-12; on the GPU it runs 36x the scalar model on all
-CPU threads at 4,096 lanes, and the whole advanced physics 5.8x in the serial post-processing path. Pass `workers > 1` to
-run the structural, CFD, ignition and flight models after thermal ablation in an ordered process pool; the default is
-serial. See `docs/gpu_backend_benchmarks.md` for the measured effect.
+CPU threads at 4,096 lanes. The whole advanced-physics 5.8x measurement predates the new chunk pipeline, whose GPU
+throughput has not yet been remeasured. Pass `workers > 1` to overlap thermal chunks with structural, CFD, ignition and
+flight models in a bounded process pool; the default is serial. See `docs/gpu_backend_benchmarks.md` for the measurements
+and their dates.
 
 `StructuralMonteCarlo.run(100_000, backend="jax", device="cuda:0")` batches the structural evaluation of its sampled
 peak pressures; omitting `backend` preserves its scalar path. `compute_structural_features_vectorized(..., xp=jax.numpy)`
 also keeps its numeric results on the selected JAX device. The W4 benchmark is
 `benchmarks/bench_structural_monte_carlo.py`; general time-varying structural curves are still evaluated on the CPU.
 
-The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are marked `gpu` and skip without a device.
+The slow whole-corpus parity tests run with `pytest --runslow`. GPU parity tests use the `gpu` marker and skip without a
+device; set `SOLIDPY_REQUIRE_GPU=1` to make a missing device fail the run. The optional workflow at
+`.github/workflows/gpu-backend.yml` runs those tests on a self-hosted runner labelled `gpu` when manually dispatched.
 
 ## Authors
 

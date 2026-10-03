@@ -81,7 +81,7 @@ for the kernel logic and as the portable backend where JAX cannot be imported.
    The last tier runs those few lanes for tens of thousands of iterations at the per-iteration cost of a tiny batch
    (an uncapped 256-lane launch, which pays the same tail, took 22.9 s). A GPU cannot go below that; those lanes
    are better placed on spare CPU cores while the GPU runs the bulk (the heterogeneous executor of the
-   architecture document, section 6, which is not implemented yet).
+   architecture document, section 6, added in Phase 5).
 4. **The corpus is harsher than the documented spike.** The spike measured 45 to 49x against 6 cores on a corpus
    whose slowest lane needed 3,195 iterations; this one needs tens of thousands. On the typical workload, where
    the tail is removed, the figures are 55 to 69x.
@@ -167,9 +167,9 @@ backend (`fallback_lanes = 0`) and every design completed.
 Where the warm time goes (seconds, 4,104 lanes): packing 1.4, the burns on the device 16.7 (246 lanes/s on their own),
 the detailed ballistics of every lane on **one CPU core** 11.8 (2.9 ms per lane, 39 % of the run), report assembly 0.08.
 So the gate of the architecture document (at least 5x the CPU on all cores at 4,096 lanes or more) is met with a margin,
-and the next limit is not the device: building the detailed ballistics on the host in a loop caps the run at about
-137 lanes/s, and overlapping it with the next launch or spreading it over the other cores (the pipeline of the
-architecture document, section 6.4, not implemented) would lift the ceiling towards the 246 lanes/s of the device.
+and the next limit in this measured serial path is not the device: building detailed ballistics on the host in a loop
+caps the run at about 137 lanes/s. The W3 producer-consumer pipeline described in section 6.4 was implemented later;
+these throughput figures have not been rerun with that pipeline, so its GPU benefit is not yet measured.
 
 Two things to know when using it:
 
@@ -230,11 +230,12 @@ What the numbers say:
 
 ## Not covered yet
 
-The CPU+GPU executor, multi-GPU, general transient structural
-responses (W4's synthetic peak-pressure path is implemented), overlapping CPU post-processing with device solves,
-multi-stage scheduling, and a data-center GPU. W4's 100,000-sample harness is
-`benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain pending. All measured numbers are for one machine;
-they say nothing about other devices.
+Replacing finished lanes inside an active accelerator launch and general transient structural responses (W4's synthetic
+peak-pressure path is implemented) remain unimplemented. Completion rates are reported from real chunks, so a separate
+throughput-calibration solve is not used. The heterogeneous executor and bounded W2/W3 post-processing pipeline are
+implemented, but this host has no JAX or working GPU driver, so concurrent device execution has only been checked with
+fake backends. W4's 100,000-sample harness is `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain
+pending. All measured numbers are for one machine; they say nothing about other devices.
 
 ## CPU post-processing workers (W2 and W3)
 
@@ -256,7 +257,8 @@ available. W2 uses 256 or 1,024 curves. W3 uses 8 designs and 216 lanes, with 16
 Six workers were slower on all three tested shapes: the W2 model stage took 3.29x as long at 256 lanes and 2.84x as long
 at 1,024 lanes; the W3 detailed-ballistics stage took 2.77x as long. Pool startup and job serialization outweigh the
 parallel work on this host, so the pool is opt-in and serial is the default. A GPU run could change the total W3 balance,
-but that is an inference and remains unmeasured; these CPU-model timings still apply.
+but that is an inference and remains unmeasured; these CPU-model timings still apply. The rows above were measured before
+the producer-consumer pipeline was added and do not include its overlap. Updated end-to-end W2/W3 throughput is pending.
 The process pool starts after the solve, so there is no overlap with accelerator work yet. Raw benchmark output is in
 `benchmarks/results/postprocess_w2_numpy_workers{1,6}.json`,
 `benchmarks/results/postprocess_w2_numpy_1024_workers{1,6}.json` and

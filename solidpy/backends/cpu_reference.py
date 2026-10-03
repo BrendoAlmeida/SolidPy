@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import copy
 import platform
+from contextlib import contextmanager
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from ._protocol import (
     BACKEND_API_VERSION, HISTORY_POLICY_TEMPLATES, SUPPORTED, Capabilities, SolveOptions, parse_history_policy,
 )
-from .._parallel import process_worker_count, safe_process_context, spawn_pickle_safe
+from .._parallel import process_worker_count, process_worker_initializer, safe_process_context, spawn_pickle_safe
 
 
 class _ScaledBurnRate:
@@ -77,7 +78,45 @@ class ReferenceBackend:
     def devices(self) -> List[str]:
         return ["cpu"]
 
-    def solve_burn(self, batch, options=None):
+    @contextmanager
+    def process_pool(self, options, task_count):
+        """Open one reusable spawn pool for a sequence of reference chunks, if requested."""
+        if options.workers and options.workers > 1 and task_count > 1:
+            with ProcessPoolExecutor(
+                max_workers=process_worker_count(options.workers, task_count),
+                mp_context=safe_process_context(), initializer=process_worker_initializer,
+            ) as pool:
+                yield pool
+        else:
+            yield None
+
+    @staticmethod
+    def _burn_results(jobs, process_pool):
+        results = [None] * len(jobs)
+        pooled = [i for i, job in enumerate(jobs) if process_pool is not None and _picklable(job)]
+        if pooled:
+            for i, result in zip(pooled, process_pool.map(_run_lane, [jobs[i] for i in pooled], chunksize=1)):
+                results[i] = result
+        for i, job in enumerate(jobs):
+            if results[i] is None:
+                results[i] = _run_lane(job)
+        return results
+
+    @staticmethod
+    def _thermal_results(lanes, process_pool):
+        results = [None] * len(lanes)
+        pooled = [i for i, lane in enumerate(lanes) if process_pool is not None and _picklable(lane)]
+        if pooled:
+            for i, result in zip(
+                pooled, process_pool.map(_run_thermal_lane, [lanes[i] for i in pooled], chunksize=1)
+            ):
+                results[i] = result
+        for i, lane in enumerate(lanes):
+            if results[i] is None:
+                results[i] = _run_thermal_lane(lane)
+        return results
+
+    def solve_burn(self, batch, options=None, *, process_pool=None):
         """Solve every lane of ``batch`` with the scalar solver; ``options.workers`` > 1 uses a process pool.
 
         The scalar solver creates its full adaptive history. ``decimated:N`` and ``uniform:N`` are formatted from it
@@ -93,19 +132,11 @@ class ReferenceBackend:
             raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
         factors = [float(f) for f in batch.arrays["burn_rate_factor"]]
         jobs = list(zip(batch.motors, batch.propellants, batch.environments, batch.settings, factors))
-        results = [None] * len(jobs)
-        pooled = []
-        if options.workers and options.workers > 1 and len(jobs) > 1:
-            pooled = [i for i, job in enumerate(jobs) if _picklable(job)]
-        if pooled:
-            with ProcessPoolExecutor(
-                max_workers=process_worker_count(options.workers, len(pooled)), mp_context=safe_process_context()
-            ) as pool:
-                for i, result in zip(pooled, pool.map(_run_lane, [jobs[i] for i in pooled], chunksize=1)):
-                    results[i] = result
-        for i, job in enumerate(jobs):
-            if results[i] is None:
-                results[i] = _run_lane(job)
+        if process_pool is None:
+            with self.process_pool(options, len(jobs)) as pool:
+                results = self._burn_results(jobs, pool)
+        else:
+            results = self._burn_results(jobs, process_pool)
         history_kind, _ = parse_history_policy(options.history)
         if history_kind in ("decimated", "uniform"):
             from ..batch.assemble import _history_for_policy
@@ -115,7 +146,7 @@ class ReferenceBackend:
                     result["history"] = _history_for_policy(result["history"], motor, options.history)
         return BatchResult(results, self.name, self.provenance())
 
-    def thermal_ablation(self, batch, options=None):
+    def thermal_ablation(self, batch, options=None, *, process_pool=None):
         """The scalar ``simulate_thermal_ablation`` once per lane; ``options.workers`` > 1 uses a process pool.
 
         The results are what the scalar function returns, so this backend is the oracle of the batched ones. An
@@ -127,19 +158,11 @@ class ReferenceBackend:
         if not isinstance(options, SolveOptions):
             raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
         lanes = list(batch.lanes)
-        results = [None] * len(lanes)
-        pooled = []
-        if options.workers and options.workers > 1 and len(lanes) > 1:
-            pooled = [i for i, lane in enumerate(lanes) if _picklable(lane)]
-        if pooled:
-            with ProcessPoolExecutor(
-                max_workers=process_worker_count(options.workers, len(pooled)), mp_context=safe_process_context()
-            ) as pool:
-                for i, result in zip(pooled, pool.map(_run_thermal_lane, [lanes[i] for i in pooled], chunksize=1)):
-                    results[i] = result
-        for i, lane in enumerate(lanes):
-            if results[i] is None:
-                results[i] = _run_thermal_lane(lane)
+        if process_pool is None:
+            with self.process_pool(options, len(lanes)) as pool:
+                results = self._thermal_results(lanes, pool)
+        else:
+            results = self._thermal_results(lanes, process_pool)
         return BatchResult(results, self.name, {**self.provenance(), "service": "thermal_ablation"})
 
     def structural_response(
