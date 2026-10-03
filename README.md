@@ -32,6 +32,35 @@ This project aims to build an easy-to-use and versatile simulation tool for soli
 - SciPy >= 1.0
 - Matplotlib >= 3.0
 
+## Installation
+
+The base install is pure Python and runs the reference (CPU) solver:
+
+```
+pip install .
+```
+
+Optional extras add accelerated batch backends and thermochemistry tools. They are independent, so install
+only what you need:
+
+| Extra | Installs | Use |
+|---|---|---|
+| `cea` | `rocketcea` | NASA CEA thermochemistry tables |
+| `jax` | JAX (CPU or any device) | batched backend through JAX |
+| `jax-cuda12` | JAX with CUDA 12 wheels | NVIDIA GPU |
+| `gpu` | alias of `jax-cuda12` | recommended GPU setup |
+| `all` | `cea` and `jax-cuda12` | everything |
+
+```
+pip install ".[jax-cuda12]"      # or: uv sync --extra jax-cuda12
+```
+
+The reference CPU path is always the default and is never replaced. Accelerated backends are opt-in, with
+`solidpy.set_backend(...)`, `with solidpy.use_backend(...)`, or the `SOLIDPY_BACKEND` and `SOLIDPY_DEVICE`
+environment variables. `solidpy.backends.available()` lists what the current environment can run and the
+install command for what is missing. The accelerated backends are under development; the design is in
+`docs/gpu_backend_architecture.md`.
+
 ## Authors
 
 -
