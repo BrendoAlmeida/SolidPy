@@ -43,6 +43,11 @@ def _floor_lanes(count: int) -> int:
     return 1 << (max(int(count), 1).bit_length() - 1)
 
 
+def _bucket_nodes(count: int) -> int:
+    """The wall-cell axis a thermal launch is padded to: a multiple of 4 (the cost is linear in it), at least 4."""
+    return max(4, -(-count // 4) * 4)
+
+
 def _bucket_grains(count: int) -> int:
     for size in GRAIN_BUCKETS:
         if count <= size:
@@ -51,7 +56,7 @@ def _bucket_grains(count: int) -> int:
 
 
 def _driver():
-    """The loop, conditional, scatter and scan of the compiled programs."""
+    """The loop, conditional and scatter of the compiled programs."""
     import jax.numpy as jnp
     from jax import lax
 
@@ -68,6 +73,17 @@ def _driver():
         store,
         lambda body, init, xs, reverse=False: lax.scan(body, init, xs, reverse=reverse),
     )
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled_thermal():
+    """The jitted wall integration of a ``ThermalBatch`` (jax caches per input shape)."""
+    import jax
+
+    from ..batch.integrators import thermal_solver
+
+    driver = _driver()
+    return jax.jit(lambda P: thermal_solver.solve_thermal(driver, P))
 
 
 @functools.lru_cache(maxsize=None)
@@ -133,7 +149,8 @@ class JaxBackend:
         return out
 
     def capabilities(self) -> Capabilities:
-        return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES}, history_policies=("metrics", "full"))
+        return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES}, history_policies=("metrics", "full"),
+                            services=("thermal_ablation",))
 
     def _x64(self):
         jax = self._jax
@@ -208,6 +225,67 @@ class JaxBackend:
             launches.append(info)
         self.last_timings = {"device_s": self._device_s, "assemble_s": assemble_s}
         return BatchResult(results, self.name, {**provenance, "tiers": launches})
+
+    # -- thermal ablation ------------------------------------------------------------------------------------
+    def _thermal_lanes_per_launch(self, nodes: int, steps: int) -> int:
+        """Lanes per thermal launch: the per-step series dominate the memory, the solver state is a few matrices per lane."""
+        per_lane = 4 * steps * 2 * 8 + 40 * nodes * nodes * 8
+        return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))
+
+    def _run_thermal(self, padded):
+        jax = self._jax
+        jnp = jax.numpy
+        started = time.perf_counter()
+        with self._x64(), jax.default_device(self._device):
+            if jnp.zeros(1).dtype != np.float64:
+                raise RuntimeError("float64 is not available in this JAX build; the jax backend needs it")
+            P = {name: jax.device_put(jnp.asarray(array), self._device) for name, array in padded.arrays.items()}
+            out = jax.device_get(_compiled_thermal()(P))
+        self._device_s += time.perf_counter() - started
+        return {name: np.asarray(v) for name, v in out.items() if np.ndim(v)}
+
+    def thermal_ablation(self, batch, options=None):
+        """Integrate the walls of ``batch`` (a ``ThermalBatch``) on the device; every lane must be supported.
+
+        Lanes are padded to a power-of-two count, the wall cells to a multiple of 4 and the time steps to a bucket,
+        so that a sweep reuses one compiled program. The result of a lane whose integration did not finish is
+        ``None`` (listed in ``execution["failed_lanes"]``). ``options`` only has to be valid.
+        """
+        from ..batch.integrators import radau, thermal_solver
+        from ..batch.problem import table_bucket
+        from ..batch.result import BatchResult
+        from ..batch.thermal import assemble
+
+        options = SolveOptions() if options is None else options
+        if not isinstance(options, SolveOptions):
+            raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
+        refused = refused_lanes(batch, self.capabilities())
+        if refused:
+            raise unsupported_lane_error(self.name, refused)
+        nodes, steps = _bucket_nodes(batch.n_max), table_bucket(batch.t_max)
+        per_launch = self._thermal_lanes_per_launch(nodes, steps)
+        results: List[Any] = []
+        steps_taken = attempts = 0
+        self._device_s, assemble_s = 0.0, 0.0
+        for start in range(0, len(batch), per_launch):
+            chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_padding(nodes, steps)
+            lanes = len(chunk)
+            padded = chunk.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes) - lanes, dtype=int)]),
+                                  trim=False)
+            out = self._run_thermal(padded)
+            out = {name: value[:lanes] for name, value in out.items()}
+            begin = time.perf_counter()
+            results.extend(assemble(chunk, out))
+            assemble_s += time.perf_counter() - begin
+            steps_taken += int(out["steps"].sum())
+            attempts += int(out["attempts"].sum())
+        self.last_timings = {"device_s": self._device_s, "assemble_s": assemble_s}
+        return BatchResult(results, self.name, {
+            **self.provenance(), "service": "thermal_ablation", "integrator": "radau-iia5", "rtol": thermal_solver.RTOL,
+            "atol": thermal_solver.ATOL, "max_attempts": radau.MAX_ATTEMPTS,
+            "failed_lanes": [i for i, r in enumerate(results) if r is None],
+            "radau_steps": steps_taken, "radau_attempts": attempts,
+        })
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

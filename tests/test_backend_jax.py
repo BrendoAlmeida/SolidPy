@@ -296,3 +296,83 @@ def test_on_the_accelerator_the_robustness_report_matches_the_scalar_one(robustn
 
     assert_reports_close(report, scalar)
     assert report["nominal"]["canonical_result"]["provenance"]["execution"]["device"] == "cuda:0"
+
+
+# ---- thermal ablation -------------------------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def thermal_lanes():
+    from thermal_cases import CASES, case_lane, pack_lanes, random_lanes, scalar_thermal
+
+    lanes = [case_lane(name) for name in CASES] + random_lanes(10, seed=9)
+    return pack_lanes(lanes), [scalar_thermal(lane) for lane in lanes]
+
+
+def assert_thermal_close(results, scalar):
+    for got, want in zip(results, scalar):
+        assert set(got) == set(want)
+        for key, value in want.items():
+            assert got[key] == pytest.approx(value, rel=tol.THERMAL_RTOL, abs=1e-12), key
+
+
+def test_the_thermal_axes_are_bucketed():
+    assert [jax_backend._bucket_nodes(n) for n in (1, 4, 5, 8, 11, 12, 13, 18, 33)] == [4, 4, 8, 8, 12, 12, 16, 20, 36]
+
+
+def test_a_thermal_launch_stays_inside_the_memory_budget():
+    backend = backends.get_backend("jax", device="cpu")
+
+    small = backend._thermal_lanes_per_launch(8, 200)
+    huge = backend._thermal_lanes_per_launch(64, 200000)
+
+    # 4 series of 200,000 steps of two doubles take 12.8 MB a lane: 2 GB hold 167, a power of two at most
+    assert small == backend.max_lanes and huge == 128
+
+
+def test_jax_on_the_cpu_device_gives_the_scalar_thermal_ablation(thermal_lanes):
+    batch, scalar = thermal_lanes
+    backend = backends.get_backend("jax", device="cpu")
+
+    result = backend.thermal_ablation(batch)
+
+    assert backend.capabilities().provides("thermal_ablation")
+    assert result.execution["failed_lanes"] == [] and result.execution["device"] == "cpu"
+    assert_thermal_close(result.results, scalar)
+    assert set(backend.last_timings) == {"device_s", "assemble_s"}
+
+
+def test_jax_gives_a_lane_the_same_result_whatever_the_padding_around_it(thermal_lanes):
+    batch, scalar = thermal_lanes
+    backend = backends.get_backend("jax", device="cpu")
+
+    alone = backend.thermal_ablation(batch.select([5])).results[0]
+    trio = backend.thermal_ablation(batch.select([20, 5, 0])).results[1]
+
+    assert_thermal_close([alone, trio], [scalar[5], scalar[5]])
+
+
+def test_jax_refuses_thermal_lanes_it_cannot_reproduce():
+    from thermal_cases import case_lane, pack_lanes
+
+    batch = pack_lanes([case_lane("steel"), dict(case_lane("steel"), flame_temp_k=float("nan"))])
+
+    with pytest.raises(UnsupportedLane, match="1: non_finite_thermal_input"):
+        backends.get_backend("jax", device="cpu").thermal_ablation(batch)
+
+
+def test_jax_chunks_a_thermal_batch_that_does_not_fit_one_launch(thermal_lanes):
+    batch, scalar = thermal_lanes
+    backend = jax_backend.JaxBackend(device="cpu", max_lanes=8)  # eight lanes per launch: the 25 lanes take four
+
+    result = backend.thermal_ablation(batch)
+
+    assert_thermal_close(result.results, scalar)
+
+
+@pytest.mark.gpu
+def test_on_the_accelerator_the_thermal_ablation_matches_the_scalar_model(thermal_lanes):
+    batch, scalar = thermal_lanes
+
+    result = backends.get_backend("jax", device="cuda:0").thermal_ablation(batch)
+
+    assert result.execution["failed_lanes"] == [] and result.execution["device"] == "cuda:0"
+    assert_thermal_close(result.results, scalar)
