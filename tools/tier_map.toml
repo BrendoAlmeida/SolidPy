@@ -1,0 +1,51 @@
+# Which scalar entry points have a batched implementation, for ``tools/profile_workloads.py``.
+#
+# The profiler times each entry point outermost-first on a real workload and reports
+#     offloaded_share = seconds in entry points with batched = true / total seconds of the workload
+# (docs/gpu_backend_architecture.md, section 7.1). Entry points must not nest inside one another, so that no second
+# is counted twice. Keep this file in step with the code: set ``batched = true`` in the commit that adds the batched
+# implementation, not before.
+#
+# tier: T0 required for the first release, T1 next, T2 later or CPU by design (architecture document, section 7).
+
+[[entry]]
+path = "solidpy.Burn.BurnSimulation.__init__"
+tier = "T0"
+batched = true
+note = "burn and tail-off solve and the canonical result (solidpy.ensemble.simulate_burn; scenarios of Robustness are lanes through run_robustness_ensemble)"
+
+[[entry]]
+path = "solidpy.DetailedBallistics.build_detailed_ballistics"
+tier = "T1"
+batched = false
+note = "post-processing of one history on the CPU (about 7 ms per lane); stays on the host in phase 4a"
+
+[[entry]]
+path = "solidpy.Multiphysics.simulate_thermal_ablation"
+tier = "T1"
+batched = false
+note = "1-D wall conduction, scipy Radau per time step; planned phase 4b"
+
+[[entry]]
+path = "solidpy.Multiphysics.simulate_structural_response"
+tier = "T1"
+batched = false
+note = "algebra over the time series"
+
+[[entry]]
+path = "solidpy.Multiphysics.simulate_cfd_proxies"
+tier = "T1"
+batched = false
+note = "algebraic proxies"
+
+[[entry]]
+path = "solidpy.Multiphysics.simulate_ignition_proxy"
+tier = "T1"
+batched = false
+note = "algebraic proxy"
+
+[[entry]]
+path = "solidpy.Multiphysics.simulate_flight_1d"
+tier = "T2"
+batched = false
+note = "separate ODE system; CPU by design for now"

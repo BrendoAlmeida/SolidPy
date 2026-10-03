@@ -122,6 +122,26 @@ The largest differences sit in the stored reference, not in the kernels: the ref
 run is of the same size (comments in `solidpy/backends/_tolerances.py`, version 3). The NumPy backend passed the same
 test on 2026-10-03 (892 s).
 
+## Offloaded share of the scalar reference (Phase 4)
+
+`python tools/profile_workloads.py` times the entry points listed in `tools/tier_map.toml` on the scalar path of three
+workloads (wall clock around the outermost call, so Python-heavy code is not inflated the way a profiler would). The
+offloaded share is the time in entry points that have a batched implementation over the whole workload
+(`docs/gpu_backend_architecture.md`, section 7.1). Measured 2026-10-03 on the machine above
+(`benchmarks/results/offloaded_share.json`):
+
+| Workload | Designs | Scalar time | Burn (batched) | Thermal ablation | Other advanced + post-processing | **Offloaded share** |
+|---|---|---|---|---|---|---|
+| W1 burn only (corpus mix) | 12 | 3.6 s | 99.0 % | - | - | **0.990** |
+| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.3 s | 75.7 % | 23.1 % | 1.2 % | **0.757** |
+| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.8 s | 99.3 % | - | 0.6 % | **0.993** |
+
+The gate of the architecture document is 0.8 on W1 to W3. W1 and W3 are above it with the burn alone, W3 through
+`run_robustness_ensemble`. **W2 is below it (0.757) and cannot pass without the thermal ablation**, which is 23 % of the
+workload and 95 % of the advanced physics (one scipy Radau solve per time step); structural, CFD and ignition proxies and
+the 1-D flight together are under 1 %. The thermal ablation is therefore the next piece of Tier 1 work (phase 4b); this
+round stops before it.
+
 ## Not covered yet
 
 The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
