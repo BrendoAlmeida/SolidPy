@@ -51,6 +51,7 @@ _BUILTIN: Dict[str, _Registration] = {}
 _REGISTERED: Dict[str, _Registration] = {}
 _INSTANCES: Dict[Tuple[str, Optional[str]], Backend] = {}
 _LOCK = threading.RLock()
+_GENERATION = 0  # bumped when a registration changes, so a slow instantiation can tell it went stale
 
 _process_default: Optional[Tuple[str, Optional[str]]] = None
 _scoped: "contextvars.ContextVar[Optional[Tuple[str, Optional[str]]]]" = contextvars.ContextVar(
@@ -72,21 +73,25 @@ def register_backend(
     that is imported on first use. ``requires`` lists the top-level modules the backend needs; they are
     checked without importing them.
     """
+    global _GENERATION
     if not isinstance(name, str) or not name:
         raise ValueError("backend name must be a non-empty string")
     with _LOCK:
         if not replace and (name in _BUILTIN or name in _REGISTERED):
             raise ValueError(f"backend {name!r} is already registered")
         _REGISTERED[name] = _Registration(name, factory, tuple(requires), install_hint)
+        _GENERATION += 1
         _drop_instances(name)
 
 
 def unregister_backend(name: str) -> None:
     """Remove a backend registered with :func:`register_backend`. Built-in backends cannot be removed."""
+    global _GENERATION
     with _LOCK:
         if name not in _REGISTERED:
             raise KeyError(f"backend {name!r} was not registered with register_backend")
         del _REGISTERED[name]
+        _GENERATION += 1
         _drop_instances(name)
 
 
@@ -107,16 +112,20 @@ def _entry_points() -> Dict[str, Any]:
         return {}
 
 
-def _lookup(name: str) -> _Registration:
+def _resolve(name: str) -> Tuple[_Registration, int]:
+    """Return ``(registration, generation)`` for ``name``, or raise ``BackendUnavailable`` listing the known names."""
     with _LOCK:
         registration = _REGISTERED.get(name) or _BUILTIN.get(name)
-        if registration is not None:
-            return registration
-    entry = _entry_points().get(name)
+        generation = _GENERATION
+        known = {**_BUILTIN, **_REGISTERED}
+    if registration is not None:
+        return registration, generation
+    entries = _entry_points()  # scanned once, outside the lock
+    entry = entries.get(name)
     if entry is not None:
-        return _Registration(name, lambda device=None, _entry=entry: _entry.load()(device=device))
-    known = ", ".join(sorted(available())) or "none"
-    raise BackendUnavailable(f"unknown backend {name!r}; registered backends: {known}")
+        return _Registration(name, lambda device=None, _entry=entry: _entry.load()(device=device)), generation
+    names = ", ".join(sorted({*known, *entries})) or "none"
+    raise BackendUnavailable(f"unknown backend {name!r}; registered backends: {names}")
 
 
 def _missing_requirements(registration: _Registration) -> list:
@@ -133,7 +142,8 @@ def _unavailable_message(registration: _Registration, missing: list) -> str:
 def available() -> Dict[str, str]:
     """Return ``{name: "ok" | "missing: <how to install>"}`` for every known backend.
 
-    Availability of the libraries is checked without importing them.
+    Availability of the libraries is checked without importing them. Backends advertised through entry
+    points are listed as ``"ok"`` without being loaded; loading one that is broken raises ``BackendUnavailable``.
     """
     with _LOCK:
         registrations = {**_BUILTIN, **_REGISTERED}
@@ -154,25 +164,40 @@ def _instantiate(registration: _Registration, device: Optional[str]) -> Backend:
     missing = _missing_requirements(registration)
     if missing:
         raise BackendUnavailable(_unavailable_message(registration, missing))
-    factory = registration.factory
-    if isinstance(factory, str):
-        module_name, _, attribute = factory.partition(":")
-        factory = getattr(importlib.import_module(module_name), attribute)
-    return factory(device=device)
+    try:
+        factory = registration.factory
+        if isinstance(factory, str):
+            module_name, _, attribute = factory.partition(":")
+            factory = getattr(importlib.import_module(module_name), attribute)
+        return factory(device=device)
+    except BackendUnavailable:
+        raise
+    except ImportError as exc:
+        message = f"backend {registration.name!r} could not be loaded: {exc}."
+        if registration.install_hint:
+            message += f" Install it with: {registration.install_hint}"
+        raise BackendUnavailable(message) from exc
 
 
 def get_backend(name: Optional[str] = None, device: Optional[str] = None) -> Backend:
     """Return the backend instance for ``name`` (default: the one selected for the current context)."""
     if name is None:
-        name, selected_device = current_backend()
-        device = device if device is not None else selected_device
-    registration = _lookup(name)
-    with _LOCK:
-        key = (name, device)
-        instance = _INSTANCES.get(key)
-        if instance is None:
-            instance = _INSTANCES[key] = _instantiate(registration, device)
-    return instance
+        name, selected = current_backend()
+        device = selected if device is None else device
+    else:
+        device = _resolve_device(name, device)
+    key = (name, device)
+    while True:
+        registration, generation = _resolve(name)
+        with _LOCK:
+            instance = _INSTANCES.get(key)
+        if instance is not None:
+            return instance
+        candidate = _instantiate(registration, device)  # outside the lock: importing a library can be slow
+        with _LOCK:
+            if generation == _GENERATION:
+                return _INSTANCES.setdefault(key, candidate)
+        # the registry changed while this backend was being created: resolve again
 
 
 def describe(name: str, device: Optional[str] = None) -> Dict[str, Any]:
@@ -193,21 +218,29 @@ def describe(name: str, device: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+def _resolve_device(name: str, device: Optional[str]) -> Optional[str]:
+    """An explicit device wins; otherwise ``SOLIDPY_DEVICE`` applies to the backend ``SOLIDPY_BACKEND`` names."""
+    if device is not None:
+        return device
+    if name == os.environ.get(ENV_BACKEND):
+        return os.environ.get(ENV_DEVICE) or None
+    return None
+
+
 def current_backend() -> Tuple[str, Optional[str]]:
     """Return the ``(name, device)`` selected for the current context, without instantiating it."""
     scoped = _scoped.get()
     if scoped is not None:
-        return scoped
-    if _process_default is not None:
-        return _process_default
-    name = os.environ.get(ENV_BACKEND)
-    if name:
-        return name, os.environ.get(ENV_DEVICE) or None
-    return DEFAULT_BACKEND, None
+        name, device = scoped
+    elif _process_default is not None:
+        name, device = _process_default
+    else:
+        name, device = os.environ.get(ENV_BACKEND) or DEFAULT_BACKEND, None
+    return name, _resolve_device(name, device)
 
 
 def _validated(name: str, device: Optional[str]) -> Tuple[str, Optional[str]]:
-    registration = _lookup(name)
+    registration, _ = _resolve(name)
     missing = _missing_requirements(registration)
     if missing:
         raise BackendUnavailable(_unavailable_message(registration, missing))

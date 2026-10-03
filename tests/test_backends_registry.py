@@ -157,6 +157,27 @@ def test_selection_precedence_scoped_then_process_then_environment_then_default(
     assert backends.current_backend() == ("cpu-reference", None)
 
 
+def test_environment_device_applies_to_the_backend_the_environment_names(monkeypatch):
+    for name in ("jaxlike", "cpulike"):
+        backends.register_backend(name, DummyBackend)
+    monkeypatch.setenv(backends.ENV_BACKEND, "jaxlike")
+    monkeypatch.setenv(backends.ENV_DEVICE, "cuda:1")
+
+    backends.set_backend("jaxlike")
+    assert backends.current_backend() == ("jaxlike", "cuda:1")
+    assert backends.get_backend().device == "cuda:1"
+    assert backends.get_backend("jaxlike").device == "cuda:1"
+    assert backends.get_backend("jaxlike", device="cuda:0").device == "cuda:0"
+
+    with backends.use_backend("cpulike"):
+        assert backends.current_backend() == ("cpulike", None)
+        assert backends.get_backend().device is None
+
+    monkeypatch.delenv(backends.ENV_BACKEND)
+    backends.reset_backend()
+    assert backends.current_backend() == ("cpu-reference", None)
+
+
 def test_scoped_selection_is_restored_when_the_block_raises():
     backends.register_backend("scoped", DummyBackend)
 
@@ -185,6 +206,45 @@ def test_third_party_backends_are_discovered_through_entry_points(monkeypatch):
 
     assert backends.available()["third-party"] == "ok"
     assert isinstance(backends.get_backend("third-party"), DummyBackend)
+
+
+def test_entry_point_that_cannot_be_imported_raises_backend_unavailable(monkeypatch):
+    class BrokenEntryPoint:
+        name = "broken"
+
+        @staticmethod
+        def load():
+            raise ImportError("No module named 'vendor_sdk'")
+
+    monkeypatch.setattr(backends, "_entry_points", lambda: {"broken": BrokenEntryPoint})
+
+    with pytest.raises(BackendUnavailable, match="'broken' could not be loaded.*vendor_sdk"):
+        backends.get_backend("broken")
+
+
+def test_import_error_inside_a_registered_backend_becomes_backend_unavailable():
+    def factory(device=None):
+        raise ImportError("libcuda.so.1: cannot open shared object file")
+
+    backends.register_backend("cuda-like", factory, install_hint="install the CUDA driver")
+
+    with pytest.raises(BackendUnavailable, match="libcuda.*install the CUDA driver"):
+        backends.get_backend("cuda-like")
+
+
+def test_replacing_a_backend_while_it_is_being_instantiated_is_not_ignored():
+    class Replacement(DummyBackend):
+        name = "replacement"
+
+    def slow_factory(device=None):
+        # another thread re-registers the backend while this instance is still being created
+        backends.register_backend("swap", Replacement, replace=True)
+        return DummyBackend(device)
+
+    backends.register_backend("swap", slow_factory)
+
+    assert isinstance(backends.get_backend("swap"), Replacement)
+    assert isinstance(backends.get_backend("swap"), Replacement)
 
 
 def test_broken_entry_point_metadata_does_not_break_the_registry(monkeypatch):
