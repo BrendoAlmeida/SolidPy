@@ -934,6 +934,15 @@ Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.p
   random lanes on NumPy, JAX on the CPU device and JAX on the GPU is 1.4e-12, every metric included (`heat_load_kj_m2` too, since
   the steps are the same).
 
+The review of the phase (`/code-review high`) found nine points, all handled: a gas with `gamma - 1` below 1e-6 (the scalar
+code only clamps cp there, the wall problem becomes extremely stiff and the pivot-free factorization takes other steps than
+scipy's LU, moving the heat load by 4e-6) is left to the scalar model by a lane feature; the Radau constants are copied
+instead of imported from scipy's private module and compared with it in a test; each JAX launch is padded to its own
+shape and the launch budget is linear in the wall cells; the scenario inputs of a curve are read by one helper; the
+summary of `simulate_thermal` keeps the backends' execution records; and the docstrings say that a lane whose integration did
+not finish is rerun on the reference even with `strict=True`, that a batch keeps references to its input objects, and that the
+CPU models after the thermal one run serially.
+
 Measured (`docs/gpu_backend_benchmarks.md`): offloaded share W1 0.990, **W2 0.988**, W3 0.994, so the gate of 0.8 is met on all
 three workloads. The thermal ablation alone runs 36x the scalar model on 12 threads at 4,096 lanes of typical walls (15.7x on
 walls up to 18 cells); the whole advanced physics runs 5.8x, limited by the structural, CFD, ignition and flight models that

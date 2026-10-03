@@ -96,9 +96,12 @@ made in both:
 * the heat flux and its derivative, a closure in the scalar function: `solidpy/batch/kernels/thermal.py`, checked
   against a transcription in `tests/test_batch_thermal.py`;
 * the Radau IIA(5) controller of `scipy.integrate.Radau`, ported in `solidpy/batch/integrators/radau.py` and
-  compared step for step with `solve_ivp` in `tests/test_batch_radau.py`. It imports its constants from
-  `scipy.integrate._ivp.radau` (a private module). A scipy release that changes the controller makes that test fail
-  and the batched thermal results differ from the scalar ones by more than `THERMAL_RTOL`; port the change then.
+  compared step for step with `solve_ivp` in `tests/test_batch_radau.py` (verified with scipy 1.17.1; the constants are
+  copied, and the same test compares each with the installed scipy's). A scipy release that changes the controller makes
+  that test fail, and the batched thermal results then differ from the scalar ones by more than `THERMAL_RTOL` with no
+  runtime warning; port the change then;
+* the scenario factors a curve carries (`_scenario_thermal_inputs` in `Multiphysics.py`), shared by
+  `simulate_advanced_physics` and `run_advanced_physics_ensemble`.
 
 ## Not a change request
 
