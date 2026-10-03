@@ -32,12 +32,14 @@ class Capabilities:
     """What a backend can run for one lane.
 
     ``features`` maps a lane feature name to ``"supported"``, ``"partial"`` or ``"unsupported"``. A feature
-    that is not listed is unsupported: the router never assumes support (design principle 3).
+    that is not listed is unsupported: the router never assumes support (design principle 3). ``services`` lists
+    the optional Tier 1 services the backend implements besides ``solve_burn`` (``"thermal_ablation"``).
     """
 
     features: Mapping[str, str] = field(default_factory=dict)
     dtypes: Tuple[str, ...] = ("float64",)
     history_policies: Tuple[str, ...] = ("metrics",)
+    services: Tuple[str, ...] = ()
 
     def __post_init__(self):
         for name, level in self.features.items():
@@ -49,6 +51,9 @@ class Capabilities:
 
     def supports(self, feature: str) -> bool:
         return self.level(feature) == SUPPORTED
+
+    def provides(self, service: str) -> bool:
+        return service in self.services
 
     def missing(self, features) -> List[str]:
         """Return the requested features this backend does not fully support, in request order."""
@@ -113,5 +118,8 @@ class Backend(Protocol):
     def devices(self) -> List[str]: ...
 
     def solve_burn(self, batch: Any, options: Any) -> Any: ...
+
+    # Optional Tier 1 services, advertised in ``Capabilities.services``:
+    #   def thermal_ablation(self, batch: ThermalBatch, options: SolveOptions) -> BatchResult
 
     def provenance(self) -> Dict[str, Any]: ...

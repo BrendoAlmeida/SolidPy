@@ -11,7 +11,7 @@ Never edit a value to make a failing test pass. A change needs a written cause i
 new ``TOLERANCES_VERSION``.
 """
 
-TOLERANCES_VERSION = "4"
+TOLERANCES_VERSION = "5"
 
 # Version 2 (cause): the first measurement of the batched solver on the golden corpus, 160 completed lanes
 # that include tolerances from rtol 1e-6 to 1e-9, gave event times up to 1.5e-6 (median 3e-10) and the maximum
@@ -44,6 +44,19 @@ TOLERANCES_VERSION = "4"
 # reads a fraction of the jump that depends on where the solver put that step: one GPU run differed by 3.1e-1 at that
 # one sample (the lane agreed to 5e-12 when rerun on its own, and the GPU's burnout time varies by about 1e-8 between
 # runs). Comparisons skip those samples (tests/test_batch_robustness.py).
+
+# Version 5 (cause): adds the limit for the batched thermal ablation, which the earlier versions never compared; no
+# existing value changed. The batched wall integration is the Radau IIA(5) controller of the scalar code's
+# ``solve_ivp(method="Radau")`` ported step for step (initial step, Newton iteration, error estimate, step prediction,
+# reuse of the Jacobian and of the factorization), so each lane takes the same Radau steps as the scalar run (the
+# totals agree: 140,287 steps on one set of 600 lanes in all three backends) and the differences are rounding: matrix
+# products and a pivot-free tridiagonal factorization where scipy keeps an LU. Worst relative difference between the
+# scalar model and the NumPy backend, JAX on the CPU device and JAX on the GPU over every metric of 14 fixed cases
+# (tests/thermal_cases.py) and 1,800 random lanes (walls of 4 to 18 cells, 30 to 400 time steps of 0.002 to 0.5 s,
+# metal or composite casings with and without a liner): 1.4e-12 (JAX on the CPU device; NumPy 1.2e-13, GPU 2.3e-13).
+# The heat load is a trapezoid over the scalar solver's own steps, so it differs by 1e-4 to 1e-3 from the exact
+# integral and a different step sequence would show at that size: the limit sits well under that and well over the
+# rounding, and the comparison fails if the steps differ.
 
 #: Relative error of one kernel against the scalar method it mirrors.
 KERNEL_RTOL_NUMPY = 1e-12
@@ -85,3 +98,6 @@ FINITE_DIFFERENCE_RTOL = 6e-2
 #: Mass balance residual in percent. Both paths leave a rounding-level residual (<= 8e-8 %), so the comparison is
 #: absolute (version 4).
 MASS_BALANCE_ATOL_PCT = 1e-6
+
+#: Every metric of the batched thermal ablation against the scalar model (worst measured 1.4e-12, version 5).
+THERMAL_RTOL = 1e-9

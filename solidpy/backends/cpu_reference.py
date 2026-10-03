@@ -38,6 +38,17 @@ def _run_lane(arguments):
     return BurnSimulation(motor.grains[0], motor, propellant, environment, **settings).result
 
 
+def _run_thermal_lane(lane):
+    """Solve the wall of one thermal lane with the scalar model. Module level so a process pool can pickle it."""
+    from ..Multiphysics import simulate_thermal_ablation
+
+    return simulate_thermal_ablation(
+        lane["geometry"], lane["curve"], casing_material=lane["casing_material"], nozzle_material=lane["nozzle_material"],
+        flame_temp_k=lane["flame_temp_k"], r_specific=lane["r_specific"], gamma=lane["gamma"],
+        initial_temperature_k=lane["initial_temperature_k"], liner_thickness_factor=lane["liner_thickness_factor"],
+    )
+
+
 def _picklable(job):
     try:
         pickle.dumps(job)
@@ -57,10 +68,12 @@ class ReferenceBackend:
 
     def capabilities(self) -> Capabilities:
         from ..batch.problem import FEATURES
+        from ..batch.thermal import THERMAL_FEATURES
 
         # the scalar code runs every lane, including custom classes and instance-level overrides
         # the result always carries the full adaptive history, which contains everything "metrics" asks for
-        return Capabilities({feature: SUPPORTED for feature in FEATURES}, history_policies=("metrics", "full"))
+        return Capabilities({feature: SUPPORTED for feature in FEATURES + THERMAL_FEATURES},
+                            history_policies=("metrics", "full"), services=("thermal_ablation",))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -92,6 +105,31 @@ class ReferenceBackend:
             if results[i] is None:
                 results[i] = _run_lane(job)
         return BatchResult(results, self.name, self.provenance())
+
+    def thermal_ablation(self, batch, options=None):
+        """The scalar ``simulate_thermal_ablation`` once per lane; ``options.workers`` > 1 uses a process pool.
+
+        The results are what the scalar function returns, so this backend is the oracle of the batched ones. An
+        exception the scalar model raises for a lane propagates, as when calling it directly.
+        """
+        from ..batch.result import BatchResult
+
+        options = SolveOptions() if options is None else options
+        if not isinstance(options, SolveOptions):
+            raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
+        lanes = list(batch.lanes)
+        results = [None] * len(lanes)
+        pooled = []
+        if options.workers and options.workers > 1 and len(lanes) > 1:
+            pooled = [i for i, lane in enumerate(lanes) if _picklable(lane)]
+        if pooled:
+            with ProcessPoolExecutor(max_workers=min(options.workers, len(pooled))) as pool:
+                for i, result in zip(pooled, pool.map(_run_thermal_lane, [lanes[i] for i in pooled], chunksize=1)):
+                    results[i] = result
+        for i, lane in enumerate(lanes):
+            if results[i] is None:
+                results[i] = _run_thermal_lane(lane)
+        return BatchResult(results, self.name, {**self.provenance(), "service": "thermal_ablation"})
 
     def provenance(self) -> Dict[str, Any]:
         import numpy
