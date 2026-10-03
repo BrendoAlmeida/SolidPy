@@ -11,6 +11,7 @@ result with a reference one. The hash of the kernel and integrator sources is in
 
 from __future__ import annotations
 
+import copy
 import functools
 import hashlib
 import importlib
@@ -196,14 +197,17 @@ def termination_reasons(out, tail_off) -> List[str]:
     return reasons
 
 
-def _history(batch, out, lane) -> Dict[str, Any]:
-    """The stored accepted points of one lane as the canonical ``history`` mapping."""
+def _history(batch, out, lane, namespace) -> Dict[str, Any]:
+    """The stored accepted points of one lane as the canonical ``history`` mapping.
+
+    ``namespace`` is ``batch.namespace(np)``, built once by the caller for all lanes.
+    """
     G = batch.g_max
     n_grains = int(batch.n_grains[lane])
     count = int(out["n_points"][lane])
     a = batch.arrays
     # one lane, one time axis: lane arrays [1, 1], grain arrays [1, 1, G]
-    view = {name: array[lane : lane + 1, None] for name, array in batch.namespace(np).items()}
+    view = {name: array[lane : lane + 1, None] for name, array in namespace.items()}
     y = out["hy"][lane, :count][None]
     q = rhs.state_quantities(np, y, None, view, detail=True, time=out["ht"][lane, :count][None])
     q = {key: value[0] for key, value in q.items()}
@@ -328,7 +332,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
                                 "tail_off_timeout_s": settings["tail_off_timeout_s"],
                                 "tail_off_method": settings["tail_off_method"]},
             "execution": {
-                **execution,
+                **copy.deepcopy(execution),  # nested mappings (library versions) must not be shared between lanes
                 "integrator": {"name": "dop853_batched", "rtol": settings["rtol"], "atol": settings["atol"],
                                "max_step_s": settings["max_step_size"]},
                 "history": history, "fallback": None, "kernel_source_hash": kernel_hash,
@@ -337,7 +341,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
             },
         }
         results.append({
-            "history": _history(batch, out, lane) if history == "full" else None,
+            "history": _history(batch, out, lane, P) if history == "full" else None,
             "metrics": metrics, "status": status,
             "efficiencies": {**applied, "efficiency_semantics": "native_split"}, "provenance": provenance,
         })

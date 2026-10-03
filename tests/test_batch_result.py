@@ -95,6 +95,16 @@ def test_the_execution_block_records_how_the_result_was_produced(live):
     assert {"python", "numpy", "scipy"} <= set(execution["library_versions"])
 
 
+def test_lanes_do_not_share_the_nested_execution_mappings(live):
+    _, _, batched = live
+    versions = [r["provenance"]["execution"]["library_versions"] for r in batched]
+
+    assert len(versions) > 1 and len({id(v) for v in versions}) == len(versions)
+    before = dict(versions[1])
+    versions[0]["numpy"] = "annotated for one lane only"
+    assert versions[1] == before
+
+
 def test_the_kernel_source_hash_covers_the_kernel_and_integrator_files():
     root = Path(assemble.__file__).parent
     digest = hashlib.sha256()
