@@ -65,6 +65,30 @@ The reference CPU path is always the default and is never replaced. Accelerated 
 is missing. The accelerated backends are under development; the design is in
 `docs/gpu_backend_architecture.md`.
 
+## Simulating many motors
+
+`BurnSimulation` runs one motor and is unchanged. To run thousands (sweeps, robustness scenarios, training data)
+use the batch entry point, which can run on a GPU when the `jax-cuda12` extra is installed:
+
+```python
+from solidpy.ensemble import ProblemBatch, simulate_burn
+
+batch = ProblemBatch.from_objects(motors, propellants, environments, settings)   # settings: BurnSimulation keywords
+results = simulate_burn(batch, backend="jax", device="cuda:0").to_results()      # one canonical result per lane
+```
+
+`results[i]` has the same `history`, `metrics`, `status`, `efficiencies` and `provenance` as `BurnSimulation.result`
+for lane `i`, with the same `physics_provider_hash`, plus `provenance["execution"]` (backend, device, versions).
+Backends are `cpu-reference` (the scalar solver, the default), `cpu-vectorized` (NumPy) and `jax`. Lanes a backend
+cannot run (Python callables as igniter or activation, analytical tail-off, subclasses, instance-level overrides)
+are solved by the reference and flagged in `provenance["execution"]["fallback"]`, or raise `UnsupportedLane` with
+`strict=True`. Igniter and activation profiles, tabulated burn rates and tabulated thermochemistry are supported.
+
+The speedup comes from batch size: on an RTX 4060 in float64 the JAX backend runs 11.8x faster than the scalar
+solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a few hundred lanes. See
+`docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
+The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are marked `gpu` and skip without a device.
+
 ## Authors
 
 -
