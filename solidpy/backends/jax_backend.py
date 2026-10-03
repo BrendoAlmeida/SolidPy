@@ -33,13 +33,14 @@ HISTORY_BUDGET_BYTES = 2 * 1024**3
 DEFAULT_MAX_LANES = 8192
 
 
-def _bucket_lanes(count: int) -> int:
-    return max(MIN_LANE_BUCKET, 1 << (count - 1).bit_length())
+def _bucket_lanes(count: int, minimum: int = MIN_LANE_BUCKET) -> int:
+    """The compiled lane count a launch of ``count`` lanes is padded to: a power of two, at least ``minimum``."""
+    return max(minimum, 1 << (count - 1).bit_length())
 
 
 def _floor_lanes(count: int) -> int:
-    """The largest lane bucket not above ``count`` (a launch is padded up to a bucket, so it must not start above)."""
-    return max(MIN_LANE_BUCKET, 1 << (max(int(count), 1).bit_length() - 1))
+    """The largest power of two not above ``count`` (a launch is padded up to a power of two, so it must not start above)."""
+    return 1 << (max(int(count), 1).bit_length() - 1)
 
 
 def _bucket_grains(count: int) -> int:
@@ -143,9 +144,9 @@ class JaxBackend:
         if not full:
             return _floor_lanes(self.max_lanes)
         per_lane = 2 * (max_steps + 1) * (grains + 9) * 8
-        return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))
+        return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))  # may be below 64
 
-    def _run(self, sub, full: bool, max_steps: int, cap: Optional[int]):
+    def _run(self, sub, full: bool, max_steps: int, cap: Optional[int], floor: int = MIN_LANE_BUCKET):
         """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
 
         ``sub`` already has its grain axis padded to a bucket; the lane axis is padded here.
@@ -153,7 +154,7 @@ class JaxBackend:
         jax = self._jax
         jnp = jax.numpy
         lanes = len(sub)
-        padded = sub.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes) - lanes, dtype=int)]))
+        padded = sub.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes, floor) - lanes, dtype=int)]))
         started = time.perf_counter()
         with self._x64(), jax.default_device(self._device):
             if jnp.zeros(1).dtype != np.float64:
@@ -189,7 +190,8 @@ class JaxBackend:
         self._device_s, assemble_s = 0.0, 0.0
         for start in range(0, len(batch), per_launch):
             chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_g_max(grains)
-            out, info = solve_in_tiers(chunk, lambda sub, cap: self._run(sub, full, max_steps, cap), tiers)
+            floor = min(MIN_LANE_BUCKET, per_launch)  # a launch the budget keeps small is not padded back up
+            out, info = solve_in_tiers(chunk, lambda sub, cap: self._run(sub, full, max_steps, cap, floor), tiers)
             begin = time.perf_counter()
             results.extend(assemble(chunk, out, options.history, provenance))
             assemble_s += time.perf_counter() - begin

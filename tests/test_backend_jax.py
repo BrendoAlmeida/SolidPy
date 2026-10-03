@@ -77,16 +77,19 @@ def test_the_pure_helpers_bucket_lanes_and_grains():
 
 
 def test_a_launch_never_pads_above_its_budget_and_a_full_history_launch_fits_the_memory_budget():
-    assert [jax_backend._floor_lanes(n) for n in (1, 63, 64, 100, 8192, 9000)] == [64, 64, 64, 64, 8192, 8192]
+    assert [jax_backend._floor_lanes(n) for n in (1, 3, 63, 64, 100, 8192, 9000)] == [1, 2, 32, 64, 64, 8192, 8192]
+    assert jax_backend._bucket_lanes(5) == 64 and jax_backend._bucket_lanes(5, 4) == 8 and jax_backend._bucket_lanes(3, 1) == 4
     backend = backends.get_backend("jax", device="cpu")
 
     metrics_lanes = backend._lanes_per_launch(8, False, 100000)
     full_lanes = backend._lanes_per_launch(8, True, 5000)
 
     assert metrics_lanes == jax_backend._floor_lanes(backend.max_lanes)
-    assert full_lanes & (full_lanes - 1) == 0 and full_lanes >= jax_backend.MIN_LANE_BUCKET
-    padded_bytes = jax_backend._bucket_lanes(full_lanes) * 2 * 5001 * 17 * 8
-    assert padded_bytes <= jax_backend.HISTORY_BUDGET_BYTES or full_lanes == jax_backend.MIN_LANE_BUCKET
+    assert full_lanes & (full_lanes - 1) == 0 and full_lanes >= 1
+    assert jax_backend._bucket_lanes(full_lanes, min(jax_backend.MIN_LANE_BUCKET, full_lanes)) * 2 * 5001 * 17 * 8 <= (
+        jax_backend.HISTORY_BUDGET_BYTES)
+    # a very long history can allow fewer than 64 lanes: the budget wins over the compile bucket
+    assert backend._lanes_per_launch(8, True, 2_000_000) < jax_backend.MIN_LANE_BUCKET
 
 
 def test_the_backend_is_listed_described_and_selects_devices():
