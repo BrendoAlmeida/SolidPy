@@ -19,8 +19,9 @@ typical workload. Parity holds on the CPU device and on the GPU.
 
 ## Workloads
 
-Both are the golden-corpus designs that the batched kernels support (no igniter, activation, tabulated burn rate
-or thermochemistry), tiled to the batch size. The tiling repeats the same designs, so the mix is fixed.
+Both are the 256 golden-corpus designs that the batched kernels supported when the gate was measured (no igniter,
+activation, tabulated burn rate or thermochemistry; those kernels were added afterwards and are not in these
+numbers), tiled to the batch size. The tiling repeats the same designs, so the mix is fixed.
 
 * **W1**: all 256 supported designs. It keeps a heavy tail on purpose. The median design needs 200 accepted steps
   and 90 % need at most 515, but 12 need more than 1,000 and two more than 10,000 (up to 23,307). The slowest are
@@ -90,7 +91,8 @@ for the kernel logic and as the portable backend where JAX cannot be imported.
 * NumPy backend against the stored reference on 160 completed lanes of the golden corpus, relative differences
   (maximum, median): final time 1.4e-6 (1e-9); grain burnout times 1.5e-6 (3e-10); peak pressure 1.6e-4 (3e-9);
   peak thrust 1.8e-4 (3e-9); maximum generated mass flow 2.0e-3 (3e-9); maximum nozzle mass flow 1.6e-4 (3e-9);
-  integrals within 1e-5. The limits are in `solidpy/backends/_tolerances.py` (version 2).
+  integrals within 1e-5. The limits were those of `solidpy/backends/_tolerances.py` version 2; the table and source
+  lanes added later needed version 3 (generated mass-flow peak 1.5e-2, the stored reference being the inexact side).
 * Every lane ends with the same termination reason as the reference, except the three `solver-failure` designs:
   their reference outcome is decided by rounding (identical grains burn out together and scipy snaps only one of
   them), and the batched solver completes them (`tests/test_batch_solver.py`).
@@ -99,8 +101,7 @@ for the kernel logic and as the portable backend where JAX cannot be imported.
 
 ## Not covered yet
 
-Igniter and activation sources, tabulated burn rate and thermochemistry (those lanes fall back to the reference),
-the `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
+The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
 (thermal, structural, robustness as lanes) and a data-center GPU. All numbers are for one machine; they say nothing
 about other devices.
 

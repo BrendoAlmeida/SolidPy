@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: design proposal, not implemented. Audience: SolidPy maintainers and whoever implements this.
+Status: design proposal; Phases 0 to 3 are implemented (section 14.4). Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -839,14 +839,21 @@ Phases 0 to 3 are implemented on `feat/gpu-batch-backend`, with the gate of Phas
 the full corpus workload, 54.7x on the typical workload, in float64 on an 8 GiB consumer GPU.
 
 Implemented: the backend registry and extras, the golden corpus, `ProblemBatch`, the geometry, propellant, nozzle
-and right-hand-side kernels, the batched DOP853 with burnout and blowdown events, canonical results with the
-reference `physics_provider_hash`, the `cpu-reference`, `cpu-vectorized` and `jax` backends, `simulate_burn` with
-capability routing and fallback, iteration-capped tiers (a result of the measurements: section 6.3 expected
-cost-sorted chunks, but sorting cannot help when the per-iteration cost is flat; capping iterations and rerunning
-the unfinished lanes in smaller batches does), and the benchmark suite.
+and right-hand-side kernels, the batched DOP853 with burnout and blowdown events, igniter, activation and ramp
+sources with their stage breakpoints, tabulated burn rate and thermochemistry (cubic splines computed at pack time,
+evaluated by bisection and Horner), canonical results with the reference `physics_provider_hash`, the
+`cpu-reference`, `cpu-vectorized` and `jax` backends, `simulate_burn` with capability routing and fallback,
+iteration-capped tiers (a result of the measurements: section 6.3 expected cost-sorted chunks, but sorting cannot
+help when the per-iteration cost is flat; capping iterations and rerunning the unfinished lanes in smaller batches
+does), and the benchmark suite. Lanes with callables, analytical tail-off, custom classes or instance overrides
+still run on the reference (or raise with `strict=True`).
 
-Not implemented, in the order they matter: igniter, activation and ramp sources; tabulated burn rate and
-thermochemistry (these lanes run on the reference); the `uniform:N` and `decimated:N` history policies; the
+Parity is checked per kernel at 1e-12 and per simulation with the versioned limits in
+`solidpy/backends/_tolerances.py` (version 3). The stored reference is the inexact side of those comparisons, which
+was verified against a refined run; each limit carries the cause in a comment. The whole-corpus test
+(`pytest tests/test_batch_parity.py --runslow`) takes minutes and is skipped by default.
+
+Not implemented, in the order they matter: the `uniform:N` and `decimated:N` history policies; the
 heterogeneous CPU+GPU executor (the last tier is latency bound and suits spare CPU cores, benchmarks section
 "What the numbers say"); Tier 1 physics; a data-center GPU measurement. Open point 14.2.1 (typical batch sizes)
 now has a first answer: the speedup is large from about 2,000 lanes up and is below the reference under a few
