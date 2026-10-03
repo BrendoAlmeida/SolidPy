@@ -48,9 +48,10 @@ CALLABLES = {"igniter_decay": igniter_decay, "activation_front": activation_fron
 
 
 def reference_sources_sha256():
+    """SHA-256 of the reference sources with line endings normalised, so a CRLF checkout is not "stale"."""
     digest = hashlib.sha256()
     for name in REFERENCE_SOURCES:
-        digest.update((REPO_ROOT / "solidpy" / name).read_bytes())
+        digest.update((REPO_ROOT / "solidpy" / name).read_bytes().replace(b"\r\n", b"\n"))
     return digest.hexdigest()
 
 
@@ -164,7 +165,7 @@ def _plain(value):
     return value
 
 
-def reference_record(simulation, wall_seconds):
+def reference_record(simulation):
     """The stored description of one reference run."""
     result = simulation.result
     history, metrics, status = result["history"], result["metrics"], result["status"]
@@ -182,5 +183,4 @@ def reference_record(simulation, wall_seconds):
         "history_points": int(len(time)),
         "end_time_s": end,
         "curves": curves,
-        "wall_seconds": round(float(wall_seconds), 4),
     }

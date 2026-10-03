@@ -6,7 +6,7 @@ fixed input and the fixed expectation of the backend parity tests.
 | File | Content |
 |---|---|
 | `corpus_v1.json` | One design per line: grains, motor, propellant, environment, simulation settings, feature tags |
-| `reference_v1.json` | A manifest, then one reference record per design: status, metrics, 41-point resampled curves, `physics_provider_hash`, reference wall time |
+| `reference_v1.json` | A manifest, then one reference record per design: status, metrics, 41-point resampled curves, `physics_provider_hash`, number of accepted steps |
 
 The designs cover tubular and star grains, 1 to 24 grains, `ends_burn` both ways, power-law and tabulated
 burn rate, scalar and tabulated thermochemistry, erosive burning, efficiencies below one, igniter and

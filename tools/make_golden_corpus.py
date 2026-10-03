@@ -406,16 +406,19 @@ def run_case(case):
         try:
             simulation = gc.simulate(case)
         except Exception as exc:  # recorded, then reported by the caller
-            return case["id"], {"error": f"{type(exc).__name__}: {exc}"}
-    record = gc.reference_record(simulation, time.perf_counter() - start)
+            return case["id"], {"error": f"{type(exc).__name__}: {exc}"}, time.perf_counter() - start
+    seconds = time.perf_counter() - start
+    record = gc.reference_record(simulation)
     record["warnings"] = sorted({warning.category.__name__ for warning in caught})
-    return case["id"], record
+    return case["id"], record, seconds
 
 
 def run_all(cases, workers):
+    """Run the reference on every case. Returns ``(records, seconds)``, both keyed by case id."""
     order = sorted(cases, key=lambda c: -(c["motor"].get("grain_number") or len(c["grains"])))
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        return dict(pool.map(run_case, order, chunksize=1))
+        results = list(pool.map(run_case, order, chunksize=1))
+    return {i: record for i, record, _ in results}, {i: seconds for i, _, seconds in results}
 
 
 def check(cases, records):
@@ -458,7 +461,7 @@ def main():
     started = time.perf_counter()
     cases = phase1(rng)
     print(f"phase 1: {len(cases)} designs", flush=True)
-    records = run_all(cases, args.workers)
+    records, seconds = run_all(cases, args.workers)
     problems = check(cases, records)
     if problems:
         print("\n".join(problems))
@@ -466,7 +469,9 @@ def main():
 
     extra = derived(rng, cases, records)
     print(f"phase 2: {len(extra)} derived designs", flush=True)
-    records.update(run_all(extra, args.workers))
+    extra_records, extra_seconds = run_all(extra, args.workers)
+    records.update(extra_records)
+    seconds.update(extra_seconds)
     cases = cases + extra
     problems = check(cases, records)
     if problems:
@@ -491,7 +496,7 @@ def main():
     write_lines(gc.REFERENCE_PATH, manifest, "records", [{"id": c["id"], **records[c["id"]]} for c in cases])
 
     reasons = Counter(records[c["id"]]["status"]["termination_reason"] for c in cases)
-    cpu_seconds = sum(records[c["id"]]["wall_seconds"] for c in cases)
+    cpu_seconds = sum(seconds.values())
     print(f"wrote {len(cases)} cases in {time.perf_counter() - started:.0f} s "
           f"({cpu_seconds:.0f} s of reference time, {cpu_seconds / len(cases):.2f} s per case)")
     print("termination reasons:", dict(reasons))
