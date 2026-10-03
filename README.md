@@ -90,15 +90,19 @@ solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a f
 `docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
 Robustness analysis uses the same machinery: `run_robustness_analysis(..., backend="cpu-vectorized")` solves the nominal
 run and the scenarios as lanes of one batch, and `solidpy.ensemble.run_robustness_ensemble(designs, backend="jax")` does it
-for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). Without `backend` the
-analysis is the scalar one, unchanged.
+for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). With `workers > 1`, the
+detailed-ballistics post-processing runs in an ordered process pool; the default remains serial. Without `backend` the
+analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass `workers > 1` must call these APIs
+inside an `if __name__ == "__main__":` guard.
 
 The wall conduction and throat ablation of the advanced physics (`Multiphysics.simulate_thermal_ablation`, a Radau solve per
 time step) is batched the same way: `solidpy.ensemble.run_advanced_physics_ensemble(geometries, curves, casing_material=...,
 backend="jax")` returns what `simulate_advanced_physics` returns for each design, with the thermal ablation of all of them
 as one batch (`simulate_thermal(ThermalBatch.from_objects(...))` is the thermal model alone). The batched integrator takes the
 same steps as scipy's, so the results agree with the scalar ones to 1e-12; on the GPU it runs 36x the scalar model on all
-CPU threads at 4,096 lanes, and the whole advanced physics 5.8x (the models after the thermal one run on the CPU).
+CPU threads at 4,096 lanes, and the whole advanced physics 5.8x in the serial post-processing path. Pass `workers > 1` to
+run the structural, CFD, ignition and flight models after thermal ablation in an ordered process pool; the default is
+serial. See `docs/gpu_backend_benchmarks.md` for the measured effect.
 
 `StructuralMonteCarlo.run(100_000, backend="jax", device="cuda:0")` batches the structural evaluation of its sampled
 peak pressures; omitting `backend` preserves its scalar path. `compute_structural_features_vectorized(..., xp=jax.numpy)`
@@ -121,4 +125,3 @@ The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are ma
 - Erosive burning is neglected
 - BATES grain
 - some others
-

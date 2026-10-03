@@ -8,12 +8,12 @@ numerical source of truth every other backend is compared with.
 from __future__ import annotations
 
 import copy
-import pickle
 import platform
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from ._protocol import BACKEND_API_VERSION, SUPPORTED, Capabilities, SolveOptions
+from .._parallel import process_worker_count, safe_process_context, spawn_pickle_safe
 
 
 class _ScaledBurnRate:
@@ -50,11 +50,7 @@ def _run_thermal_lane(lane):
 
 
 def _picklable(job):
-    try:
-        pickle.dumps(job)
-    except Exception:
-        return False
-    return True
+    return spawn_pickle_safe(job)
 
 
 class ReferenceBackend:
@@ -99,7 +95,9 @@ class ReferenceBackend:
         if options.workers and options.workers > 1 and len(jobs) > 1:
             pooled = [i for i, job in enumerate(jobs) if _picklable(job)]
         if pooled:
-            with ProcessPoolExecutor(max_workers=min(options.workers, len(pooled))) as pool:
+            with ProcessPoolExecutor(
+                max_workers=process_worker_count(options.workers, len(pooled)), mp_context=safe_process_context()
+            ) as pool:
                 for i, result in zip(pooled, pool.map(_run_lane, [jobs[i] for i in pooled], chunksize=1)):
                     results[i] = result
         for i, job in enumerate(jobs):
@@ -124,7 +122,9 @@ class ReferenceBackend:
         if options.workers and options.workers > 1 and len(lanes) > 1:
             pooled = [i for i, lane in enumerate(lanes) if _picklable(lane)]
         if pooled:
-            with ProcessPoolExecutor(max_workers=min(options.workers, len(pooled))) as pool:
+            with ProcessPoolExecutor(
+                max_workers=process_worker_count(options.workers, len(pooled)), mp_context=safe_process_context()
+            ) as pool:
                 for i, result in zip(pooled, pool.map(_run_thermal_lane, [lanes[i] for i in pooled], chunksize=1)):
                     results[i] = result
         for i, lane in enumerate(lanes):

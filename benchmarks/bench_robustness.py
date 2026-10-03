@@ -12,8 +12,8 @@ the CPU has because every design is independent.
     python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --out gpu.json
 
 The first call of an accelerator shape compiles; it is timed apart (``first_call_s``) and the throughput is the best of
-``--repeat`` warm runs. ``timings`` splits a run into packing, the burns, the detailed ballistics of every lane (always on
-the CPU) and the report assembly.
+``--repeat`` warm runs. ``timings`` splits a run into packing, the burns, the detailed ballistics of every lane (on the
+CPU, optionally in a process pool) and the report assembly.
 """
 
 import argparse
@@ -132,7 +132,8 @@ def bench_ensemble(count, backend, device, repeat, max_steps, workers, keep_seri
         if (r["provenance"].get("execution") or {}).get("fallback")
     )
     complete = sum(report["status"] == "completed" for report in reports)
-    return {"backend": backend, "device": device, "designs": count, "lanes": lanes, "first_call_s": first_call,
+    return {"backend": backend, "device": device, "designs": count, "lanes": lanes, "workers": workers,
+            "first_call_s": first_call,
             "seconds": best, "lanes_per_s": lanes / best, "timings": best_timings, "fallback_lanes": fallback,
             "completed_designs": complete, "max_steps": max_steps, "keep_series": keep_series}
 
@@ -142,7 +143,8 @@ def main():
     parser.add_argument("--backend", required=True, help="cpu-scalar (the scalar path in a pool), cpu-reference, cpu-vectorized, jax")
     parser.add_argument("--device", default=None)
     parser.add_argument("--designs", default="16", help="comma-separated numbers of designs (27 lanes each)")
-    parser.add_argument("--workers", default="1", help="comma-separated process counts for cpu-scalar; a number for cpu-reference")
+    parser.add_argument("--workers", default="1",
+                        help="process counts for cpu-scalar; CPU post-processing workers for ensemble backends")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=2000, help="history points per lane on a batched backend")
     parser.add_argument("--keep-series", action="store_true",
@@ -158,7 +160,7 @@ def main():
                 results.append(bench_scalar(count, workers))
                 print(json.dumps(results[-1]), flush=True)
     else:
-        workers = int(args.workers.split(",")[0]) if args.backend == "cpu-reference" else None
+        workers = int(args.workers.split(",")[0])
         for count in sizes:
             results.append(bench_ensemble(count, args.backend, args.device, args.repeat, args.max_steps, workers,
                                           args.keep_series))

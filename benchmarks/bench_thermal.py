@@ -11,11 +11,13 @@ liner, a gas and a nozzle material. Two sets of lanes:
 * ``advanced``: the whole advanced physics (thermal, structural, CFD and ignition proxies, 1-D flight) of designs whose curves
   come from the burn solver (the test motor with its throat varied, 0.01 s steps), tiled to the batch size. The scalar
   baseline is ``simulate_advanced_physics`` in a process pool and the batched run is ``run_advanced_physics_ensemble``,
-  whose thermal ablation is one batch and whose other models run on the CPU for each lane.
+  whose thermal ablation is one batch and whose other models run on the CPU, optionally in a process pool.
 
 The baseline is the scalar model in a process pool, the best static schedule the CPU has because every lane is independent.
 
     python benchmarks/bench_thermal.py --backend cpu-scalar --workers 12,6 --lanes 1024 --out cpu.json
+    python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 1 --lanes 1024 --out workers1.json
+    python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --out workers6.json
     python benchmarks/bench_thermal.py --backend jax --device cuda:0 --lanes 1024,4096,16384 --out gpu.json
 
 The first call of an accelerator shape compiles; it is timed apart (``first_call_s``) and the throughput is the best of
@@ -184,8 +186,8 @@ def bench_advanced_backend(count, name, device, repeat, workers):
         seconds = time.perf_counter() - started
         if best is None or seconds < best:
             best, best_timings = seconds, dict(timings)
-    return {"backend": name, "device": device, "kind": "advanced", "lanes": count, "first_call_s": first_call, "seconds": best,
-            "lanes_per_s": count / best, "timings": best_timings}
+    return {"backend": name, "device": device, "kind": "advanced", "lanes": count, "workers": workers,
+            "first_call_s": first_call, "seconds": best, "lanes_per_s": count / best, "timings": best_timings}
 
 
 def main():
@@ -194,13 +196,17 @@ def main():
     parser.add_argument("--device", default=None)
     parser.add_argument("--lanes", default="1024", help="comma-separated numbers of lanes")
     parser.add_argument("--kind", default="typical", choices=("typical", "wide", "advanced"))
-    parser.add_argument("--workers", default="1", help="comma-separated process counts for cpu-scalar; a number for cpu-reference")
+    parser.add_argument("--workers", default="1",
+                        help="process counts for cpu-scalar; count for cpu-reference or advanced-ensemble post-processing")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
     results = []
     sizes = [int(n) for n in args.lanes.split(",")]
+    worker_count = int(args.workers.split(",")[0])
+    if args.kind != "advanced" and args.backend not in ("cpu-scalar", "cpu-reference") and worker_count != 1:
+        parser.error("--workers above 1 applies to cpu-scalar/reference solves or --kind advanced post-processing")
     if args.backend == "cpu-scalar":
         for workers in (int(w) for w in args.workers.split(",")):
             for count in sizes:
@@ -208,7 +214,7 @@ def main():
                                else bench_scalar(args.kind, count, workers))
                 print(json.dumps(results[-1]), flush=True)
     else:
-        workers = int(args.workers.split(",")[0]) if args.backend == "cpu-reference" else None
+        workers = worker_count if args.backend == "cpu-reference" or args.kind == "advanced" else None
         for count in sizes:
             results.append(bench_advanced_backend(count, args.backend, args.device, args.repeat, workers)
                            if args.kind == "advanced"

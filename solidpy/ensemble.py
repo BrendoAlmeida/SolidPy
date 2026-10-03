@@ -17,7 +17,9 @@ from __future__ import annotations
 import copy
 import numbers
 import time
-from typing import Any, Dict, List, Optional
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from itertools import islice
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -28,6 +30,7 @@ from .batch import ProblemBatch
 from .batch.kernels.tables import evaluate as evaluate_table
 from .batch.result import BatchResult
 from .batch.thermal import ThermalBatch
+from ._parallel import process_worker_count, safe_process_context, spawn_pickle_safe
 
 __all__ = [
     "ProblemBatch", "SolveOptions", "ThermalBatch", "UnsupportedLane", "lane_cost", "run_advanced_physics_ensemble",
@@ -39,6 +42,8 @@ AUTO_ACCELERATORS = ("jax",)
 AUTO_MIN_LANES = 2048
 #: A thermal lane costs about a tenth of a second on the scalar code, so an accelerator pays off from far fewer lanes.
 AUTO_MIN_THERMAL_LANES = 128
+#: Bound the input histories and completed results retained behind a slow earlier batch.
+MAX_POSTPROCESS_IN_FLIGHT_JOBS = 128
 
 
 def lane_cost(batch: ProblemBatch) -> np.ndarray:
@@ -103,6 +108,109 @@ def _chunks(order: np.ndarray, chunk_size: Optional[int]) -> List[np.ndarray]:
     if chunk_size is None or chunk_size >= len(order):
         return [order]
     return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
+
+
+def _validate_workers(workers: Optional[int]) -> Optional[int]:
+    """Normalize the process count shared by reference solving and CPU post-processing."""
+    if workers is None:
+        return None
+    if isinstance(workers, bool) or not isinstance(workers, numbers.Integral) or workers < 1:
+        raise ValueError(f"workers must be a positive integer or None, got {workers!r}")
+    return int(workers)
+
+
+def _pickle_safe(value) -> bool:
+    """Check spawn importability and serialization without copying numeric histories."""
+    return spawn_pickle_safe(value, skip_numeric_arrays=True)
+
+
+def _detailed_ballistics_process_safe(job) -> bool:
+    """Check picklability without serializing the large history arrays in a ``SimulationView``."""
+    _, view, scenario, options = job
+    return _pickle_safe((view.motor, view.propellant, view.environment_pressure, view._activation_inputs,
+                         view.result, scenario, options))
+
+
+def _bounded_process_batches(
+    worker: Callable[[List[Any]], List[Any]], jobs: Iterable[Any], job_count: int, workers: Optional[int],
+    *, process_safe: Optional[Callable[[Any], bool]] = None, batch_size: int = 8,
+) -> Iterator[Tuple[Any, Any]]:
+    """Yield ``(job, result)`` in input order with a bounded, lazily filled process window.
+
+    ``worker`` accepts a list of jobs and returns same-order results. At most eight batches per process and 128 jobs
+    overall are retained. Unserializable jobs run locally in input order. Results from faster later batches are
+    buffered only inside that bounded window, keeping histories from accumulating across the ensemble.
+    """
+    if job_count < 1:
+        return
+    job_iterator = iter(jobs)
+    if workers is None or workers <= 1 or job_count == 1:
+        while True:
+            batch = list(islice(job_iterator, 1))
+            if not batch:
+                break
+            results = worker(batch)
+            if len(results) != len(batch):
+                raise RuntimeError("post-processing worker returned a different number of results than jobs")
+            yield from zip(batch, results)
+        return
+
+    process_count = process_worker_count(workers, job_count)
+    batch_size = min(batch_size, max(1, job_count // (2 * process_count)))
+    window = min(8 * process_count, max(1, MAX_POSTPROCESS_IN_FLIGHT_JOBS // batch_size))
+    slots = {}
+    next_submit = 0
+    next_output = 0
+
+    def submit_one(pool):
+        nonlocal next_submit
+        batch = list(islice(job_iterator, batch_size))
+        if not batch:
+            return False
+        safe = process_safe is None or all(process_safe(job) for job in batch)
+        future = pool.submit(worker, batch) if safe else None
+        slots[next_submit] = (batch, future, None)
+        next_submit += 1
+        return True
+
+    # JAX may have initialized CUDA in the parent; use isolated workers rather than fork the runtime state.
+    with ProcessPoolExecutor(max_workers=process_count, mp_context=safe_process_context()) as pool:
+        while next_submit < window and submit_one(pool):
+            pass
+        while next_output < next_submit:
+            batch, future, results = slots[next_output]
+            if future is None:
+                results = worker(batch)
+            elif results is None:
+                waiting = [entry[1] for entry in slots.values() if entry[1] is not None and entry[2] is None]
+                completed, _ = wait(waiting, return_when=FIRST_COMPLETED)
+                for sequence, (other_batch, other_future, _) in tuple(slots.items()):
+                    if other_future in completed:
+                        slots[sequence] = (other_batch, other_future, other_future.result())
+                continue
+            if len(results) != len(batch):
+                raise RuntimeError("post-processing worker returned a different number of results than jobs")
+            del slots[next_output]
+            next_output += 1
+            yield from zip(batch, results)
+            batch = None
+            results = None
+            while next_submit - next_output < window and submit_one(pool):
+                pass
+
+
+def _advanced_after_thermal_batch(jobs):
+    """Run an ordered group of post-thermal advanced-physics lanes in one worker process."""
+    from .Multiphysics import _advanced_after_thermal
+
+    return [_advanced_after_thermal(*job) for job in jobs]
+
+
+def _detailed_ballistics_batch(jobs):
+    """Build detailed ballistics for an ordered group of already-solved lanes."""
+    from .DetailedBallistics import build_detailed_ballistics
+
+    return [build_detailed_ballistics(job[1], **job[3]) for job in jobs]
 
 
 def _execution(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -312,14 +420,17 @@ def run_advanced_physics_ensemble(
     wall conduction, which costs most of the advanced physics, runs through ``simulate_thermal`` on ``backend`` and the
     structural, CFD, ignition and flight models then run on the CPU for each lane from its thermal metrics. The scenario
     factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. ``workers`` is the process
-    count of the ``cpu-reference`` thermal batch; the models after the thermal one run serially in this process, and at
-    thousands of lanes they are most of the time (5 ms per lane against 0.3 ms for the batched thermal ablation on the GPU).
+    count for the ``cpu-reference`` thermal solve and the CPU models after it. ``None`` or ``1`` keeps post-processing
+    serial; values above one run it in an ordered process pool. At thousands of lanes, those models can dominate
+    (about 5 ms per lane against 0.3 ms for batched thermal ablation on the GPU). CPU process pools use ``spawn``, so
+    scripts must call this function under ``if __name__ == "__main__":`` when ``workers > 1``.
     A dict passed as
     ``timings`` receives the seconds packing (``pack_s``), in the thermal batch (``thermal_s``) and in the other models
     (``models_s``); one passed as ``execution`` receives the summary of ``simulate_thermal``.
     """
+    workers = _validate_workers(workers)
     from .batch.thermal import _lane_count, _per_lane
-    from .Multiphysics import _advanced_after_thermal, _require_casing_material, _resolve_gamma, _scenario_thermal_inputs
+    from .Multiphysics import _require_casing_material, _resolve_gamma, _scenario_thermal_inputs
 
     mark = time.perf_counter()
     count = _lane_count(geometries, curves, casing_material, nozzle_material, flame_temp_k, r_specific, gamma)
@@ -339,9 +450,14 @@ def run_advanced_physics_ensemble(
     outcome = simulate_thermal(batch, backend=backend, device=device, strict=strict, workers=workers, chunk_size=chunk_size)
     solved = time.perf_counter()
     thermal = outcome.to_results()
-    results = [
-        _advanced_after_thermal(geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
+    jobs = (
+        (geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
         for i in range(count)
+    )
+    results = [
+        result for _, result in _bounded_process_batches(
+            _advanced_after_thermal_batch, jobs, count, workers, process_safe=_pickle_safe
+        )
     ]
     if timings is not None:
         timings.update(pack_s=packed - mark, thermal_s=solved - packed, models_s=time.perf_counter() - solved)
@@ -409,17 +525,20 @@ def run_robustness_ensemble(
     ``valid``), and the report, its statistics and its validity ratio are unchanged.
 
     ``chunk_lanes`` is the most lanes a launch holds, except that a design is never split: a chunk is at least one design
-    (27 lanes with the defaults, more with many Latin-hypercube samples). ``workers`` is the process count of the
-    ``cpu-reference`` backend; the detailed ballistics of the lanes is built serially in this process.
+    (27 lanes with the defaults, more with many Latin-hypercube samples). ``workers`` is the process count for the
+    ``cpu-reference`` solve and detailed-ballistics post-processing; ``None`` or ``1`` keeps post-processing serial.
+    Process pools use ``spawn``, so scripts must call this function under ``if __name__ == "__main__":`` when
+    ``workers > 1``.
     """
     from .batch.simulation_view import SimulationView
-    from .DetailedBallistics import _validate_dry_hardware, build_detailed_ballistics
+    from .DetailedBallistics import _validate_dry_hardware
     from .Environment import Environment
     from .Robustness import (
         _build_report, _finish_scenario_result, _scenario_objects, _scenario_simulation_kwargs,
         build_latin_hypercube_scenarios, default_robustness_scenarios,
     )
 
+    workers = _validate_workers(workers)
     if isinstance(chunk_lanes, bool) or not isinstance(chunk_lanes, numbers.Integral) or chunk_lanes < 1:
         raise ValueError(f"chunk_lanes must be a positive integer, got {chunk_lanes!r}")
     parsed = [_robustness_design(entry) for entry in designs]
@@ -469,13 +588,24 @@ def run_robustness_ensemble(
                                max_steps=max_steps).to_results()
         clock["solve_s"] += time.perf_counter() - mark
         mark = time.perf_counter()
+        def lane_jobs():
+            for lane in range(len(solved)):
+                scenario = None if lane % lanes_per_design == 0 else scenario_list[lane % lanes_per_design - 1]
+                view = SimulationView.from_lane(batch, lane, solved[lane])
+                if not keep_series:
+                    solved[lane] = None  # the bounded worker window now owns this lane's history
+                yield lane, view, scenario, details[lane]
+
+        processed = _bounded_process_batches(
+            _detailed_ballistics_batch, lane_jobs(), len(solved), workers,
+            process_safe=_detailed_ballistics_process_safe,
+        )
         results: List[Dict[str, Any]] = []
-        for lane in range(len(solved)):
-            scenario = None if lane % lanes_per_design == 0 else scenario_list[lane % lanes_per_design - 1]
-            view = SimulationView.from_lane(batch, lane, solved[lane])
-            solved[lane] = None  # the view holds it; with keep_series=False nothing does once the lane is summarised
-            result = build_detailed_ballistics(view, **details[lane])
-            result["simulation"] = view
+        for job, result in processed:
+            lane, view, scenario, _ = job
+            if keep_series:
+                result["simulation"] = view
+                solved[lane] = None
             if scenario is None:
                 result["scenario_id"] = "nominal"
                 result["scenario_kind"] = "nominal"

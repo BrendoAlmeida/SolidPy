@@ -81,7 +81,8 @@ class SolveOptions:
     backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
     (``None``: the backend's default) and ``tiers`` the iteration caps of the capped tiers a batched backend runs
     before its uncapped one (``None``: ``batch.tiers.DEFAULT_TIERS``; ``()``: a single uncapped solve). A backend
-    ignores an option that does not apply to it and says so in its docstring.
+    ignores an option that does not apply to it and says so in its docstring. CPU process pools use ``spawn``; scripts
+    that call an API with ``workers > 1`` must do so under ``if __name__ == "__main__":``.
     """
 
     history: str = "metrics"

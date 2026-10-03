@@ -1,0 +1,29 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": null,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": null
+  },
+  "results": [
+    {
+      "backend": "cpu-vectorized",
+      "device": null,
+      "kind": "advanced",
+      "lanes": 1024,
+      "workers": 1,
+      "first_call_s": 7.684273505001329,
+      "seconds": 7.591483469994273,
+      "lanes_per_s": 134.88799706242034,
+      "timings": {
+        "pack_s": 0.3706617220013868,
+        "thermal_s": 1.8520804349973332,
+        "models_s": 5.366629699012265
+      }
+    }
+  ]
+}

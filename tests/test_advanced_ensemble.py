@@ -45,7 +45,8 @@ def test_the_numpy_backend_agrees_on_every_key_and_the_models_after_the_thermal_
 
     got = run_advanced_physics_ensemble(
         geometry, curves, casing_material=casing, flame_temp_k=propellant.combustion_temperature,
-        r_specific=propellant.products_constant, backend="cpu-vectorized", timings=timings, execution=execution,
+        r_specific=propellant.products_constant, backend="cpu-vectorized", workers=2,
+        timings=timings, execution=execution,
     )
 
     for lane, curve in enumerate(curves):
@@ -77,7 +78,7 @@ def test_arguments_are_one_value_for_every_lane_or_one_per_lane(designs):
 
     got = run_advanced_physics_ensemble(
         [geometry, geometry], curves[0], casing_material=materials, flame_temp_k=[1500.0, 1700.0], r_specific=propellant.products_constant,
-        gamma=[None, 1.2], backend="cpu-reference",
+        gamma=[None, 1.2], backend="cpu-reference", workers=2,
     )
 
     want = [simulate_advanced_physics(geometry, curves[0], casing_material=m, flame_temp_k=f, r_specific=propellant.products_constant,

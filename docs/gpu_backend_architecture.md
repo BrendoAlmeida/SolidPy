@@ -489,9 +489,11 @@ Goal: use every available device at once and keep each busy.
 ### 6.4 Overlapping accelerator and CPU work
 
 After the batched ODE the remaining per-lane work (derived metrics that stay on the host, result
-assembly, user callbacks, writing outputs) can dominate. The executor pipelines: while the accelerator
-solves chunk `k`, host threads post-process chunk `k-1` and pack chunk `k+1`. Without this overlap the
-Amdahl cap of section 2 applies.
+assembly, user callbacks, writing outputs) can dominate. The advanced-physics and robustness ensemble APIs now accept
+`workers > 1` to run their CPU post-processing in a bounded process pool, while preserving lane order. The current
+implementation starts that pool after the batched solve; it does not yet overlap device solving, CPU post-processing and
+packing. The Phase 5 executor will pipeline those stages so that while the accelerator solves chunk `k`, host workers
+post-process chunk `k-1` and pack chunk `k+1`. Without this overlap the Amdahl cap of section 2 applies.
 
 ## 7. Coverage map (what runs where)
 
@@ -928,7 +930,8 @@ Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.p
   program, lanes padded to a power of two, wall cells to a multiple of 4, steps to a quarter-octave bucket).
 * `solidpy.ensemble.simulate_thermal(batch, backend, ...)` routes like `simulate_burn`: lanes the backend cannot take and lanes
   whose integration did not finish are rerun on the scalar reference. `run_advanced_physics_ensemble(geometries, curves, ...)`
-  runs the thermal ablation of many designs as one batch and the other advanced models on the CPU for each lane;
+  runs the thermal ablation of many designs as one batch and the other advanced models on the CPU for each lane; pass
+  `workers > 1` to run those models in a process pool while preserving lane order. The default remains serial.
   `simulate_advanced_physics` was split unchanged into the thermal call and `_advanced_after_thermal`.
 * Tolerances version 5 adds `THERMAL_RTOL = 1e-9`. The worst difference to the scalar model over 14 fixed cases and 1,800
   random lanes on NumPy, JAX on the CPU device and JAX on the GPU is 1.4e-12, every metric included (`heat_load_kj_m2` too, since
@@ -941,16 +944,17 @@ instead of imported from scipy's private module and compared with it in a test; 
 shape and the launch budget is linear in the wall cells; the scenario inputs of a curve are read by one helper; the
 summary of `simulate_thermal` keeps the backends' execution records; and the docstrings say that a lane whose integration did
 not finish is rerun on the reference even with `strict=True`, that a batch keeps references to its input objects, and that the
-CPU models after the thermal one run serially.
+CPU models after the thermal one run serially by default or in a process pool with `workers > 1`.
 
 Measured (`docs/gpu_backend_benchmarks.md`): offloaded share W1 0.990, **W2 0.988**, W3 0.994, so the gate of 0.8 is met on all
 three workloads. The thermal ablation alone runs 36x the scalar model on 12 threads at 4,096 lanes of typical walls (15.7x on
 walls up to 18 cells); the whole advanced physics runs 5.8x, limited by the structural, CFD, ignition and flight models that
 stay on one CPU core (5.3 ms per lane, 90 % of the batched run).
 
-Not done: those CPU models and the detailed ballistics of the robustness ensembles are now the ceiling of both ensembles and
-share a fix (a process pool or batching them, section 6.4); the general transient structural response over arbitrary curves;
-`decimated:N` / `uniform:N` histories. W4 peak-pressure sampling and `xp=` for `surrogate_physics` are recorded in section 14.7.
+The CPU post-processing of advanced physics and robustness ensembles now accepts `workers > 1` and runs in a bounded,
+ordered process pool; measurements are in `docs/gpu_backend_benchmarks.md`. The general transient structural response over
+arbitrary curves and `decimated:N` / `uniform:N` histories remain unimplemented. W4 peak-pressure sampling and `xp=` for
+`surrogate_physics` are recorded in section 14.7.
 Couplings between the batched thermal code and the scalar model, and the 1e-3 quadrature error of the scalar heat load, are
 in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
 
@@ -972,6 +976,28 @@ This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `Struct
 `simulate_structural_response` curves, including time-varying thrust and lane-specific geometry, remain CPU work, as do
 the post-thermal CFD, ignition and flight proxies and detailed-ballistics post-processing. The vectorized static
 surrogate API now accepts `xp=`; its JAX numerical kernel is separately JIT-tested when the optional dependency exists.
+
+### 14.8 CPU post-processing for W2 and W3 ensembles (2026-10-03)
+
+`run_advanced_physics_ensemble(..., workers=N)` and `run_robustness_ensemble(..., workers=N)` now use an ordered,
+bounded `ProcessPoolExecutor` for the CPU work after the batched thermal or burn solve. The default (`workers=None` or `1`)
+remains serial. The worker count also continues to configure the `cpu-reference` solver when that backend is selected.
+Work is grouped in small batches, with at most eight batches per process and 128 jobs overall in flight. The pool is
+capped at 16 processes and the host's available CPU count. This bounds retained histories even when callers request a
+larger worker count. The pool uses Python's `spawn` context so it cannot inherit initialized JAX or CUDA state.
+Applications that call these APIs from a script must create the pool under an `if __name__ == "__main__":` guard, as
+required by multiprocessing's spawn mode.
+
+The advanced-physics path was checked against `simulate_advanced_physics`; the robustness path was checked against scalar
+reports, including lane order and report assembly. Process startup is part of the measured call. On this host six workers
+were slower at every tested size: for 256 W2 lanes, models took 1.333 s to 4.390 s and total time 2.238 s to 5.294 s;
+for 1,024 W2 lanes, models took 5.367 s to 15.222 s and total time 7.591 s to 17.460 s. For 216 W3 lanes, detailed
+ballistics took 0.557 s serially and 1.542 s with workers, with total runtime increasing from 11.194 s to 12.358 s.
+Keep the default serial on this host; the process option remains available for workloads and hosts that benefit from it.
+The benchmarks are recorded in `docs/gpu_backend_benchmarks.md` and `benchmarks/results/postprocess_*.json`.
+
+This is parallel post-processing after a completed solve. The Phase 5 pipeline that overlaps accelerator solving,
+post-processing and packing remains pending.
 
 ## Appendix A. State vector and padded batch schema
 

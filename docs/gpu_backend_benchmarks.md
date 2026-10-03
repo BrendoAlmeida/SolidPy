@@ -220,11 +220,10 @@ What the numbers say:
   typical walls, 15.7x on walls of up to 18 cells (the wall cells are a sequential recurrence, so the cost grows with
   them). One NumPy thread already beats 12 scalar processes by 3.3x, because the scalar call spends most of its time in
   scipy's per-call overhead, not in arithmetic.
-* The whole advanced physics is limited by what stays on the CPU. At 4,096 lanes the thermal batch takes 1.0 s and
-  packing it 1.4 s, while the structural, CFD, ignition and flight models of the 4,096 lanes take **21.8 s**, 5.3 ms per
-  lane on one core (90 % of the run). That loop is serial in this process; spreading it over the other cores, or
-  batching those models, is what would lift the 169 lanes/s (the same observation as for the detailed ballistics of the
-  robustness ensembles). Packing costs 0.3 to 0.4 ms per lane on the host.
+* In the serial default, the whole advanced physics is limited by what stays on the CPU. At 4,096 lanes the thermal batch
+  takes 1.0 s and packing it 1.4 s, while the structural, CFD, ignition and flight models of the 4,096 lanes take
+  **21.8 s**, 5.3 ms per lane on one core (90 % of the run). `workers > 1` now spreads those models over worker processes;
+  the measurements below show the effect at smaller lane counts. Packing costs 0.3 to 0.4 ms per lane on the host.
 * Below about 2,000 lanes the latency of the sequential loops dominates (1,441 lanes/s at 1,024); from 4,096 lanes the
   device is saturated and the time grows with the lanes (16,384 lanes take 3.9x the time of 4,096). The device runs float64,
   which a consumer GPU does at 1/64 of its float32 rate.
@@ -232,10 +231,43 @@ What the numbers say:
 ## Not covered yet
 
 The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, general transient structural
-responses (W4's synthetic peak-pressure path is implemented), spreading the CPU post-processing (detailed ballistics,
-the proxies after the thermal ablation) over cores, and a data-center GPU. W4's 100,000-sample harness is
+responses (W4's synthetic peak-pressure path is implemented), overlapping CPU post-processing with device solves,
+multi-stage scheduling, and a data-center GPU. W4's 100,000-sample harness is
 `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain pending. All measured numbers are for one machine;
 they say nothing about other devices.
+
+## CPU post-processing workers (W2 and W3)
+
+`run_advanced_physics_ensemble` and `run_robustness_ensemble` accept `workers > 1` to run post-processing after the
+batched solve in a bounded process pool. The default (`workers=None` or `1`) stays serial. Each row below is one timed
+warm CPU-vectorized call on the Ryzen 5 3600 host, after an initial call; process startup is included. No GPU or JAX was
+available. W2 uses 256 or 1,024 curves. W3 uses 8 designs and 216 lanes, with 16 Latin-hypercube samples per design and
+`keep_series=False`.
+
+| Workload | Workers | Total (s) | Batched solve (s) | CPU post-processing (s) |
+|---|---:|---:|---:|---:|
+| W2 advanced physics, 256 lanes | 1 | 2.238 | 0.816 thermal | 1.333 models |
+| W2 advanced physics, 256 lanes | 6 | 5.294 | 0.811 thermal | 4.390 models |
+| W2 advanced physics, 1,024 lanes | 1 | 7.591 | 1.852 thermal | 5.367 models |
+| W2 advanced physics, 1,024 lanes | 6 | 17.460 | 1.867 thermal | 15.222 models |
+| W3 robustness, 216 lanes | 1 | 11.194 | 10.564 burn | 0.557 detailed ballistics |
+| W3 robustness, 216 lanes | 6 | 12.358 | 10.740 burn | 1.542 detailed ballistics |
+
+Six workers were slower on all three tested shapes: the W2 model stage took 3.29x as long at 256 lanes and 2.84x as long
+at 1,024 lanes; the W3 detailed-ballistics stage took 2.77x as long. Pool startup and job serialization outweigh the
+parallel work on this host, so the pool is opt-in and serial is the default. A GPU run could change the total W3 balance,
+but that is an inference and remains unmeasured; these CPU-model timings still apply.
+The process pool starts after the solve, so there is no overlap with accelerator work yet. Raw benchmark output is in
+`benchmarks/results/postprocess_w2_numpy_workers{1,6}.json`,
+`benchmarks/results/postprocess_w2_numpy_1024_workers{1,6}.json` and
+`benchmarks/results/postprocess_w3_numpy_workers{1,6}.json`.
+
+Reproduce the measured shapes with:
+
+```
+python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --repeat 1
+python benchmarks/bench_robustness.py --backend cpu-vectorized --workers 6 --designs 8 --repeat 1
+```
 
 ## Structural Monte Carlo (W4)
 

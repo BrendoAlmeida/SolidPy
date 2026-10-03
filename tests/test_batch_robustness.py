@@ -154,7 +154,7 @@ def test_the_reference_backend_in_a_process_pool_gives_the_same_report(design, s
 
 
 def test_the_numpy_backend_matches_the_scalar_report_within_the_tolerances(design, scalar_report):
-    report = run_robustness_analysis(*design, scenarios=scenarios(), backend="cpu-vectorized", **KWARGS)
+    report = run_robustness_analysis(*design, scenarios=scenarios(), backend="cpu-vectorized", workers=2, **KWARGS)
 
     assert_reports_close(report, scalar_report)
     execution = report["nominal"]["canonical_result"]["provenance"]["execution"]
@@ -163,6 +163,35 @@ def test_the_numpy_backend_matches_the_scalar_report_within_the_tolerances(desig
                for s in report["scenarios"]]
     assert factors[0] == pytest.approx(0.94 * (1.0 + 0.005 * (298.15 - 298.15)))  # low_burn_rate
     assert len(set(factors)) > 3  # the temperature and the sampled scenarios changed it per lane
+
+
+def test_unpicklable_activation_callbacks_fall_back_to_parent_postprocessing(design):
+    activation = lambda time_s, regression_m: 1.0
+    options = dict(scenarios=scenarios()[:1], max_step_size=0.03, max_time_points=200,
+                   burn_area_activation=activation)
+
+    pooled = run_robustness_analysis(*design, backend="cpu-vectorized", workers=2, **options)
+    scalar = run_robustness_analysis(*design, **options)
+
+    assert_reports_close(pooled, scalar, step=0.03)
+
+
+def test_process_pickling_check_rejects_unpicklable_objects_inside_object_arrays():
+    callbacks = np.empty(1, dtype=object)
+    callbacks[0] = lambda value: value
+
+    assert not ensemble._pickle_safe(callbacks)
+    assert ensemble._pickle_safe(np.asarray([1.0, 2.0]))
+
+
+def test_process_worker_count_is_capped(monkeypatch):
+    import solidpy._parallel as parallel
+
+    monkeypatch.setattr(parallel, "available_cpu_count", lambda: 64)
+    assert parallel.process_worker_count(1000, 1000) == parallel.MAX_PROCESS_WORKERS
+    assert parallel.process_worker_count(3, 1000) == 3
+    monkeypatch.setattr(parallel, "available_cpu_count", lambda: 2)
+    assert parallel.process_worker_count(12, 1000) == 2
 
 
 def test_the_numpy_backend_matches_the_scalar_report_on_a_power_law_design():
@@ -281,6 +310,9 @@ def test_a_missing_dry_hardware_is_refused_before_anything_is_solved(design, mon
     ([(1, 2, 3, 4, {}, 6)], {}, "a design is"),
     ([make_motor_stack()], {"chunk_lanes": 0}, "chunk_lanes must be a positive integer"),
     ([make_motor_stack()], {"chunk_lanes": True}, "chunk_lanes must be a positive integer"),
+    ([make_motor_stack()], {"workers": 0}, "workers must be a positive integer"),
+    ([make_motor_stack()], {"workers": True}, "workers must be a positive integer"),
+    ([make_motor_stack()], {"workers": 1.5}, "workers must be a positive integer"),
 ])
 def test_invalid_arguments_are_refused(designs, kwargs, error):
     with pytest.raises(ValueError, match=error):
