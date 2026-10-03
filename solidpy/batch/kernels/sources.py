@@ -7,15 +7,15 @@ increasing abscissae so that no division by zero or ``inf - inf`` happens in the
 per-lane count says how many entries are real.
 """
 
+from .tables import locate
+
 NONE, SCALAR, TABLE = 0.0, 1.0, 2.0
 
 
 def _interp(xp, x, xs, ys, count):
     """``np.interp(x, xs[:count], ys[:count])`` for one table per lane; ``x`` is clamped to the end values."""
     k = xs.shape[-1]
-    valid = xp.arange(k) < count[..., None]
-    below = xp.sum((xs <= x[..., None]) & valid, axis=-1) - 1
-    j = xp.clip(below, 0, xp.maximum(count - 2, 0))
+    j = locate(xp, x, xs, count)
     last = xp.maximum(count - 1, 0)
     x0 = xp.take_along_axis(xs, j[..., None], axis=-1)[..., 0]
     x1 = xp.take_along_axis(xs, xp.minimum(j + 1, k - 1)[..., None], axis=-1)[..., 0]

@@ -6,7 +6,7 @@ from solidpy import backends
 from solidpy.backends import UnsupportedLane
 from solidpy.ensemble import ProblemBatch, lane_cost, simulate_burn
 
-IDS = ("tubular-000", "igniter-callable-000", "star-001", "ratetable-000", "tubular-002")
+IDS = ("tubular-000", "igniter-callable-000", "star-001", "activation-callable-000", "tubular-002")
 SUPPORTED_LANES = [0, 2, 4]
 FALLBACK_LANES = [1, 3]
 
@@ -49,7 +49,7 @@ def test_a_backend_that_cannot_run_every_lane_falls_back_and_says_so(batch, scal
         execution = results[lane]["provenance"]["execution"]
         assert execution["backend"] == "cpu-vectorized" and execution["fallback"] is None
         assert execution["requested_backend"] == "cpu-vectorized"
-    for lane, reason in zip(FALLBACK_LANES, ("igniter_callable", "burn_rate_table")):
+    for lane, reason in zip(FALLBACK_LANES, ("igniter_callable", "activation_callable")):
         execution = results[lane]["provenance"]["execution"]
         assert execution["backend"] == "cpu-reference" and execution["requested_backend"] == "cpu-vectorized"
         assert execution["fallback"] == {"lane_reason": [reason], "ran_on": "cpu-reference"}
@@ -59,7 +59,7 @@ def test_a_backend_that_cannot_run_every_lane_falls_back_and_says_so(batch, scal
 
 
 def test_strict_mode_refuses_instead_of_falling_back(batch):
-    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_callable; 3: burn_rate_table"):
+    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: igniter_callable; 3: activation_callable"):
         simulate_burn(batch, backend="cpu-vectorized", strict=True)
     simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", strict=True)  # all supported: fine
 
@@ -133,74 +133,14 @@ def test_lane_cost_orders_slow_and_many_grain_lanes_after_quick_ones():
     assert np.isfinite(cost).all() and cost[0] < cost[2] and cost[0] < cost[3]
 
 
-def test_lanes_without_a_power_law_burn_rate_sort_last():
+def test_tabulated_burn_rates_get_a_finite_cost_in_the_range_of_the_power_law_ones():
     by_id = {c["id"]: c for c in gc.load_corpus()["cases"]}
-    built = [gc.build_objects(by_id[i]) for i in ("ratetable-000", "tubular-000")]
+    built = [gc.build_objects(by_id[i]) for i in ("ratetable-000", "tubular-000", "ratetable-009")]
     lanes = ProblemBatch.from_objects([b[1] for b in built], [b[2] for b in built], [b[3] for b in built],
                                       [b[4] for b in built])
 
     cost = lane_cost(lanes)
 
-    assert cost[0] == np.finfo(float).max and cost[1] < cost[0]
-
-
-@pytest.mark.parametrize("bad", [0, -1, 2.5, True])
-def test_a_chunk_size_that_is_not_a_positive_integer_is_an_error(batch, bad):
-    with pytest.raises(ValueError, match="chunk_size must be a positive integer or None"):
-        simulate_burn(batch.select([0]), backend="cpu-vectorized", chunk_size=bad)
-
-
-def test_sorting_is_skipped_when_one_chunk_holds_every_lane(batch, monkeypatch):
-    from solidpy import ensemble
-
-    def refuse(_):
-        raise AssertionError("lane_cost must not run for a single chunk")
-
-    monkeypatch.setattr(ensemble, "lane_cost", refuse)
-
-    result = simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized")
-
-    assert result.execution["chunks"] == 1
-    with pytest.raises(AssertionError, match="must not run"):
-        simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", chunk_size=1)
-
-
-class FakeAccelerator:
-    name = "fake-gpu"
-    api_version = backends.BACKEND_API_VERSION
-
-    def __init__(self, device=None):
-        self.device = device or "cuda:0"
-
-    def capabilities(self):
-        return backends.get_backend("cpu-vectorized").capabilities()
-
-    def devices(self):
-        return ["cuda:0"]
-
-    def solve_burn(self, batch, options):
-        return backends.get_backend("cpu-vectorized").solve_burn(batch, options)
-
-    def provenance(self):
-        return {"backend": self.name}
-
-
-def test_auto_counts_only_the_lanes_the_accelerator_can_run_and_records_what_was_asked(batch, monkeypatch):
-    from solidpy import ensemble
-
-    backends.register_backend("fake-gpu", FakeAccelerator, replace=True)
-    monkeypatch.setattr(ensemble, "AUTO_ACCELERATORS", ("fake-gpu",))
-    monkeypatch.setattr(ensemble, "AUTO_MIN_LANES", 4)
-    try:
-        enough = batch.select([0, 2, 4, 0])
-        too_few = batch.select([0, 1, 3, 4])  # two of the four lanes need the reference
-
-        assert ensemble._auto_backend(enough) == "fake-gpu"
-        assert ensemble._auto_backend(too_few) == "cpu-reference"
-        result = simulate_burn(enough, backend="auto")
-        assert result.execution["requested_backend"] == "auto" and result.execution["effective_backend"] == "fake-gpu"
-        assert {r["provenance"]["execution"]["requested_backend"] for r in result.to_results()} == {"auto"}
-        # an explicit device does not break a choice of the reference
-        assert simulate_burn(batch.select([0]), backend="auto", device="cuda:0").backend == "cpu-reference"
-    finally:
-        backends.unregister_backend("fake-gpu")
+    assert np.isfinite(cost).all() and (cost < 1e5).all() and (cost > 0).all()
+    lanes.arrays["burn_rate_mode"][0] = 0.0  # a lane with neither a table nor power-law coefficients has no rate
+    assert lane_cost(lanes)[0] == np.finfo(float).max

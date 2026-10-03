@@ -18,7 +18,7 @@ return quantities of shape ``S``. ``S = (B,)`` is the solver case; ``S = (B, T)`
 
 from .geometry import burn_area, ordered_sum, port_area, remaining_volume
 from .nozzle import TINY, nozzle_mass_flow, thrust_components
-from .propellant import burn_rate, gas_properties
+from .propellant import burn_rate, exit_mach, gas_properties
 from .sources import activation as activation_factor
 from .sources import igniter_flow as igniter_flow_at
 
@@ -72,7 +72,7 @@ def state_quantities(xp, y, active, P, detail=False, time=None):
 
     generated_grains = P["density"][..., None] * areas * rates
     generated = xp.sum(generated_grains, axis=-1)
-    parts = thrust_components(xp, pressure, temperature, nozzle, k, P["exit_mach"], P, detail)
+    parts = thrust_components(xp, pressure, temperature, nozzle, k, exit_mach(xp, k, P), P, detail)
     ideal, momentum, pressure_thrust, thrust = parts[:4]
     quantities = {
         "pressure": pressure,

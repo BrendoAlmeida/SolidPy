@@ -186,17 +186,18 @@ def test_ends_burn_and_star_are_features_of_the_grains():
     assert {pb.STAR_GRAIN, pb.TUBULAR_GRAIN, pb.ENDS_BURN} <= features
 
 
-def test_values_the_kernels_cannot_reproduce_are_nan_not_plausible_numbers():
+def test_values_the_kernels_do_not_use_for_a_lane_are_nan_not_plausible_numbers():
     motor, propellant, _ = _thermo_table(*make_stack())
     tabulated_rate = Propellant(1.13, 0.04, 1700.0, density=1800.0, interpolation_list="data/burnrate/KNSB3.csv")
 
     thermo = pack(motor, propellant).arrays
     rate = pack(make_stack()[0], tabulated_rate).arrays
 
-    for name in ("gamma", "source_temperature", "exit_mach"):
-        assert np.isnan(thermo[name]).all(), name
+    assert thermo["thermo_mode"].tolist() == [1.0] and np.isnan(thermo["exit_mach"]).all()  # solved from k(p) later
+    assert np.isfinite(thermo["gamma"]).all() and np.isfinite(thermo["source_temperature"]).all()  # values at ambient
     for name in ("burn_rate_a", "burn_rate_n"):
         assert np.isnan(rate[name]).all(), name
+    assert rate["burn_rate_mode"].tolist() == [1.0]
 
 
 def test_capabilities_decide_which_lanes_are_unsupported():
@@ -307,8 +308,9 @@ def test_every_corpus_design_packs_with_finite_values_where_supported(corpus_lan
         assert (a["grain_valid"].sum(axis=1) == batch.n_grains).all(), case["id"]
         assert np.isfinite(a["chamber_volume"]).all() and (a["free_volume"] > 0).all(), case["id"]
         scalar = pb.THERMO_SCALAR in batch.lane_features[0]
-        assert np.isfinite(a["exit_mach"]).all() == scalar, case["id"]
-        assert np.isfinite(batch.initial_state()).all() == scalar, case["id"]
+        assert np.isfinite(a["exit_mach"]).all() == scalar, case["id"]  # a k table gets its Mach number from k(p)
+        assert np.isfinite(batch.initial_state()).all(), case["id"]
+        assert (a["thermo_mode"] == (0.0 if scalar else 1.0)).all(), case["id"]
 
 
 def test_packed_inputs_match_the_stored_reference_initial_state(corpus_lanes):

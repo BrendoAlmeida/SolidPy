@@ -125,8 +125,10 @@ def test_peaks_sampled_on_the_step_grid_match_the_reference(solved):
             continue
         metrics = stored["metrics"]
         for key, name in (("pmax", "peak_chamber_pressure_pa"), ("tmax", "peak_thrust_n"),
-                          ("gmax", "max_generated_mass_flow_kg_s"), ("nmax", "max_nozzle_mass_flow_kg_s")):
+                          ("nmax", "max_nozzle_mass_flow_kg_s")):
             rel(out[key][i], metrics[name], f"{name} {case['id']}", tol.GRID_SAMPLED_RTOL)
+        rel(out["gmax"][i], metrics["max_generated_mass_flow_kg_s"], f"max generated flow {case['id']}",
+            tol.GENERATED_FLOW_PEAK_RTOL)
 
 
 def test_the_blowdown_cutoff_is_built_from_the_burn_stage_peak(solved):

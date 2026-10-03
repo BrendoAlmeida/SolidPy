@@ -23,7 +23,8 @@ class NumpyBackend:
 
     #: Lane features the kernels and the integrator reproduce. Everything else is routed elsewhere.
     SUPPORTED_FEATURES = (
-        "tubular_grain", "star_grain", "ends_burn", "burn_rate_power_law", "erosive_burning", "thermo_scalar",
+        "tubular_grain", "star_grain", "ends_burn", "burn_rate_power_law", "burn_rate_table", "erosive_burning",
+        "thermo_scalar", "thermo_table",
         "tail_off_numerical", "tail_off_omitted", "igniter_scalar", "igniter_table", "activation_scalar",
         "activation_table", "ignition_ramp",
     )

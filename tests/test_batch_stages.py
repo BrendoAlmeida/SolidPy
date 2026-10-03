@@ -56,10 +56,12 @@ def test_metrics_match_the_reference_including_the_igniter_mass(solved):
                     "igniter_mass_injected_kg", "propellant_mass_consumed_kg"):
             if not np.isclose(m[key], s[key], rtol=tol.INTEGRAL_RTOL, atol=1e-12):
                 bad.append((case["id"], key, m[key], s[key]))
-        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_generated_mass_flow_kg_s",
-                    "max_nozzle_mass_flow_kg_s", "gas_mass_cutoff_kg"):
+        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_nozzle_mass_flow_kg_s", "gas_mass_cutoff_kg"):
             if not np.isclose(m[key], s[key], rtol=tol.GRID_SAMPLED_RTOL, atol=0):
                 bad.append((case["id"], key, m[key], s[key]))
+        key = "max_generated_mass_flow_kg_s"
+        if not np.isclose(m[key], s[key], rtol=tol.GENERATED_FLOW_PEAK_RTOL, atol=0):
+            bad.append((case["id"], key, m[key], s[key]))
         for got_t, stored_t in zip(m["grain_burnout_times_s"], s["grain_burnout_times_s"]):
             if (got_t is None) != (stored_t is None) or (
                     stored_t is not None and not np.isclose(got_t, stored_t, rtol=tol.TIME_RTOL, atol=0)):

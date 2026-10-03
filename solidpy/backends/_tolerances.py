@@ -11,7 +11,7 @@ Never edit a value to make a failing test pass. A change needs a written cause i
 new ``TOLERANCES_VERSION``.
 """
 
-TOLERANCES_VERSION = "2"
+TOLERANCES_VERSION = "3"
 
 # Version 2 (cause): the first measurement of the batched solver on the golden corpus, 160 completed lanes
 # that include tolerances from rtol 1e-6 to 1e-9, gave event times up to 1.5e-6 (median 3e-10) and the maximum
@@ -33,6 +33,12 @@ INTEGRAL_RTOL = 1e-5
 
 #: Quantities sampled on the accepted-step grid (peak pressure, peak thrust, peak flows).
 GRID_SAMPLED_RTOL = 5e-3
+
+#: The maximum generated mass flow. It is a spike of the ignition transient, narrower than the step grid, so it
+#: is the least well conditioned metric: on ratetable-006 (a 24-row burn-rate table) the stored reference is
+#: 1.4e-2 away from a refined run and the batched solver 7.9e-3, while the pressure and thrust peaks of the same
+#: lane agree to 5e-6. The acceptance policy gives this metric 2 % for the same reason (version 3).
+GENERATED_FLOW_PEAK_RTOL = 1.5e-2
 
 #: Event times (grain burnout, blowdown cutoff) and the final time.
 TIME_RTOL = 5e-6

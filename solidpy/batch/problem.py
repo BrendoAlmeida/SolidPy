@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 from ..Burn import Burn, BurnSimulation
 from ..Environment import Environment
@@ -74,13 +75,19 @@ LANE_FIELDS = (
     "erosive_coefficient", "erosive_alpha", "n_valid_grains", "igniter_temperature", "igniter_burn_time",
     "ignition_ramp_time", "max_step_size", "rtol", "atol", "burn_timeout_s", "tail_off_timeout_s",
     "tail_off_evaluation", "igniter_mode", "igniter_value", "activation_mode", "activation_value",
-    "source_end_time",
+    "source_end_time", "burn_rate_mode", "rate_table_below", "rate_table_above", "thermo_mode",
+    "thermo_tc_below", "thermo_tc_above", "thermo_k_below", "thermo_k_above", "mach_below", "mach_above",
 )
 #: Per-lane tables ``[B, K]`` (padded) and their real lengths ``[B]``, plus the segment boundaries ``[B, Kb]``.
 TABLE_FIELDS = (
     "igniter_table_t", "igniter_table_m", "igniter_table_n", "activation_table_t", "activation_table_a",
-    "activation_table_n", "breakpoints",
+    "activation_table_n", "breakpoints", "rate_table_x", "rate_table_c0", "rate_table_c1", "rate_table_c2",
+    "rate_table_c3", "rate_table_n", "thermo_x", "thermo_n", "thermo_tc_c0", "thermo_tc_c1", "thermo_tc_c2",
+    "thermo_tc_c3", "thermo_k_c0", "thermo_k_c1", "thermo_k_c2", "thermo_k_c3", "mach_x", "mach_n", "mach_c0",
+    "mach_c1", "mach_c2", "mach_c3",
 )
+#: Points of the grid on which the exit Mach number is tabulated against ``k`` for pressure-dependent ``k``.
+MACH_GRID_POINTS = 33
 
 # Geometry of a padded (non-existent) grain. It never burns and holds no volume; the values only need to
 # keep every kernel finite.
@@ -253,6 +260,63 @@ def _profile(source):
     return table[:, 0], table[:, 1]
 
 
+def _piecewise_parts(interpolator):
+    """``(x, coefficients [4, n - 1], below, above)`` of a SolidPy ``interp1d`` table.
+
+    SolidPy builds cubic interpolants from four points and linear ones below, with the ends held at fixed values
+    (``Propellant``); the cubic is scipy's not-a-knot spline, so ``CubicSpline`` gives the same pieces.
+    """
+    x = np.asarray(interpolator.x, dtype=float)
+    y = np.asarray(interpolator.y, dtype=float)
+    if len(x) >= 4:
+        coefficients = CubicSpline(x, y).c
+    else:
+        slope = np.diff(y) / np.diff(x)
+        coefficients = np.stack([np.zeros_like(slope), np.zeros_like(slope), slope, y[:-1]])
+    below, above = (float(np.asarray(v).ravel()[0]) for v in interpolator.fill_value)
+    return x, coefficients, below, above
+
+
+def _mach_parts(propellant, motor):
+    """The supersonic exit Mach number against ``k`` as a cubic on a grid, for a propellant with a ``k`` table.
+
+    ``k(p)`` varies along the burn, and the scalar code solves the area-Mach relation for it each time (and
+    caches by ``k``). The grid values come from the scalar ``Burn.evaluate_exit_mach`` itself, called on a stand-in
+    that only supplies ``k`` and the expansion ratio, so the root finder is not reimplemented.
+    """
+    interpolator = propellant._gamma_func
+    pressure = np.linspace(interpolator.x[0], interpolator.x[-1], 513)
+    k_values = np.asarray(interpolator(pressure), dtype=float)
+    low, high = float(k_values.min()), float(k_values.max())
+    # the spline k(p) can peak between the sampled pressures: widen the range so that it never leaves the grid
+    margin = max(0.05 * (high - low), 1e-3)
+    low, high = low - margin, high + margin
+    grid = np.linspace(low, high, MACH_GRID_POINTS)
+    machs = []
+    for k in grid:
+        stand_in = SimpleNamespace(
+            _parameters_at_pressure=lambda _p, _k=float(k): (0.0, 0.0, 0.0, _k, 0.0),
+            motor=SimpleNamespace(expansion_ratio=motor.expansion_ratio), _exit_mach_cache={}, exit_mach=None,
+        )
+        machs.append(float(Burn.evaluate_exit_mach(stand_in, None)))
+    machs = np.asarray(machs)
+    return grid, CubicSpline(grid, machs).c, float(machs[0]), float(machs[-1])
+
+
+def _padded_piecewise(parts):
+    """Pad ``_piecewise_parts`` of several lanes (``None`` for a lane without a table) to common arrays."""
+    count = np.asarray([0 if part is None else len(part[0]) for part in parts], dtype=int)
+    k = max(int(count.max(initial=0)), 2)
+    x = np.zeros((len(parts), k))
+    c = np.zeros((4, len(parts), k))
+    for lane, part in enumerate(parts):
+        xs = part[0] if part is not None else np.zeros(0)
+        x[lane] = np.concatenate([xs, (xs[-1] if len(xs) else -1.0) + np.arange(1, k - len(xs) + 1)])
+        if part is not None:
+            c[:, lane, : len(xs) - 1] = part[1]
+    return x, c, count
+
+
 def _padded_tables(profiles):
     """Pad the abscissae of several tables with finite, increasing values, and the ordinates with zeros."""
     count = np.asarray([len(t) for t, _ in profiles], dtype=int)
@@ -280,6 +344,8 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
     if not math.isfinite(gamma) or gamma <= 1.0:
         raise ValueError("specific_heat_ratio must be finite and greater than one")
     source_temperature = float(propellant.Tc_at_pressure(ambient)) * burn.eta_c ** 2
+    if not scalar_thermo:
+        gamma = float(propellant.get_gamma(ambient))  # the value at ambient; the kernels look k(p) up
     BurnSimulation._positive_setting("effective_combustion_temperature", source_temperature)
 
     igniter_temperature = settings["igniter_temperature"]
@@ -292,6 +358,12 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
     igniter_mode, igniter_value = _source_mode(settings["igniter_mass_flow"])
     activation_mode, activation_value = _source_mode(settings["burn_area_activation"])
     power_law = BURN_RATE_POWER_LAW in features
+    rate_table = BURN_RATE_TABLE in features
+    rate_below, rate_above = _piecewise_parts(propellant._burn_rate_interpolator)[2:] if rate_table else (0.0, 0.0)
+    thermo = not scalar_thermo
+    tc_below, tc_above = _piecewise_parts(propellant._temperature_func)[2:] if thermo else (0.0, 0.0)
+    k_below, k_above = _piecewise_parts(propellant._gamma_func)[2:] if thermo else (0.0, 0.0)
+    mach_below, mach_above = _mach_parts(propellant, motor)[2:] if thermo else (0.0, 0.0)
     return dict(
         chamber_volume=float(motor.chamber_volume), free_volume=float(motor.free_volume),
         propellant_volume=float(motor.propellant_volume), throat_area=float(motor.nozzle_throat_area),
@@ -299,8 +371,7 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
         divergence_factor=divergence,
         exit_mach=float(burn.evaluate_exit_mach()) if scalar_thermo else nan,
         density=float(propellant.density), gas_constant=float(propellant.products_constant),
-        gamma=gamma if scalar_thermo else nan,
-        source_temperature=source_temperature if scalar_thermo else nan,
+        gamma=gamma, source_temperature=source_temperature,
         eta_c=burn.eta_c, eta_cf=burn.eta_Cf, discharge_coefficient=burn.discharge_coefficient,
         ambient_pressure=ambient,
         burn_rate_a=float(propellant.burn_rate_a) if power_law else nan,
@@ -314,6 +385,9 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
         tail_off_evaluation=1.0 if settings["tail_off_evaluation"] else 0.0,
         igniter_mode=igniter_mode, igniter_value=igniter_value, activation_mode=activation_mode,
         activation_value=activation_value, source_end_time=_source_end_time(settings),
+        burn_rate_mode=1.0 if rate_table else 0.0, rate_table_below=rate_below, rate_table_above=rate_above,
+        thermo_mode=1.0 if thermo else 0.0, thermo_tc_below=tc_below, thermo_tc_above=tc_above,
+        thermo_k_below=k_below, thermo_k_above=k_above, mach_below=mach_below, mach_above=mach_above,
     )
 
 
@@ -401,6 +475,26 @@ class ProblemBatch:
         arrays["activation_table_t"], arrays["activation_table_a"], arrays["activation_table_n"] = _padded_tables(
             activation
         )
+        rate_x, rate_c, rate_n = _padded_piecewise(
+            [_piecewise_parts(p._burn_rate_interpolator) if BURN_RATE_TABLE in f else None
+             for p, f in zip(propellant_list, features)]
+        )
+        arrays["rate_table_x"], arrays["rate_table_n"] = rate_x, rate_n
+        for index in range(4):
+            arrays[f"rate_table_c{index}"] = rate_c[index]
+        tabulated = [THERMO_TABLE in f for f in features]
+        tc_parts = [_piecewise_parts(p._temperature_func) if t else None for p, t in zip(propellant_list, tabulated)]
+        k_parts = [_piecewise_parts(p._gamma_func) if t else None for p, t in zip(propellant_list, tabulated)]
+        thermo_x, tc_c, thermo_n = _padded_piecewise(tc_parts)
+        _, k_c, _ = _padded_piecewise(k_parts)
+        arrays["thermo_x"], arrays["thermo_n"] = thermo_x, thermo_n
+        mach_parts = [_mach_parts(p, m) if t else None for p, m, t in zip(propellant_list, motor_list, tabulated)]
+        mach_x, mach_c, mach_n = _padded_piecewise(mach_parts)
+        arrays["mach_x"], arrays["mach_n"] = mach_x, mach_n
+        for index in range(4):
+            arrays[f"thermo_tc_c{index}"] = tc_c[index]
+            arrays[f"thermo_k_c{index}"] = k_c[index]
+            arrays[f"mach_c{index}"] = mach_c[index]
         boundaries = [
             sorted({float(x) for x in (*igniter[i][0], *activation[i][0], rows[i]["source_end_time"],
                                        rows[i]["ignition_ramp_time"]) if x > 0.0})

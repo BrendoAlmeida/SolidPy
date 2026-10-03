@@ -57,10 +57,12 @@ def compare_with_the_reference(cases, reference, results):
         for key in ("total_impulse_ns", "generated_mass_integral_kg", "nozzle_mass_integral_kg"):
             if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.INTEGRAL_RTOL, atol=0):
                 bad.append((case["id"], key))
-        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_generated_mass_flow_kg_s",
-                    "max_nozzle_mass_flow_kg_s"):
+        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_nozzle_mass_flow_kg_s"):
             if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.GRID_SAMPLED_RTOL, atol=0):
                 bad.append((case["id"], key))
+        key = "max_generated_mass_flow_kg_s"
+        if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.GENERATED_FLOW_PEAK_RTOL, atol=0):
+            bad.append((case["id"], key))
         for got_t, stored_t in zip(got["metrics"]["grain_burnout_times_s"], stored["metrics"]["grain_burnout_times_s"]):
             if (got_t is None) != (stored_t is None):  # a lane that timed out leaves some grains unburnt
                 bad.append((case["id"], "burnout set"))
@@ -200,6 +202,24 @@ def test_jax_runs_source_lanes_the_source_only_stage_and_the_blowdown_quirk_like
     for case, got in zip(cases, results):
         stored = reference[case["id"]]["metrics"]["igniter_mass_injected_kg"]
         assert got["metrics"]["igniter_mass_injected_kg"] == pytest.approx(stored, rel=tol.INTEGRAL_RTOL, abs=1e-12)
+
+
+def test_jax_runs_tabulated_burn_rates_and_pressure_dependent_thermochemistry_like_the_reference():
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+    cases = []
+    for family in ("ratetable", "ratetable", "thermotable", "thermotable"):
+        members = [c for c in corpus if c["family"] == family and c not in cases]
+        cases.append(min(members, key=lambda c: reference[c["id"]]["history_points"]))
+    longest = max((c for c in corpus if c["family"] == "ratetable"
+                   and c["propellant"]["interpolation_list"].endswith("KNSB2.csv")),
+                  key=lambda c: -reference[c["id"]]["history_points"])
+    cases.append(longest)  # the 1,002-row table
+
+    results = backends.get_backend("jax", device="cpu").solve_burn(pack(cases)).to_results()
+
+    assert compare_with_the_reference(cases, reference, results) == []
+    assert [r["status"]["termination_reason"] for r in results[2:4]] == ["unsupported_thermochemistry"] * 2
 
 
 def test_unsupported_lanes_are_refused_by_name():

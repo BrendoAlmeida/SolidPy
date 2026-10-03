@@ -119,9 +119,10 @@ def test_status_and_metrics_agree_with_the_live_scalar_results(live):
                     "gas_mass_initial_kg", "pressure_throat_integral_ns"):
             assert g[key] == pytest.approx(e[key], rel=tol.INTEGRAL_RTOL), key
         # the gas mass at the cutoff is read at the event, whose pressure level is 1 % of the sampled peak
-        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_generated_mass_flow_kg_s",
-                    "max_nozzle_mass_flow_kg_s", "gas_mass_cutoff_kg"):
+        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_nozzle_mass_flow_kg_s", "gas_mass_cutoff_kg"):
             assert g[key] == pytest.approx(e[key], rel=tol.GRID_SAMPLED_RTOL), key
+        assert g["max_generated_mass_flow_kg_s"] == pytest.approx(e["max_generated_mass_flow_kg_s"],
+                                                                  rel=tol.GENERATED_FLOW_PEAK_RTOL)
         for key in ("propellant_burn_start_s", "propellant_burn_end_s", "nozzle_flow_start_s", "nozzle_flow_end_s"):
             assert g[key] == pytest.approx(e[key], rel=tol.TIME_RTOL, abs=1e-12), key
         assert [t is None for t in g["grain_burnout_times_s"]] == [t is None for t in e["grain_burnout_times_s"]]
@@ -208,10 +209,12 @@ def test_the_corpus_subset_matches_the_stored_reference(corpus_cases):
         for key in ("total_impulse_ns", "generated_mass_integral_kg", "nozzle_mass_integral_kg"):
             if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.INTEGRAL_RTOL, atol=0):
                 bad.append((case["id"], key))
-        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_generated_mass_flow_kg_s",
-                    "max_nozzle_mass_flow_kg_s"):
+        for key in ("peak_chamber_pressure_pa", "peak_thrust_n", "max_nozzle_mass_flow_kg_s"):
             if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.GRID_SAMPLED_RTOL, atol=0):
                 bad.append((case["id"], key))
+        key = "max_generated_mass_flow_kg_s"
+        if not np.isclose(got["metrics"][key], stored["metrics"][key], rtol=tol.GENERATED_FLOW_PEAK_RTOL, atol=0):
+            bad.append((case["id"], key))
         if not stored["status"]["completed"]:
             continue
         if got["metrics"]["mass_flow_balance_error_pct"] > max(2 * stored["metrics"]["mass_flow_balance_error_pct"], 1e-4):
@@ -244,9 +247,9 @@ def test_a_lane_that_runs_out_of_points_is_a_solver_failure_flagged_in_the_prove
 
 def test_lanes_the_kernels_cannot_run_are_refused_by_name(corpus_cases):
     by_id, _ = corpus_cases
-    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["ratetable-000"]])
+    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["activation-callable-000"]])
 
-    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: .*igniter_callable; 2: .*burn_rate_table"):
+    with pytest.raises(UnsupportedLane, match=r"lane\(s\) 1: .*igniter_callable; 2: .*activation_callable"):
         backends.get_backend("cpu-vectorized").solve_burn(batch)
     description = backends.describe("cpu-vectorized")
     assert description["devices"] == ["cpu"] and set(description["history_policies"]) == {"metrics", "full"}
@@ -266,12 +269,13 @@ def test_the_unsupported_lane_helpers_name_lanes_and_features(corpus_cases):
     from solidpy.backends._protocol import refused_lanes, unsupported_lane_error
 
     by_id, _ = corpus_cases
-    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["ratetable-000"]])
+    batch = pack([by_id["tubular-000"], by_id["igniter-callable-000"], by_id["activation-callable-000"]])
 
     refused = refused_lanes(batch, backends.get_backend("cpu-vectorized").capabilities())
 
-    assert refused == {1: ["igniter_callable"], 2: ["burn_rate_table"]}
-    assert "backend 'x' cannot run lane(s) 1: igniter_callable; 2: burn_rate_table" in str(unsupported_lane_error("x", refused))
+    assert refused == {1: ["igniter_callable"], 2: ["activation_callable"]}
+    assert "backend 'x' cannot run lane(s) 1: igniter_callable; 2: activation_callable" in str(
+        unsupported_lane_error("x", refused))
     assert refused_lanes(batch, backends.get_backend("cpu-reference").capabilities()) == {}
 
 

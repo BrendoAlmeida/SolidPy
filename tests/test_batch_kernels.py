@@ -127,8 +127,9 @@ def test_the_packed_inputs_of_the_geometry_match_the_grain_attributes(lanes):
 
 
 def lane_view(P):
-    """Lane arrays as ``[B, 1]`` so they broadcast against ``[B, S]`` samples."""
-    return {name: array[:, None] if array.ndim == 1 else array for name, array in P.items()}
+    """Every packed array with an axis after the lane axis, so it broadcasts against ``[B, S]`` samples
+    (lane scalars become ``[B, 1]``, tables ``[B, 1, K]``)."""
+    return {name: array[:, None] for name, array in P.items()}
 
 
 def scalar_burn(batch, lane):
