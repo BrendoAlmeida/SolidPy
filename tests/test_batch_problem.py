@@ -350,3 +350,29 @@ def test_solve_cache_is_an_accepted_setting_and_does_not_change_the_packed_value
 def test_an_empty_batch_is_a_clear_error():
     with pytest.raises(ValueError, match="at least one lane is required"):
         ProblemBatch.from_objects([], [])
+
+
+def test_the_grain_axis_can_be_padded_without_changing_the_lanes():
+    motor, propellant = make_stack(("tubular", "star"))
+    batch = ProblemBatch.from_objects(motor, propellant, settings=[{}, {"eta_c": 0.9}])
+
+    wide = batch.with_g_max(8)
+
+    assert wide.g_max == 8 and batch.with_g_max(2) is batch
+    assert wide.arrays["grain_valid"].sum(axis=1).tolist() == [2, 2]
+    for name in pb.GRAIN_FIELDS:
+        np.testing.assert_array_equal(wide.arrays[name][:, :2], batch.arrays[name])
+    assert wide.arrays["grain_valid"][:, 2:].sum() == 0 and np.isfinite(wide.arrays["outer_radius"]).all()
+    np.testing.assert_array_equal(wide.arrays["eta_c"], batch.arrays["eta_c"])
+    assert wide.initial_state().shape == (2, 8 + 7)
+    with pytest.raises(ValueError, match="smaller than the current grain axis"):
+        batch.with_g_max(1)
+
+
+def test_select_may_repeat_a_lane_to_fill_a_compiled_bucket():
+    motor, propellant = make_stack()
+    batch = ProblemBatch.from_objects(motor, propellant, settings=[{"rtol": 1e-6}, {"rtol": 1e-9}])
+
+    padded = batch.select([0, 1, 0, 0])
+
+    assert padded.arrays["rtol"].tolist() == [1e-6, 1e-9, 1e-6, 1e-6]

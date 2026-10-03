@@ -363,8 +363,22 @@ class ProblemBatch:
         """For every lane, the needed features that ``capabilities`` does not fully support."""
         return [capabilities.missing(sorted(features)) for features in self.lane_features]
 
+    def with_g_max(self, g_max: int) -> "ProblemBatch":
+        """The same lanes with the grain axis padded to ``g_max`` (compiled backends reuse one shape per bucket)."""
+        if g_max < self.g_max:
+            raise ValueError(f"g_max={g_max} is smaller than the current grain axis {self.g_max}")
+        if g_max == self.g_max:
+            return self
+        extra = g_max - self.g_max
+        arrays = dict(self.arrays)
+        for name in GRAIN_FIELDS:
+            padding = np.full((len(self), extra), _PADDING[name], dtype=arrays[name].dtype)
+            arrays[name] = np.concatenate([arrays[name], padding], axis=1)
+        return ProblemBatch(arrays, self.lane_features, self.n_grains, self.motors, self.propellants,
+                            self.environments, self.settings)
+
     def select(self, indices: Sequence[int]) -> "ProblemBatch":
-        """A sub-batch with the given lanes, in the given order."""
+        """A sub-batch with the given lanes, in the given order (a lane may be repeated)."""
         index = np.asarray(indices, dtype=int)
         return ProblemBatch(
             arrays={name: array[index] for name, array in self.arrays.items()},
