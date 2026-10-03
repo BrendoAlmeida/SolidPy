@@ -1,0 +1,92 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "jax": "0.11.2"
+  },
+  "monte_carlo_samples": 16,
+  "max_step_size": 0.01,
+  "results": [
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 16,
+      "lanes": 432,
+      "first_call_s": 73.74348509099218,
+      "seconds": 3.8506030309945345,
+      "lanes_per_s": 112.19021969356913,
+      "timings": {
+        "pack_s": 0.13928169099381194,
+        "solve_s": 2.453891293000197,
+        "postprocess_s": 1.245860282011563,
+        "report_s": 0.007938796014059335
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 16,
+      "max_steps": 2000,
+      "keep_series": false
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 64,
+      "lanes": 1728,
+      "first_call_s": 89.64874728702125,
+      "seconds": 12.642507865006337,
+      "lanes_per_s": 136.6817421393895,
+      "timings": {
+        "pack_s": 0.5677126450173091,
+        "solve_s": 7.136764410010073,
+        "postprocess_s": 4.882011017005425,
+        "report_s": 0.030673186003696173
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 64,
+      "max_steps": 2000,
+      "keep_series": false
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 152,
+      "lanes": 4104,
+      "first_call_s": 206.6518430300057,
+      "seconds": 30.010482156008948,
+      "lanes_per_s": 136.75221806385616,
+      "timings": {
+        "pack_s": 1.4012002800300252,
+        "solve_s": 16.680305067973677,
+        "postprocess_s": 11.849899279972306,
+        "report_s": 0.07651047100080177
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 152,
+      "max_steps": 2000,
+      "keep_series": false
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 304,
+      "lanes": 8208,
+      "first_call_s": 153.59005989399157,
+      "seconds": 62.421486206003465,
+      "lanes_per_s": 131.4931844607472,
+      "timings": {
+        "pack_s": 2.7545046729792375,
+        "solve_s": 36.08265905600274,
+        "postprocess_s": 23.428080563026015,
+        "report_s": 0.14939936899463646
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 304,
+      "max_steps": 2000,
+      "keep_series": false
+    }
+  ]
+}

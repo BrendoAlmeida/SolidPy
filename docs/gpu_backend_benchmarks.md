@@ -142,6 +142,46 @@ workload and 95 % of the advanced physics (one scipy Radau solve per time step);
 the 1-D flight together are under 1 %. The thermal ablation is therefore the next piece of Tier 1 work (phase 4b); this
 round stops before it.
 
+## Robustness ensembles (W3) on the GPU (Phase 4a)
+
+Measured 2026-10-03 with `benchmarks/bench_robustness.py` on the machine above (`benchmarks/results/w3_cpu_scalar.json`,
+`benchmarks/results/w3_jax_cuda0.json`). A design is a variant of the tabulated four-grain test motor or of a two-grain
+power-law motor, with throat and density varied; each is run through nominal + the 10 default scenarios + 16
+Latin-hypercube samples, 27 lanes per design, with `max_step_size = 0.01` and 1,000 time points. The CPU baseline is
+the unchanged scalar path (`run_robustness_analysis` without a backend), one design per task in a process pool, which is
+the best static schedule the CPU has because designs are independent, and it includes the post-processing. The GPU path is
+`run_robustness_ensemble(..., backend="jax", device="cuda:0", keep_series=False)`, float64, `max_steps = 2000`.
+
+| Path | Lanes | Warm time | Lanes/s | vs CPU, 12 processes | vs CPU, 6 processes |
+|---|---|---|---|---|---|
+| CPU scalar, 12 processes | 972 | 93.3 s | 10.4 | 1x | 1.1x |
+| CPU scalar, 6 processes | 972 | 102.5 s | 9.5 | 0.9x | 1x |
+| JAX, GPU | 432 | 3.85 s | 112.2 | 10.8x | 11.8x |
+| JAX, GPU | 1,728 | 12.6 s | 136.7 | 13.1x | 14.4x |
+| JAX, GPU | **4,104** | 30.0 s | **136.8** | **13.1x** | 14.4x |
+| JAX, GPU | 8,208 | 62.4 s | 131.5 | 12.6x | 13.9x |
+
+First calls, which also compile the full-history program of each shape: 74, 90, 207 and 154 s. No lane left the batched
+backend (`fallback_lanes = 0`) and every design completed.
+
+Where the warm time goes (seconds, 4,104 lanes): packing 1.4, the burns on the device 16.7 (246 lanes/s on their own),
+the detailed ballistics of every lane on **one CPU core** 11.8 (2.9 ms per lane, 39 % of the run), report assembly 0.08.
+So the gate of the architecture document (at least 5x the CPU on all cores at 4,096 lanes or more) is met with a margin,
+and the next limit is not the device: building the detailed ballistics on the host in a loop caps the run at about
+137 lanes/s, and overlapping it with the next launch or spreading it over the other cores (the pipeline of the
+architecture document, section 6.4, not implemented) would lift the ceiling towards the 246 lanes/s of the device.
+
+Two things to know when using it:
+
+* A lane of a report with its series and canonical history is about 195 kB for a four-grain design. The first attempt
+  kept them for 8,208 lanes and was killed by the host's out-of-memory killer (exit 137) on this 15 GB machine, which was
+  shared with other work; `keep_series=False` keeps only the scalar outputs of each lane and does not change the report,
+  its statistics or its validity ratio, and is what the table above used.
+* The parity of the reports (scalar path against the NumPy backend, JAX on the CPU device and JAX on the GPU) is in
+  `tests/test_batch_robustness.py` and `tests/test_backend_jax.py`, with the limits of tolerances version 4. The maximum
+  generated mass flow and the maximum pressure rise rate are the loosest (3e-2 and 6e-2) because the scalar path itself is
+  up to 2.4e-2 and 4.6e-2 from a refined run on them (`solidpy/backends/_tolerances.py`).
+
 ## Not covered yet
 
 The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
@@ -155,6 +195,14 @@ about other devices.
 python benchmarks/bench_burn.py --backend cpu-reference --sizes 1024 --workers 12,6 --out benchmarks/results/w1_cpu_reference.json
 # GPU, full workload; add --tiers none for one uncapped launch, --max-points 1000 for the typical workload
 python benchmarks/bench_burn.py --backend jax --device cuda:0 --sizes 2048,4096,8192,16384 --out benchmarks/results/w1_jax_cuda0.json
+```
+
+Robustness ensembles (W3):
+
+```
+python benchmarks/bench_robustness.py --backend cpu-scalar --workers 12,6 --designs 36 --out benchmarks/results/w3_cpu_scalar.json
+python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0.json
+python tools/profile_workloads.py --out benchmarks/results/offloaded_share.json
 ```
 
 JAX comes from `pip install "solidpy[jax-cuda12]"`. The CPU measurements need no extra package. The
