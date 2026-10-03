@@ -927,6 +927,112 @@ def _build_wall_conduction_operator(
     return jacobian, source_base, inner_heat_flux_source
 
 
+def _wall_layers(geometry, casing_material, liner_thickness_factor):
+    """Cells of the wall of the thermal model, from the hot face outwards.
+
+    Returns ``(dx, k, rho_cp, casing_inner_node, liner_interface_node, liner_thickness_m, wall_thickness_m)``: the
+    thickness [m], conductivity [W/mK] and volumetric heat capacity [J/m3K] of every cell, the index of the first
+    casing cell and of the last liner cell (both 0 without a liner), and the liner and casing thicknesses [m].
+    """
+    wall_thickness_m = max(float(geometry.casing_wall_thickness_m), 1e-4)
+    liner_thickness_m = (
+        max(float(casing_material.liner_thickness_m), 0.0)
+        * max(float(liner_thickness_factor), 0.0)
+    )
+
+    layer_dx = []
+    layer_k = []
+    layer_rho_cp = []
+    if liner_thickness_m > 1e-4:
+        n_liner = max(2, int(math.ceil(liner_thickness_m / 0.001)))
+        layer_dx.extend([liner_thickness_m / n_liner] * n_liner)
+        layer_k.extend([max(casing_material.liner_k_w_mk, 1e-4)] * n_liner)
+        layer_rho_cp.extend(
+            [
+                max(casing_material.liner_density_kg_m3 * casing_material.liner_cp_j_kgk, 1.0)
+            ]
+            * n_liner
+        )
+        casing_inner_node = n_liner
+        liner_interface_node = n_liner - 1
+    else:
+        casing_inner_node = 0
+        liner_interface_node = 0
+
+    n_casing = max(4, int(math.ceil(wall_thickness_m / 0.001)))
+    layer_dx.extend([wall_thickness_m / n_casing] * n_casing)
+    layer_k.extend([casing_material.thermal_conductivity_w_mk] * n_casing)
+    layer_rho_cp.extend(
+        [casing_material.density_kg_m3 * casing_material.heat_capacity_j_kgk] * n_casing
+    )
+
+    return (
+        np.asarray(layer_dx, dtype=float),
+        np.asarray(layer_k, dtype=float),
+        np.asarray(layer_rho_cp, dtype=float),
+        casing_inner_node,
+        liner_interface_node,
+        liner_thickness_m,
+        wall_thickness_m,
+    )
+
+
+#: Outer-surface heat transfer coefficient of the wall model [W/m2K].
+OUTER_WALL_H_W_M2K = 18.0
+
+
+def _thermal_report(
+    geometry,
+    casing_material,
+    *,
+    burn_duration_s,
+    throat_ablation_m,
+    max_heat_flux_w_m2,
+    max_wall_gradient_k_m,
+    max_outer_wall_k,
+    max_inner_wall_k,
+    max_hot_face_k,
+    max_interface_k,
+    integrated_heat_j_m2,
+    max_recovery_temp_k,
+    wall_thickness_m,
+    node_count,
+):
+    """The metrics of ``simulate_thermal_ablation`` from the extremes the wall integration accumulated."""
+    throat_radius_0 = 0.5 * max(float(geometry.throat_diameter_m), 1e-6)
+    alpha_casing = casing_material.thermal_conductivity_w_mk / max(
+        casing_material.density_kg_m3 * casing_material.heat_capacity_j_kgk, 1e-9
+    )
+    penetration_depth_m = 2.0 * math.sqrt(alpha_casing * burn_duration_s)
+    final_throat_diameter_mm = 1000.0 * 2.0 * (throat_radius_0 + throat_ablation_m)
+
+    return {
+        "simulation.advanced.thermal.throat_heat_flux_kw_m2": max_heat_flux_w_m2 / 1000.0,
+        "simulation.advanced.thermal.wall_temp_gradient_k_m": max_wall_gradient_k_m,
+        "simulation.advanced.thermal.throat_recession_rate_mm_s": 1000.0
+        * throat_ablation_m
+        / burn_duration_s,
+        "simulation.advanced.thermal.throat_ablation_mm": 1000.0 * throat_ablation_m,
+        "simulation.advanced.thermal.throat_growth_pct": 100.0
+        * (2.0 * throat_ablation_m)
+        / max(geometry.throat_diameter_m, 1e-9),
+        "simulation.advanced.thermal.max_casing_temp_c": max_outer_wall_k - 273.15,
+        "simulation.advanced.thermal.max_inner_wall_temp_c": max_inner_wall_k - 273.15,
+        "simulation.advanced.thermal.liner_hot_face_temp_c": max_hot_face_k - 273.15,
+        "simulation.advanced.thermal.liner_casing_interface_temp_c": max_interface_k - 273.15,
+        "simulation.advanced.thermal.casing_inner_wall_temp_c": max_inner_wall_k - 273.15,
+        "simulation.advanced.thermal.casing_outer_wall_temp_c": max_outer_wall_k - 273.15,
+        "simulation.advanced.thermal.heat_load_kj_m2": integrated_heat_j_m2 / 1000.0,
+        "simulation.advanced.thermal.penetration_depth_mm": 1000.0 * penetration_depth_m,
+        "simulation.advanced.thermal.final_throat_diameter_mm": final_throat_diameter_mm,
+        "simulation.advanced.thermal.biot_number": OUTER_WALL_H_W_M2K
+        * wall_thickness_m
+        / max(casing_material.thermal_conductivity_w_mk, 1e-9),
+        "simulation.advanced.metadata.max_chamber_temperature_k": max_recovery_temp_k,
+        "simulation.advanced.metadata.thermal_node_count": float(node_count),
+    }
+
+
 def simulate_thermal_ablation(
     geometry,
     curve,
@@ -963,43 +1069,17 @@ def simulate_thermal_ablation(
         np.full_like(time_s, np.nan),
     )
 
-    wall_thickness_m = max(float(geometry.casing_wall_thickness_m), 1e-4)
-    liner_thickness_m = (
-        max(float(casing_material.liner_thickness_m), 0.0)
-        * max(float(liner_thickness_factor), 0.0)
-    )
-
-    layer_dx = []
-    layer_k = []
-    layer_rho_cp = []
-    if liner_thickness_m > 1e-4:
-        n_liner = max(2, int(math.ceil(liner_thickness_m / 0.001)))
-        layer_dx.extend([liner_thickness_m / n_liner] * n_liner)
-        layer_k.extend([max(casing_material.liner_k_w_mk, 1e-4)] * n_liner)
-        layer_rho_cp.extend(
-            [
-                max(casing_material.liner_density_kg_m3 * casing_material.liner_cp_j_kgk, 1.0)
-            ]
-            * n_liner
-        )
-        casing_inner_node = n_liner
-        liner_interface_node = n_liner - 1
-    else:
-        casing_inner_node = 0
-        liner_interface_node = 0
-
-    n_casing = max(4, int(math.ceil(wall_thickness_m / 0.001)))
-    layer_dx.extend([wall_thickness_m / n_casing] * n_casing)
-    layer_k.extend([casing_material.thermal_conductivity_w_mk] * n_casing)
-    layer_rho_cp.extend(
-        [casing_material.density_kg_m3 * casing_material.heat_capacity_j_kgk] * n_casing
-    )
-
-    dx_arr = np.asarray(layer_dx, dtype=float)
-    k_arr = np.asarray(layer_k, dtype=float)
-    rho_cp_arr = np.asarray(layer_rho_cp, dtype=float)
+    (
+        dx_arr,
+        k_arr,
+        rho_cp_arr,
+        casing_inner_node,
+        liner_interface_node,
+        liner_thickness_m,
+        wall_thickness_m,
+    ) = _wall_layers(geometry, casing_material, liner_thickness_factor)
     temperatures_k = np.full(len(dx_arr), max(float(initial_temperature_k), 150.0))
-    h_outer_w_m2k = 18.0
+    h_outer_w_m2k = OUTER_WALL_H_W_M2K
     (
         conduction_jacobian,
         conduction_source_base,
@@ -1016,7 +1096,6 @@ def simulate_thermal_ablation(
         shape=conduction_jacobian.shape,
     )
 
-    throat_radius_0 = 0.5 * max(float(geometry.throat_diameter_m), 1e-6)
     throat_ablation_m = 0.0
     max_heat_flux_w_m2 = 0.0
     max_recovery_temp_k = float(initial_temperature_k)
@@ -1171,37 +1250,22 @@ def simulate_thermal_ablation(
             max_interface_k = max_inner_wall_k
 
     burn_duration_s = max(float(time_s[-1] - time_s[0]), 1e-6) if len(time_s) else 1e-6
-    alpha_casing = casing_material.thermal_conductivity_w_mk / max(
-        casing_material.density_kg_m3 * casing_material.heat_capacity_j_kgk, 1e-9
+    return _thermal_report(
+        geometry,
+        casing_material,
+        burn_duration_s=burn_duration_s,
+        throat_ablation_m=throat_ablation_m,
+        max_heat_flux_w_m2=max_heat_flux_w_m2,
+        max_wall_gradient_k_m=max_wall_gradient_k_m,
+        max_outer_wall_k=max_outer_wall_k,
+        max_inner_wall_k=max_inner_wall_k,
+        max_hot_face_k=max_hot_face_k,
+        max_interface_k=max_interface_k,
+        integrated_heat_j_m2=integrated_heat_j_m2,
+        max_recovery_temp_k=max_recovery_temp_k,
+        wall_thickness_m=wall_thickness_m,
+        node_count=len(dx_arr),
     )
-    penetration_depth_m = 2.0 * math.sqrt(alpha_casing * burn_duration_s)
-    final_throat_diameter_mm = 1000.0 * 2.0 * (throat_radius_0 + throat_ablation_m)
-
-    return {
-        "simulation.advanced.thermal.throat_heat_flux_kw_m2": max_heat_flux_w_m2 / 1000.0,
-        "simulation.advanced.thermal.wall_temp_gradient_k_m": max_wall_gradient_k_m,
-        "simulation.advanced.thermal.throat_recession_rate_mm_s": 1000.0
-        * throat_ablation_m
-        / burn_duration_s,
-        "simulation.advanced.thermal.throat_ablation_mm": 1000.0 * throat_ablation_m,
-        "simulation.advanced.thermal.throat_growth_pct": 100.0
-        * (2.0 * throat_ablation_m)
-        / max(geometry.throat_diameter_m, 1e-9),
-        "simulation.advanced.thermal.max_casing_temp_c": max_outer_wall_k - 273.15,
-        "simulation.advanced.thermal.max_inner_wall_temp_c": max_inner_wall_k - 273.15,
-        "simulation.advanced.thermal.liner_hot_face_temp_c": max_hot_face_k - 273.15,
-        "simulation.advanced.thermal.liner_casing_interface_temp_c": max_interface_k - 273.15,
-        "simulation.advanced.thermal.casing_inner_wall_temp_c": max_inner_wall_k - 273.15,
-        "simulation.advanced.thermal.casing_outer_wall_temp_c": max_outer_wall_k - 273.15,
-        "simulation.advanced.thermal.heat_load_kj_m2": integrated_heat_j_m2 / 1000.0,
-        "simulation.advanced.thermal.penetration_depth_mm": 1000.0 * penetration_depth_m,
-        "simulation.advanced.thermal.final_throat_diameter_mm": final_throat_diameter_mm,
-        "simulation.advanced.thermal.biot_number": h_outer_w_m2k
-        * wall_thickness_m
-        / max(casing_material.thermal_conductivity_w_mk, 1e-9),
-        "simulation.advanced.metadata.max_chamber_temperature_k": max_recovery_temp_k,
-        "simulation.advanced.metadata.thermal_node_count": float(len(dx_arr)),
-    }
 
 
 def simulate_structural_response(
