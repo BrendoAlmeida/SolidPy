@@ -7,27 +7,34 @@ lanes or grains, no in-place mutation, and branches are ``xp.where`` selections,
 NumPy and on ``jax.numpy`` and can be jit-compiled.
 """
 
-PI = 3.141592653589793
+import math
+
+PI = math.pi
+
+#: True when this Python's ``sum`` compensates float sums (3.12 and later), found by behaviour not by version.
+COMPENSATED_SUM = sum([0.1] * 10) == 1.0
 
 
-def ordered_sum(xp, values):
-    """Sum over the last axis the way CPython's ``sum`` adds floats (Neumaier compensated summation).
+def ordered_sum(xp, values, compensated=COMPENSATED_SUM):
+    """Sum over the last axis the way this Python's ``sum`` adds floats, as the scalar code does.
 
-    The scalar code sums the remaining volumes of the grains with ``sum()``, which compensates rounding from
-    Python 3.12 on and adds plainly before. A pairwise ``sum`` rounds differently, and at the initial state the
-    chamber pressure equals the ambient pressure to the last bit, where the nozzle flow depends on the square
-    root of the difference. The loop runs over the small static grain axis; trailing zeros of padded grains
-    do not change the result. On Python 3.11 and older the scalar sum is plain, so agreement there is to the
-    last bits only.
+    The scalar code sums the remaining volumes of the grains with ``sum()``: plain left to right up to Python
+    3.11 and Neumaier compensated summation from 3.12 (``compensated`` follows the running interpreter). A
+    pairwise ``sum`` rounds differently, and at the initial state the chamber pressure equals the ambient
+    pressure to the last bit, where the nozzle flow depends on the square root of the difference. The loop
+    runs over the small static grain axis; trailing zeros of padded grains do not change the result.
     """
     total = values[..., 0]
     compensation = xp.zeros_like(total)
     for i in range(1, values.shape[-1]):
         x = values[..., i]
         t = total + x
-        compensation = compensation + xp.where(xp.abs(total) >= xp.abs(x), (total - t) + x, (x - t) + total)
+        if compensated:
+            compensation = compensation + xp.where(xp.abs(total) >= xp.abs(x), (total - t) + x, (x - t) + total)
         total = t
-    return total + xp.where(xp.isfinite(compensation), compensation, 0.0)
+    if compensated:
+        total = total + xp.where(xp.isfinite(compensation), compensation, 0.0)
+    return total
 
 
 def port_area(xp, regression, P):

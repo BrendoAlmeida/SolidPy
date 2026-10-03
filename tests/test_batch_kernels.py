@@ -1,5 +1,3 @@
-import sys
-
 import numpy as np
 import pytest
 
@@ -444,8 +442,7 @@ def test_an_explicit_active_mask_changes_the_result_only_where_it_differs_from_t
     assert (blowdown[..., 0] <= 0.0).all()
 
 
-@pytest.mark.skipif(sys.version_info < (3, 12), reason="sum() compensates float sums from Python 3.12 on")
-def test_ordered_sum_is_bit_identical_to_python_sum():
+def test_ordered_sum_is_bit_identical_to_the_running_pythons_sum():
     rng = np.random.default_rng(11)
     values = rng.uniform(1e-6, 1e-3, size=(500, 24))
     values[::7, 3:9] = 0.0  # burned-out grains contribute exact zeros
@@ -454,6 +451,24 @@ def test_ordered_sum_is_bit_identical_to_python_sum():
 
     assert ordered.tolist() == [sum(row.tolist()) for row in values]
     assert (ordered != values.sum(axis=-1)).any()  # the pairwise sum rounds differently, which is the point
+
+
+def test_both_summation_modes_are_available_whatever_the_python_version():
+    rng = np.random.default_rng(13)
+    values = rng.uniform(1e-6, 1e-3, size=(300, 24))
+
+    plain = geometry.ordered_sum(np, values, compensated=False)
+    compensated = geometry.ordered_sum(np, values, compensated=True)
+
+    folded = []
+    for row in values:
+        total = 0.0
+        for x in row:
+            total += x
+        folded.append(total)
+    assert plain.tolist() == folded
+    np.testing.assert_allclose(compensated, plain, rtol=1e-14)
+    assert geometry.COMPENSATED_SUM == (sum([0.1] * 10) == 1.0)
 
 
 def test_ordered_sum_ignores_padding_and_handles_non_finite_values():

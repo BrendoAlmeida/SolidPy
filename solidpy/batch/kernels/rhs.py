@@ -6,6 +6,11 @@
 ``[gas mass, thermal inventory, regression_0 .. regression_{G-1}, generated mass, igniter mass, nozzle mass,
 unscaled thrust impulse, pressure * throat area integral]``.
 
+Scope: lanes without igniter, activation profile or ignition ramp. The scalar code scales the regression rates
+and the burn area by an activation factor that depends on time; these kernels take no time and apply none,
+so a lane that needs it (``ProblemBatch.lane_features``) must be routed to a backend that declares it. A
+batched backend only advertises the features its kernels reproduce.
+
 The kernels are shape agnostic: with lane arrays of shape ``S`` and grain arrays of shape ``S + (G,)`` they
 return quantities of shape ``S``. ``S = (B,)`` is the solver case; ``S = (B, T)`` evaluates a stored history
 (pass every packed array with a new axis inserted after the lane axis).

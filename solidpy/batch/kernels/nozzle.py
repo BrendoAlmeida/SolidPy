@@ -6,7 +6,9 @@ heat ratio at that pressure and ``mach`` the supersonic exit Mach number (a per-
 thermochemistry, computed at packing time by the scalar root finder).
 """
 
-TINY = 2.2250738585072014e-308  # np.finfo(float).tiny
+import numpy as np
+
+TINY = float(np.finfo(float).tiny)
 
 
 def _denominator(xp, pressure, ambient):
