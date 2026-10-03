@@ -73,6 +73,7 @@ LANE_FIELDS = (
     "eta_c", "eta_cf", "discharge_coefficient", "ambient_pressure", "burn_rate_a", "burn_rate_n",
     "erosive_coefficient", "erosive_alpha", "n_valid_grains", "igniter_temperature", "igniter_burn_time",
     "ignition_ramp_time", "max_step_size", "rtol", "atol", "burn_timeout_s", "tail_off_timeout_s",
+    "tail_off_evaluation",
 )
 
 # Geometry of a padded (non-existent) grain. It never burns and holds no volume; the values only need to
@@ -261,6 +262,7 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
         igniter_burn_time=settings["igniter_burn_time"], ignition_ramp_time=settings["ignition_ramp_time"],
         max_step_size=settings["max_step_size"], rtol=settings["rtol"], atol=settings["atol"],
         burn_timeout_s=settings["burn_timeout_s"], tail_off_timeout_s=settings["tail_off_timeout_s"],
+        tail_off_evaluation=1.0 if settings["tail_off_evaluation"] else 0.0,
     )
 
 
