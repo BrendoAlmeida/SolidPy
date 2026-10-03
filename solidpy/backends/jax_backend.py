@@ -228,8 +228,9 @@ class JaxBackend:
 
     # -- thermal ablation ------------------------------------------------------------------------------------
     def _thermal_lanes_per_launch(self, nodes: int, steps: int) -> int:
-        """Lanes per thermal launch: the per-step series dominate the memory, the solver state is a few matrices per lane."""
-        per_lane = 4 * steps * 2 * 8 + 40 * nodes * nodes * 8
+        """Lanes per thermal launch: the per-step series dominate the memory (four copies of two doubles per step), the
+        solver state is about 200 doubles per wall cell and lane."""
+        per_lane = 4 * steps * 2 * 8 + 200 * nodes * 8
         return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))
 
     def _run_thermal(self, padded):
@@ -247,9 +248,10 @@ class JaxBackend:
     def thermal_ablation(self, batch, options=None):
         """Integrate the walls of ``batch`` (a ``ThermalBatch``) on the device; every lane must be supported.
 
-        Lanes are padded to a power-of-two count, the wall cells to a multiple of 4 and the time steps to a bucket,
-        so that a sweep reuses one compiled program. The result of a lane whose integration did not finish is
-        ``None`` (listed in ``execution["failed_lanes"]``). ``options`` only has to be valid.
+        Lanes are padded to a power-of-two count, the wall cells to a multiple of 4 and the time steps to a bucket, each
+        launch to its own shape, so that a sweep reuses compiled programs and a batch sorted by length (as
+        ``simulate_thermal`` sorts it) does not pay the longest lane in every launch. The result of a lane whose
+        integration did not finish is ``None`` (listed in ``execution["failed_lanes"]``). ``options`` only has to be valid.
         """
         from ..batch.integrators import radau, thermal_solver
         from ..batch.problem import table_bucket
@@ -262,15 +264,17 @@ class JaxBackend:
         refused = refused_lanes(batch, self.capabilities())
         if refused:
             raise unsupported_lane_error(self.name, refused)
-        nodes, steps = _bucket_nodes(batch.n_max), table_bucket(batch.t_max)
-        per_launch = self._thermal_lanes_per_launch(nodes, steps)
+        # the budget is set by the whole batch's shape (the most a launch can need); each launch is then padded to its own
+        per_launch = self._thermal_lanes_per_launch(_bucket_nodes(batch.n_max), table_bucket(batch.t_max))
         results: List[Any] = []
         steps_taken = attempts = 0
         self._device_s, assemble_s = 0.0, 0.0
         for start in range(0, len(batch), per_launch):
-            chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_padding(nodes, steps)
+            chunk = batch.select(np.arange(start, min(start + per_launch, len(batch))))  # trimmed to this launch
+            chunk = chunk.with_padding(_bucket_nodes(chunk.n_max), table_bucket(chunk.t_max))
             lanes = len(chunk)
-            padded = chunk.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes) - lanes, dtype=int)]),
+            floor = min(MIN_LANE_BUCKET, per_launch)  # a launch the budget keeps small is not padded back up
+            padded = chunk.select(np.concatenate([np.arange(lanes), np.zeros(_bucket_lanes(lanes, floor) - lanes, dtype=int)]),
                                   trim=False)
             out = self._run_thermal(padded)
             out = {name: value[:lanes] for name, value in out.items()}

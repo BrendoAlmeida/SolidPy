@@ -326,6 +326,7 @@ def test_a_thermal_launch_stays_inside_the_memory_budget():
 
     # 4 series of 200,000 steps of two doubles take 12.8 MB a lane: 2 GB hold 167, a power of two at most
     assert small == backend.max_lanes and huge == 128
+    assert backend._thermal_lanes_per_launch(200, 200) >= 4096  # linear in the wall cells: 200 cells still fit thousands of lanes
 
 
 def test_jax_on_the_cpu_device_gives_the_scalar_thermal_ablation(thermal_lanes):
@@ -357,6 +358,21 @@ def test_jax_refuses_thermal_lanes_it_cannot_reproduce():
 
     with pytest.raises(UnsupportedLane, match="1: non_finite_thermal_input"):
         backends.get_backend("jax", device="cpu").thermal_ablation(batch)
+
+
+def test_each_thermal_launch_is_padded_to_its_own_shape(thermal_lanes, monkeypatch):
+    batch, scalar = thermal_lanes
+    order = np.argsort(batch.arrays["n_intervals"], kind="stable")  # what simulate_thermal hands a backend that must chunk
+    backend = jax_backend.JaxBackend(device="cpu", max_lanes=8)
+    shapes = []
+    original = backend._run_thermal
+    monkeypatch.setattr(backend, "_run_thermal", lambda padded: shapes.append((len(padded), padded.n_max, padded.t_max)) or original(padded))
+
+    result = backend.thermal_ablation(batch.select(order))
+
+    assert len(shapes) == 4 and len(set(shapes)) > 1  # the shortest launch is not padded to the longest
+    assert shapes[0][2] < shapes[-1][2]
+    assert_thermal_close(result.results, [scalar[i] for i in order])
 
 
 def test_jax_chunks_a_thermal_batch_that_does_not_fit_one_launch(thermal_lanes):
