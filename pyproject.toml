@@ -36,3 +36,7 @@ pythonpath = [
   "solidpy",
   "tests",
 ]
+addopts = "--strict-markers"
+markers = [
+  "gpu: needs an accelerator device; skipped when none is available",
+]
