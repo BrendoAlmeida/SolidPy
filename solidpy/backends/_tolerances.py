@@ -25,17 +25,25 @@ TOLERANCES_VERSION = "4"
 # error from exceeding the reference's. The peak limit is still 4x inside the 2 % acceptance policy.
 
 # Version 4 (cause): adds limits for what the robustness analysis reads from a run, which the earlier versions never
-# compared; no existing value changed. Measured on a four-grain tabulated design (max step 0.02 s), nine robustness
-# scenarios, scalar path against the NumPy backend, JAX on the CPU device and JAX on the GPU, and against a refined
-# scalar run (rtol 1e-11, max step 2 ms) of every lane:
-# * the maximum generated mass flow, a spike narrower than the step grid, is under-sampled by every solver, the
-#   scalar one included: errors against the refined run up to 2.4e-2 (scalar), 2.4e-2 (NumPy), 2.2e-2 (JAX CPU) and
-#   2.4e-2 (JAX GPU), all low, so solvers differ from one another by up to 2.2e-2 (the corpus limit stays at 1.5e-2);
-# * the maximum pressure rise rate, a finite difference of consecutive accepted points, has errors up to 4.6e-2
-#   (scalar) and 4.0e-2 (NumPy) against the refined run, and the backends differ from the scalar path by up to 3.5e-2;
-# * the series the detailed ballistics interpolates from the accepted points differ by up to 3.3e-3 of their
-#   maximum, and the throat ablation, accumulated over those points, by 2.8e-5 in its final value;
+# compared; no existing value changed. Each new limit is at least 1.5x the worst difference measured between the
+# scalar path and the NumPy backend, JAX on the CPU device and JAX on the GPU on eight designs (four tabulated
+# four-grain, four power-law two-grain, throat and density varied), each with its nominal run, 5 to 10 default
+# scenarios and 8 Latin-hypercube samples, max step 0.02 s. Worst differences (tabulated design; the power-law one is
+# smaller on every line):
+# * maximum generated mass flow 2.25e-2: a spike narrower than the step grid, under-sampled by every solver, the
+#   scalar one included (errors against a refined scalar run, rtol 1e-11 and max step 2 ms, up to 2.4e-2 for the
+#   scalar, NumPy and both JAX runs). The corpus limit stays at 1.5e-2;
+# * maximum pressure rise rate 3.8e-2: a finite difference of consecutive accepted points; the scalar value is itself
+#   up to 4.6e-2 from the refined run;
+# * throat ablation 4.2e-5 and final throat diameter 1.6e-7: accumulated over the accepted points;
+# * the series the detailed ballistics interpolates from the accepted points (thrust, pressure, mass, exit state)
+#   5.5e-3 of their maximum;
 # * the mass balance residual is at rounding level (<= 8e-8 %) in both paths.
+# The burn area and the generated flow drop to zero when a grain burns out, and the detailed ballistics reads them by
+# linear interpolation between accepted points, so a sample that falls inside the last accepted step before a burnout
+# reads a fraction of the jump that depends on where the solver put that step: one GPU run differed by 3.1e-1 at that
+# one sample (the lane agreed to 5e-12 when rerun on its own, and the GPU's burnout time varies by about 1e-8 between
+# runs). Comparisons skip those samples (tests/test_batch_robustness.py).
 
 #: Relative error of one kernel against the scalar method it mirrors.
 KERNEL_RTOL_NUMPY = 1e-12
@@ -56,17 +64,22 @@ GENERATED_FLOW_PEAK_RTOL = 1.5e-2
 #: Event times (grain burnout, blowdown cutoff) and the final time.
 TIME_RTOL = 5e-6
 
-#: Series the detailed ballistics builds by interpolating the accepted points (thrust, pressure, mass, ablation),
-#: relative to the largest value of the series. The two solvers take different steps, so the points differ
-#: (worst measured 3.3e-3, version 4).
+#: Series the detailed ballistics builds by interpolating the accepted points (thrust, pressure, mass, exit state),
+#: relative to the largest value of the series. The solvers take different steps, so the points differ (worst
+#: measured 5.5e-3, version 4).
 DETAILED_SERIES_RTOL = 1e-2
 
+#: Throat ablation and final throat diameter, accumulated over the accepted points (worst measured 4.2e-5, version 4).
+DETAILED_ACCUMULATED_RTOL = 1e-4
+
 #: The maximum generated mass flow of workloads on a coarse step grid (detailed ballistics, max step 0.01 to 0.02 s)
-#: with a sharp ignition spike; see the version 4 note. ``GENERATED_FLOW_PEAK_RTOL`` still applies to the corpus.
-GENERATED_FLOW_PEAK_COARSE_RTOL = 3e-2
+#: with a sharp ignition spike (worst measured 2.25e-2 on tabulated four-grain designs, 1.4e-5 on power-law ones);
+#: see the version 4 note. ``GENERATED_FLOW_PEAK_RTOL`` still applies to the corpus.
+GENERATED_FLOW_PEAK_COARSE_RTOL = 3.5e-2
 
 #: Maximum pressure rise rate: the largest finite difference between consecutive accepted points, so it depends on
-#: the step sequence itself, and the scalar value is itself up to 4.6e-2 from a refined run (version 4).
+#: the step sequence itself, and the scalar value is itself up to 4.6e-2 from a refined run (worst measured 3.8e-2,
+#: version 4).
 FINITE_DIFFERENCE_RTOL = 6e-2
 
 #: Mass balance residual in percent. Both paths leave a rounding-level residual (<= 8e-8 %), so the comparison is

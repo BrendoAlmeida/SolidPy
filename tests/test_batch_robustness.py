@@ -47,7 +47,7 @@ SUMMARY_RTOL = {
     "peak_thrust_n": tol.GRID_SAMPLED_RTOL, "chamber_pressure_max_mpa": tol.GRID_SAMPLED_RTOL,
     "max_nozzle_mass_flow_kg_s": tol.GRID_SAMPLED_RTOL, "gas_mass_cutoff_kg": tol.GRID_SAMPLED_RTOL,
     "max_mass_flow_kg_s": tol.GENERATED_FLOW_PEAK_COARSE_RTOL,
-    "throat_ablation_mm": tol.DETAILED_SERIES_RTOL, "final_throat_diameter_mm": tol.DETAILED_SERIES_RTOL,
+    "throat_ablation_mm": tol.DETAILED_ACCUMULATED_RTOL, "final_throat_diameter_mm": tol.DETAILED_ACCUMULATED_RTOL,
     "pressure_rise_rate_max_mpa_s": tol.FINITE_DIFFERENCE_RTOL,
 }
 ROBUSTNESS_RTOL = {"burn_time": tol.TIME_RTOL, "peak_thrust": tol.GRID_SAMPLED_RTOL, "total_impulse": tol.INTEGRAL_RTOL}
@@ -55,6 +55,19 @@ SERIES = ("time_s", "thrust_n", "chamber_pressure_pa", "free_volume_m3", "regres
           "mass_flow_kg_s", "mass_nozzle_kg_s", "gas_mass_kg", "impulse_integral_ns", "propellant_mass_kg",
           "motor_mass_kg", "motor_center_of_mass_position_m", "exit_pressure_pa", "throat_diameter_m",
           "throat_ablation_m", "cf", "ignition_active_fraction")
+#: Series that drop to zero when a grain burns out: samples inside the last accepted step before a burnout read a
+#: fraction of the jump that depends on where the solver put that step (see the version 4 note of the tolerances).
+JUMPING_SERIES = ("burn_area_m2", "mass_flow_kg_s")
+
+
+def before_a_burnout(lane, step):
+    """Mask of the samples of ``lane`` that lie within one maximum step before one of its grain burnouts."""
+    time = np.asarray(lane["time_s"])
+    mask = np.zeros(len(time), dtype=bool)
+    for burnout in lane["canonical_result"]["metrics"]["grain_burnout_times_s"]:
+        if burnout is not None:
+            mask |= (time >= burnout - step) & (time < burnout)
+    return mask
 
 
 def assert_summaries_close(got, want, where):
@@ -71,7 +84,7 @@ def assert_summaries_close(got, want, where):
             assert got[key] == pytest.approx(expected, rel=rtol, abs=0.0), (where, key)
 
 
-def assert_reports_close(got, want):
+def assert_reports_close(got, want, step=KWARGS["max_step_size"]):
     assert set(got) == set(want)
     assert got["status"] == want["status"] and got["scenario_ids"] == want["scenario_ids"]
     for a, b in zip([got["nominal"]] + got["scenarios"], [want["nominal"]] + want["scenarios"]):
@@ -82,10 +95,13 @@ def assert_reports_close(got, want):
         assert a["status"]["completed"] == b["status"]["completed"], where
         assert a["provenance"]["physics_provider_hash"] == b["provenance"]["physics_provider_hash"], where
         assert_summaries_close(a["summary"], b["summary"], where)
+        skipped = before_a_burnout(b, step)
         for name in SERIES:
             x, y = np.asarray(a[name]), np.asarray(b[name])
             assert x.shape == y.shape, (where, name)
             rtol = 1e-6 if name == "time_s" else tol.DETAILED_SERIES_RTOL
+            if name in JUMPING_SERIES:
+                x, y = x[~skipped], y[~skipped]
             np.testing.assert_allclose(x, y, rtol=0.0, atol=rtol * max(float(np.max(np.abs(y))), 1e-300),
                                        err_msg=f"{where} {name}")
     assert got["summary"].keys() == want["summary"].keys()
@@ -147,6 +163,17 @@ def test_the_numpy_backend_matches_the_scalar_report_within_the_tolerances(desig
                for s in report["scenarios"]]
     assert factors[0] == pytest.approx(0.94 * (1.0 + 0.005 * (298.15 - 298.15)))  # low_burn_rate
     assert len(set(factors)) > 3  # the temperature and the sampled scenarios changed it per lane
+
+
+def test_the_numpy_backend_matches_the_scalar_report_on_a_power_law_design():
+    design = second_design()
+    options = dict(scenarios=scenarios()[:3], monte_carlo_sample_count=2, max_step_size=0.02, max_time_points=300)
+
+    report = run_robustness_analysis(*design, backend="cpu-vectorized", **options)
+    expected = run_robustness_analysis(*design, **options)
+
+    assert_reports_close(report, expected, step=0.02)
+    assert report["status"] == "completed"
 
 
 def test_several_designs_are_one_batch_and_each_report_matches_its_own_run():
