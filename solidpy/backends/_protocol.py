@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Protocol, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
 
 #: Bumped on breaking changes of the :class:`Backend` protocol.
 BACKEND_API_VERSION = 1
@@ -49,6 +49,18 @@ class Capabilities:
     def missing(self, features) -> List[str]:
         """Return the requested features this backend does not fully support, in request order."""
         return [name for name in features if not self.supports(name)]
+
+
+@dataclass(frozen=True)
+class SolveOptions:
+    """Options of ``Backend.solve_burn`` that are not part of the problem itself.
+
+    ``history`` is the history policy (``"metrics"`` or ``"full"``) and ``workers`` the number of processes a
+    CPU backend may use. A backend ignores an option that does not apply to it and says so in its docstring.
+    """
+
+    history: str = "metrics"
+    workers: Optional[int] = None
 
 
 class Backend(Protocol):
