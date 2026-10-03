@@ -179,8 +179,9 @@ Two things to know when using it:
   its statistics or its validity ratio, and is what the table above used.
 * The parity of the reports (scalar path against the NumPy backend, JAX on the CPU device and JAX on the GPU) is in
   `tests/test_batch_robustness.py` and `tests/test_backend_jax.py`, with the limits of tolerances version 4. The maximum
-  generated mass flow and the maximum pressure rise rate are the loosest (3e-2 and 6e-2) because the scalar path itself is
-  up to 2.4e-2 and 4.6e-2 from a refined run on them (`solidpy/backends/_tolerances.py`).
+  generated mass flow and the maximum pressure rise rate are the loosest (3.5e-2 and 6e-2, at least 1.5 times the worst
+  difference measured on eight designs) because the scalar path itself is up to 2.4e-2 and 4.6e-2 from a refined run on
+  them (`solidpy/backends/_tolerances.py`).
 
 ## Not covered yet
 

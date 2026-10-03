@@ -88,6 +88,11 @@ are solved by the reference and flagged in `provenance["execution"]["fallback"]`
 The speedup comes from batch size: on an RTX 4060 in float64 the JAX backend runs 11.8x faster than the scalar
 solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a few hundred lanes. See
 `docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
+Robustness analysis uses the same machinery: `run_robustness_analysis(..., backend="cpu-vectorized")` solves the nominal
+run and the scenarios as lanes of one batch, and `solidpy.ensemble.run_robustness_ensemble(designs, backend="jax")` does it
+for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). Without `backend` the
+analysis is the scalar one, unchanged.
+
 The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are marked `gpu` and skip without a device.
 
 ## Authors

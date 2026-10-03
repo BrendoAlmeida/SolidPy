@@ -850,7 +850,7 @@ burn rate that can be negative or not finite (the scalar code raises `ValueError
 cannot do) still run on the reference (or raise with `strict=True`).
 
 Parity is checked per kernel at 1e-12 and per simulation with the versioned limits in
-`solidpy/backends/_tolerances.py` (version 3). The stored reference is the inexact side of those comparisons, which
+`solidpy/backends/_tolerances.py` (version 4). The stored reference is the inexact side of those comparisons, which
 was verified against a refined run; each limit carries the cause in a comment. The whole-corpus test
 (`pytest tests/test_batch_parity.py --runslow`) takes minutes and is skipped by default.
 
@@ -862,6 +862,40 @@ heterogeneous CPU+GPU executor (the last tier is latency bound and suits spare C
 "What the numbers say"); Tier 1 physics; a data-center GPU measurement. Open point 14.2.1 (typical batch sizes)
 now has a first answer: the speedup is large from about 2,000 lanes up and is below the reference under a few
 hundred lanes, so `backend="auto"` keeps the reference for small batches.
+
+### 14.5 Status after Phase 4a: robustness as lanes (2026-10-03)
+
+Measured before planning (`tools/profile_workloads.py`, `benchmarks/results/offloaded_share.json`): on the scalar path the
+burn is 99.0 % of W1 and 99.3 % of W3 (robustness), and 75.7 % of W2 (burn plus the advanced physics), where the thermal
+ablation is 23.1 % and the structural, CFD and ignition proxies together under 1 %. The offloaded share is therefore 0.990,
+0.993 and 0.757: W1 and W3 pass the 0.8 gate of section 7.1, W2 does not until the thermal ablation is batched.
+
+Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.py` untouched:
+
+* A per-lane `burn_rate_factor` (`ProblemBatch.from_objects(..., burn_rate_factor=)`) that multiplies the whole burn rate,
+  erosive term included, as `Robustness` applies a scenario's factor by replacing `evaluate_burn_rate` on the instance
+  (which the packer refuses). The factor 1.0 changes nothing; the reference backend reproduces the override on a copy of
+  the lane's propellant. The `physics_provider_hash` stays the scalar one, so it does not tell scenarios that differ
+  only in this factor apart (item 3 of `docs/pending_cpu_reference_changes.md`); the factor is in the lane's
+  `provenance["execution"]["scenario_inputs"]` and in the report's `scenario_factors`.
+* `SimulationView` (`solidpy/batch/simulation_view.py`): the five things the detailed-ballistics post-processing reads from a
+  `BurnSimulation`, built from a batch lane's canonical result. Its detailed ballistics equals that of a real simulation
+  bit for bit.
+* `solidpy.ensemble.run_robustness_ensemble(designs, ...)`: every (design, scenario) pair is a lane of one batch, solved on
+  any backend with the full history; the detailed ballistics of each lane is built on the CPU. `run_robustness_analysis`
+  gains optional `backend`, `device` and `workers` (without `backend` it is the unchanged scalar path, and `device` or
+  `workers` alone raise). Through `cpu-reference` the report equals the scalar one bit for bit; through the batched
+  backends it agrees within the limits of tolerances version 4, each set from the worst difference measured on eight
+  designs (the causes are in the module).
+* Measured on the GPU (`docs/gpu_backend_benchmarks.md`): 4,104 lanes in 30.0 s, 136.8 lanes/s, 13.1x the scalar path on
+  12 processes. A third of the time is the detailed ballistics of each lane on one CPU core, which now sets the ceiling
+  (the device alone does 246 lanes/s).
+
+Not done in 4a, in the order they matter: the thermal ablation as lanes (W2 stays at 0.757 without it; the CPU runs a
+scipy Radau solve per time step, so a batched version is a new integrator and its parity is by tolerance); overlapping or
+parallelising the post-processing of the lanes (section 6.4); the structural response and `StructuralMonteCarlo` as
+vector code; `xp=` for `surrogate_physics`; a `decimated:N` history so that thousands of lanes do not carry full
+histories.
 
 ## Appendix A. State vector and padded batch schema
 
