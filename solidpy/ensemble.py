@@ -278,13 +278,6 @@ def simulate_thermal(
     return BatchResult(results, backend, summary)
 
 
-def _scenario_thermal_factors(curve):
-    """The liner thickness factor and initial temperature ``simulate_advanced_physics`` reads from a curve."""
-    factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
-    return (float(factors.get("liner_thickness_factor", 1.0) or 1.0),
-            float(factors.get("initial_temperature_k", 298.15) or 298.15))
-
-
 def run_advanced_physics_ensemble(
     geometries,
     curves,
@@ -314,7 +307,7 @@ def run_advanced_physics_ensemble(
     (``models_s``); one passed as ``execution`` receives the summary of ``simulate_thermal``.
     """
     from .batch.thermal import _lane_count, _per_lane
-    from .Multiphysics import _advanced_after_thermal, _require_casing_material, _resolve_gamma
+    from .Multiphysics import _advanced_after_thermal, _require_casing_material, _resolve_gamma, _scenario_thermal_inputs
 
     mark = time.perf_counter()
     count = _lane_count(geometries, curves, casing_material, nozzle_material, flame_temp_k, r_specific, gamma)
@@ -324,7 +317,7 @@ def run_advanced_physics_ensemble(
     flames = _per_lane(flame_temp_k, count, "flame_temp_k")
     specifics = _per_lane(r_specific, count, "r_specific")
     gammas = [float(_resolve_gamma(curve, g)) for curve, g in zip(curves, _per_lane(gamma, count, "gamma"))]
-    scenario = [_scenario_thermal_factors(curve) for curve in curves]
+    scenario = [_scenario_thermal_inputs(curve) for curve in curves]
     batch = ThermalBatch.from_objects(
         geometries, curves, casings, nozzle_material, flame_temp_k=flames, r_specific=specifics, gamma=gammas,
         initial_temperature_k=[temperature for _, temperature in scenario],

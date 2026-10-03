@@ -2289,8 +2289,8 @@ def simulate_advanced_physics(
 ):
     """Run all advanced components and return a flat metrics dictionary."""
     casing_material = _require_casing_material(casing_material)
-    scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
     gamma_resolved = _resolve_gamma(curve, gamma)
+    liner_thickness_factor, initial_temperature_k = _scenario_thermal_inputs(curve)
     thermal = simulate_thermal_ablation(
         geometry,
         curve,
@@ -2299,11 +2299,21 @@ def simulate_advanced_physics(
         flame_temp_k=flame_temp_k,
         r_specific=r_specific,
         gamma=gamma_resolved,
-        liner_thickness_factor=float(scenario_factors.get("liner_thickness_factor", 1.0) or 1.0),
-        initial_temperature_k=float(scenario_factors.get("initial_temperature_k", 298.15) or 298.15),
+        liner_thickness_factor=liner_thickness_factor,
+        initial_temperature_k=initial_temperature_k,
     )
     return _advanced_after_thermal(
         geometry, curve, thermal, casing_material, flame_temp_k, r_specific, gamma_resolved
+    )
+
+
+def _scenario_thermal_inputs(curve):
+    """The liner thickness factor and the initial temperature [K] ``simulate_advanced_physics`` takes from the scenario
+    factors of a curve (1.0 and 298.15 K when absent, zero or missing)."""
+    scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
+    return (
+        float(scenario_factors.get("liner_thickness_factor", 1.0) or 1.0),
+        float(scenario_factors.get("initial_temperature_k", 298.15) or 298.15),
     )
 
 

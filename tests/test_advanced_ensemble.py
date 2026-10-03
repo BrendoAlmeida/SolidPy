@@ -106,3 +106,12 @@ def test_the_reference_backend_accepts_a_process_pool(designs):
                                         r_specific=propellant.products_constant, backend="cpu-reference", workers=2)
 
     assert got == [scalar(geometry, curve, propellant, casing) for curve in curves]
+
+
+def test_the_scenario_thermal_inputs_default_when_absent_zero_or_not_a_mapping():
+    from solidpy.Multiphysics import _scenario_thermal_inputs
+
+    assert _scenario_thermal_inputs({}) == (1.0, 298.15)
+    assert _scenario_thermal_inputs({"scenario_factors": {"liner_thickness_factor": 0.0, "initial_temperature_k": 0.0}}) == (1.0, 298.15)
+    assert _scenario_thermal_inputs({"scenario_factors": {"liner_thickness_factor": 1.5, "initial_temperature_k": 260}}) == (1.5, 260.0)
+    assert _scenario_thermal_inputs(object()) == (1.0, 298.15)
