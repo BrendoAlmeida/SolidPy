@@ -128,19 +128,19 @@ test on 2026-10-03 (892 s).
 workloads (wall clock around the outermost call, so Python-heavy code is not inflated the way a profiler would). The
 offloaded share is the time in entry points that have a batched implementation over the whole workload
 (`docs/gpu_backend_architecture.md`, section 7.1). Measured 2026-10-03 on the machine above
-(`benchmarks/results/offloaded_share.json`):
+(`benchmarks/results/offloaded_share.json`, after phase 4b; before it the thermal ablation was not marked batched and W2
+read 0.757):
 
-| Workload | Designs | Scalar time | Burn (batched) | Thermal ablation | Other advanced + post-processing | **Offloaded share** |
+| Workload | Designs | Scalar time | Burn (batched) | Thermal ablation (batched) | Other advanced + post-processing | **Offloaded share** |
 |---|---|---|---|---|---|---|
-| W1 burn only (corpus mix) | 12 | 3.6 s | 99.0 % | - | - | **0.990** |
-| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.3 s | 75.7 % | 23.1 % | 1.2 % | **0.757** |
-| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.8 s | 99.3 % | - | 0.6 % | **0.993** |
+| W1 burn only (corpus mix) | 12 | 3.5 s | 99.0 % | - | - | **0.990** |
+| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.2 s | 74.5 % | 24.3 % | 1.2 % | **0.988** |
+| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.0 s | 99.4 % | - | 0.6 % | **0.994** |
 
-The gate of the architecture document is 0.8 on W1 to W3. W1 and W3 are above it with the burn alone, W3 through
-`run_robustness_ensemble`. **W2 is below it (0.757) and cannot pass without the thermal ablation**, which is 23 % of the
-workload and 95 % of the advanced physics (one scipy Radau solve per time step); structural, CFD and ignition proxies and
-the 1-D flight together are under 1 %. The thermal ablation is therefore the next piece of Tier 1 work (phase 4b); this
-round stops before it.
+The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with the burn alone (W3
+through `run_robustness_ensemble`); W2 needed the thermal ablation, which was 24 % of the workload and 95 % of the advanced
+physics (one scipy Radau solve per time step), and is now batched (`simulate_thermal`, `run_advanced_physics_ensemble`).
+Structural, CFD and ignition proxies and the 1-D flight together are under 1 %.
 
 ## Robustness ensembles (W3) on the GPU (Phase 4a)
 
@@ -183,11 +183,57 @@ Two things to know when using it:
   difference measured on eight designs) because the scalar path itself is up to 2.4e-2 and 4.6e-2 from a refined run on
   them (`solidpy/backends/_tolerances.py`).
 
+## Thermal ablation on the GPU (Phase 4b)
+
+Measured 2026-10-03 with `benchmarks/bench_thermal.py` on the machine above (`benchmarks/results/thermal_*.json`). A lane
+is the wall conduction and throat ablation of one design (`Multiphysics.simulate_thermal_ablation`). The baseline is the scalar
+model in a process pool, the best static schedule the CPU has because lanes are independent. The batched backends take
+the same Radau IIA(5) steps as scipy (tolerances version 5: the worst difference to the scalar model is 1.4e-12 on 1,814
+lanes), so the comparison is of equal work. Lane sets (`--kind`): `typical`, 13 of the 15 cases of `tests/thermal_cases.py` (without the two degenerate curves; 4 to
+11 wall cells, 50 to 200 time steps) tiled with the gas and start temperature varied; `wide`, random designs (4 to 18 cells, 30
+to 400 steps); `advanced`, the whole advanced physics of designs with real burn curves (344 points) through
+`run_advanced_physics_ensemble`, against `simulate_advanced_physics` in a pool.
+
+| Lane set | Path | Lanes | Warm time | Lanes/s | vs CPU, 12 processes |
+|---|---|---|---|---|---|
+| typical | CPU scalar, 12 processes | 1,024 | 12.1 s | 84.6 | 1x |
+| typical | CPU scalar, 6 processes | 1,024 | 13.2 s | 77.5 | 0.9x |
+| typical | NumPy, 1 thread | 4,096 | 14.5 s | 282 | 3.3x |
+| typical | JAX, GPU | 1,024 | 0.71 s | 1,441 | 17x |
+| typical | JAX, GPU | 4,096 | 1.34 s | 3,053 | **36x** |
+| typical | JAX, GPU | 16,384 | 5.18 s | 3,163 | **37x** |
+| wide | CPU scalar, 12 processes | 1,024 | 21.8 s | 47.0 | 1x |
+| wide | NumPy, 1 thread | 1,024 | 12.4 s | 82.3 | 1.8x |
+| wide | JAX, GPU | 1,024 | 2.46 s | 416 | 8.8x |
+| wide | JAX, GPU | 4,096 | 5.56 s | 737 | **15.7x** |
+| advanced | CPU scalar, 12 processes | 1,024 | 35.1 s | 29.1 | 1x |
+| advanced | NumPy, 1 thread | 1,024 | 7.56 s | 135 | 4.6x |
+| advanced | JAX, GPU | 1,024 | 6.41 s | 160 | 5.5x |
+| advanced | JAX, GPU | 4,096 | 24.2 s | 169 | **5.8x** |
+
+First calls, which also compile the program of each shape: 4.0 to 8.9 s (typical), 5.9 and 9.0 s (wide), 10.3 and 27.5 s
+(advanced, which includes the first CPU models). No lane left the batched backend (`failed_lanes = 0`).
+
+What the numbers say:
+
+* The thermal ablation alone is where the accelerator pays: 36x the scalar model on all 12 threads at 4,096 lanes of the
+  typical walls, 15.7x on walls of up to 18 cells (the wall cells are a sequential recurrence, so the cost grows with
+  them). One NumPy thread already beats 12 scalar processes by 3.3x, because the scalar call spends most of its time in
+  scipy's per-call overhead, not in arithmetic.
+* The whole advanced physics is limited by what stays on the CPU. At 4,096 lanes the thermal batch takes 1.0 s and
+  packing it 1.4 s, while the structural, CFD, ignition and flight models of the 4,096 lanes take **21.8 s**, 5.3 ms per
+  lane on one core (90 % of the run). That loop is serial in this process; spreading it over the other cores, or
+  batching those models, is what would lift the 169 lanes/s (the same observation as for the detailed ballistics of the
+  robustness ensembles). Packing costs 0.3 to 0.4 ms per lane on the host.
+* Below about 2,000 lanes the latency of the sequential loops dominates (1,441 lanes/s at 1,024); from 4,096 lanes the
+  device is saturated and the time grows with the lanes (16,384 lanes take 3.9x the time of 4,096). The device runs float64,
+  which a consumer GPU does at 1/64 of its float32 rate.
+
 ## Not covered yet
 
-The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the Tier 1 physics
-(thermal, structural, robustness as lanes) and a data-center GPU. All numbers are for one machine; they say nothing
-about other devices.
+The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the structural response and
+`StructuralMonteCarlo` as vector code, spreading the CPU post-processing (detailed ballistics, the proxies after the thermal
+ablation) over cores, and a data-center GPU. All numbers are for one machine; they say nothing about other devices.
 
 ## Reproducing
 
@@ -204,6 +250,14 @@ Robustness ensembles (W3):
 python benchmarks/bench_robustness.py --backend cpu-scalar --workers 12,6 --designs 36 --out benchmarks/results/w3_cpu_scalar.json
 python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0.json
 python tools/profile_workloads.py --out benchmarks/results/offloaded_share.json
+```
+
+Thermal ablation (phase 4b):
+
+```
+python benchmarks/bench_thermal.py --backend cpu-scalar --kind typical --workers 12,6 --lanes 1024 --out benchmarks/results/thermal_typical_cpu_scalar.json
+python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind typical --lanes 1024,4096,16384 --out benchmarks/results/thermal_typical_jax_cuda0.json
+python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced --lanes 1024,4096 --out benchmarks/results/thermal_advanced_jax_cuda0.json
 ```
 
 JAX comes from `pip install "solidpy[jax-cuda12]"`. The CPU measurements need no extra package. The

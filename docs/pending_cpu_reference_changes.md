@@ -71,6 +71,35 @@ to the hash). That is a fixed cost per result, visible in thousand-run ensembles
 per batch and caches it by `.git/HEAD` stamp (`solidpy/batch/assemble.py`). Caching it in the scalar code the same way
 is a small change, but it changes the bytes of `Burn.py` and so follows the procedure above.
 
+## 5. The thermal heat load is a trapezoid over the solver's own steps
+
+`Multiphysics.simulate_thermal_ablation` integrates the hot-face heat flux with `_trapezoid` over the accepted steps
+of each `solve_ivp(method="Radau")` call (one to a few steps per time step of the curve). The value therefore
+depends on where the solver puts its steps: against a run at `rtol=1e-12` it is 3e-5 to 1.2e-3 away (largest at the
+coarse 0.03 s grid with a liner), while the wall temperatures of the same run agree to 1e-8. The batched path copies
+this on purpose: it takes the same steps as scipy, so `heat_load_kj_m2` agrees to 1e-12.
+
+* Likely fix: carry the heat as one more state of the ODE (or integrate with the Radau stage values), which makes
+  it independent of the steps and removes the 1e-3. It changes `heat_load_kj_m2` of every thermal result by up to that
+  amount, so it needs `python tests/thermal_cases.py` to rewrite `tests/golden/thermal_ablation_v1.json` and the same
+  change in `solidpy/batch/integrators/radau.py` (the observer's integral) and `thermal_solver.py`.
+* Not a hash issue: `Multiphysics.py` is not one of the three hashed files, so this can be done without regenerating
+  the burn corpus.
+
+## 6. Coupling between the batched thermal code and the scalar model
+
+Three places mirror the scalar thermal model instead of calling it; a change to `simulate_thermal_ablation` has to be
+made in both:
+
+* the Bartz coefficient, recovery temperature and throat ablation of each time step: `interval_coefficients` in
+  `solidpy/batch/thermal.py` (the scalar loop is the oracle for `tests/test_batch_thermal.py`);
+* the heat flux and its derivative, a closure in the scalar function: `solidpy/batch/kernels/thermal.py`, checked
+  against a transcription in `tests/test_batch_thermal.py`;
+* the Radau IIA(5) controller of `scipy.integrate.Radau`, ported in `solidpy/batch/integrators/radau.py` and
+  compared step for step with `solve_ivp` in `tests/test_batch_radau.py`. It imports its constants from
+  `scipy.integrate._ivp.radau` (a private module). A scipy release that changes the controller makes that test fail
+  and the batched thermal results differ from the scalar ones by more than `THERMAL_RTOL`; port the change then.
+
 ## Not a change request
 
 The blowdown cutoff uses the pressure peak of the burn stage plus the source-only segment, without the blowdown

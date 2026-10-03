@@ -512,7 +512,7 @@ workloads; **T2** later or CPU-only by design.
 | `surrogate_physics` (static, structural features, vectorized variants) | NumPy vector code already | T0 | accept `xp=` and run on the device |
 | `Multiphysics.simulate_structural_response` | algebra over time series | T1 | vectorized over lanes and time |
 | `Multiphysics.StructuralMonteCarlo` | many independent samples | T1 | trivially batched once the response is vectorized |
-| `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | batched tridiagonal solves, ragged node counts padded and masked |
+| `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | **done (4b)**: batched Radau IIA(5) with the scipy controller, tridiagonal factorizations, ragged node counts padded (section 14.6) |
 | `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies | T1 | vectorized |
 | `Multiphysics.geometry_from_components` (mass, CG, bulkheads) | vector algebra (vectorized variants exist) | T1 | `xp=` |
 | `DetailedBallistics` (`build_detailed_ballistics`, stability, nozzle ablation rate) | post-processing of histories | T1 | vectorized over lanes; interpolation of histories to uniform grids is a batched `interp` |
@@ -891,11 +891,58 @@ Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.p
   12 processes. A third of the time is the detailed ballistics of each lane on one CPU core, which now sets the ceiling
   (the device alone does 246 lanes/s).
 
-Not done in 4a, in the order they matter: the thermal ablation as lanes (W2 stays at 0.757 without it; the CPU runs a
+Not done in 4a, in the order they matter: the thermal ablation as lanes (done in 4b, section 14.6; W2 stays at 0.757 without it; the CPU runs a
 scipy Radau solve per time step, so a batched version is a new integrator and its parity is by tolerance); overlapping or
 parallelising the post-processing of the lanes (section 6.4); the structural response and `StructuralMonteCarlo` as
 vector code; `xp=` for `surrogate_physics`; a `decimated:N` history so that thousands of lanes do not carry full
 histories.
+
+### 14.6 Status after Phase 4b: the thermal ablation as lanes (2026-10-03)
+
+The plan of section 14.5 left the thermal ablation for last because the scalar code runs `solve_ivp(method="Radau")` once per
+time step of the curve and a batched version was a new integrator whose parity could only be by tolerance. Measured
+before starting (`tests/thermal_cases.py`, scipy 1.17.1): Radau takes 1.0 to 1.9 steps per time step of 0.01 to 0.03 s, the
+wall temperatures of the scalar run are within 1e-8 of a run at `rtol=1e-12`, and `heat_load_kj_m2`, a trapezoid over the
+solver's own steps, is within 3e-5 to 1.2e-3 of it. A different integrator would therefore have differed from the scalar
+model by the scalar model's own quadrature error; the decision was to port scipy's controller instead.
+
+Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.py` untouched:
+
+* `solidpy/batch/integrators/radau.py`: Radau IIA(5) for a batch, with the controller of `scipy.integrate.Radau` ported
+  step for step (initial step, simplified Newton on the transformed system with its convergence tests, the error estimate and
+  its second pass, the two-step step predictor, reuse of the Jacobian and of the factorization across steps including a
+  factorization made for another step size, the dense-output Newton start). It returns the trapezoid and the maximum of an
+  observed scalar over the accepted points, which is what the scalar code does with the heat flux. In 160 random walls it takes
+  the same number of steps as `solve_ivp` and ends at the same state and integral (`tests/test_batch_radau.py`; in the 240-lane
+  sweep those lanes come from, a call took 1 to 43 steps and 28 % had rejected steps). Systems are factored by the Thomas algorithm, since the Jacobian of a wall is
+  tridiagonal: dense inverses cost 29 ms for 4,096 complex 32x32 systems on the RTX 4060 against 0.6 ms for the tridiagonal
+  factorization, and 4,096 lanes of 18-cell walls went from 47 s to 7.7 s. The real and complex systems are factored in one pass
+  because the cost of a pass is its sequential steps, not its width.
+* `solidpy/batch/thermal.py`, `kernels/thermal.py`, `integrators/thermal_solver.py`: `ThermalBatch` packs the wall of each
+  lane on the host with the scalar code's own helpers (`_wall_layers` and the finite-volume operator, extracted from
+  `simulate_thermal_ablation` with identical results) and, per time step, the step length and the Bartz coefficient; the throat
+  ablation is a sum over the series and is finished at pack time. The solver is a loop over the time steps around the batched
+  Radau call and keeps the extremes the scalar code keeps.
+* The Backend protocol gains optional services advertised by `Capabilities.services`; `thermal_ablation(batch, options)` is
+  provided by `cpu-reference` (the scalar call per lane, optionally in a pool), `cpu-vectorized` and `jax` (one jit-compiled
+  program, lanes padded to a power of two, wall cells to a multiple of 4, steps to a quarter-octave bucket).
+* `solidpy.ensemble.simulate_thermal(batch, backend, ...)` routes like `simulate_burn`: lanes the backend cannot take and lanes
+  whose integration did not finish are rerun on the scalar reference. `run_advanced_physics_ensemble(geometries, curves, ...)`
+  runs the thermal ablation of many designs as one batch and the other advanced models on the CPU for each lane;
+  `simulate_advanced_physics` was split unchanged into the thermal call and `_advanced_after_thermal`.
+* Tolerances version 5 adds `THERMAL_RTOL = 1e-9`. The worst difference to the scalar model over 14 fixed cases and 1,800
+  random lanes on NumPy, JAX on the CPU device and JAX on the GPU is 1.4e-12, every metric included (`heat_load_kj_m2` too, since
+  the steps are the same).
+
+Measured (`docs/gpu_backend_benchmarks.md`): offloaded share W1 0.990, **W2 0.988**, W3 0.994, so the gate of 0.8 is met on all
+three workloads. The thermal ablation alone runs 36x the scalar model on 12 threads at 4,096 lanes of typical walls (15.7x on
+walls up to 18 cells); the whole advanced physics runs 5.8x, limited by the structural, CFD, ignition and flight models that
+stay on one CPU core (5.3 ms per lane, 90 % of the batched run).
+
+Not done: those CPU models and the detailed ballistics of the robustness ensembles are now the ceiling of both ensembles and
+share a fix (a process pool or batching them, section 6.4); the structural response and `StructuralMonteCarlo` as vector code (W4);
+`xp=` for `surrogate_physics`; `decimated:N` / `uniform:N` histories. Couplings between the batched thermal code and the scalar
+model, and the 1e-3 quadrature error of the scalar heat load, are in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
 
 ## Appendix A. State vector and padded batch schema
 
