@@ -259,6 +259,40 @@ def test_auto_honours_an_explicit_device_and_never_picks_an_accelerator_for_cpu(
         backends.unregister_backend("fake-gpu")
 
 
+class _Outcome:
+    execution = {}
+
+    def __init__(self, results):
+        self._results = results
+
+    def to_results(self):
+        return self._results
+
+
+def test_a_third_party_backend_may_leave_out_the_execution_block_but_not_a_lane(batch):
+    class Bare(FakeAccelerator):
+        def solve_burn(self, batch, options):
+            results = super().solve_burn(batch, options).to_results()
+            for result in results:
+                result["provenance"].pop("execution")
+            return _Outcome(results)
+
+    class Short(FakeAccelerator):
+        def solve_burn(self, batch, options):
+            return _Outcome(super().solve_burn(batch, options).to_results()[:-1])
+
+    lanes = batch.select(SUPPORTED_LANES)
+    try:
+        backends.register_backend("fake-gpu", Bare, replace=True)
+        results = simulate_burn(lanes, backend="fake-gpu").to_results()
+        assert [r["provenance"]["execution"] for r in results] == [{"requested_backend": "fake-gpu"}] * 3
+        backends.register_backend("fake-gpu", Short, replace=True)
+        with pytest.raises(RuntimeError, match="returned 2 results for 3 lanes"):
+            simulate_burn(lanes, backend="fake-gpu")
+    finally:
+        backends.unregister_backend("fake-gpu")
+
+
 def test_lanes_are_sorted_when_the_backend_splits_them_into_launches_itself(batch, monkeypatch):
     from solidpy import ensemble
 

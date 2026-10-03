@@ -90,6 +90,11 @@ def _chunks(order: np.ndarray, chunk_size: Optional[int]) -> List[np.ndarray]:
     return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
 
 
+def _execution(result: Dict[str, Any]) -> Dict[str, Any]:
+    """``result["provenance"]["execution"]``, created when a third-party backend leaves it out."""
+    return result.setdefault("provenance", {}).setdefault("execution", {})
+
+
 def simulate_burn(
     batch: ProblemBatch,
     backend: Optional[str] = None,
@@ -150,13 +155,16 @@ def simulate_burn(
         for chunk in chunks:
             outcome = chosen.solve_burn(batch.select(chunk), options)
             tier_log.append(outcome.execution.get("tiers"))
-            for lane, result in zip(chunk, outcome.to_results()):
+            returned = outcome.to_results()
+            if len(returned) != len(chunk):
+                raise RuntimeError(f"backend {backend!r} returned {len(returned)} results for {len(chunk)} lanes")
+            for lane, result in zip(chunk, returned):
                 results[int(lane)] = result
     reasons: Dict[int, List[str]] = {lane: list(features) for lane, features in refused.items()}
     if backend != "cpu-reference":
         # a lane that ran out of its step budget is a failure of the budget, not of the physics: rerun it on the reference
         for lane, result in enumerate(results):
-            if result is not None and result["provenance"]["execution"].get("step_overflow"):
+            if result is not None and _execution(result).get("step_overflow"):
                 reasons[lane] = ["step_overflow"]
     if reasons:
         reference = backends.get_backend("cpu-reference")
@@ -165,11 +173,11 @@ def simulate_burn(
         for lane, result in zip(lanes, solved):
             execution = dict(reference.provenance())
             execution["fallback"] = {"lane_reason": reasons[int(lane)], "ran_on": "cpu-reference"}
-            result["provenance"]["execution"] = execution
+            result.setdefault("provenance", {})["execution"] = execution
             results[int(lane)] = result
     if backend != "cpu-reference":
         for result in results:
-            result["provenance"]["execution"]["requested_backend"] = requested
+            _execution(result)["requested_backend"] = requested
 
     summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
                "fallback_lanes": sorted(int(i) for i in reasons), "chunks": len(chunks), "tiers": tier_log}
