@@ -1,0 +1,30 @@
+{
+  "workload": "W1: supported golden-corpus designs, tiled",
+  "base_lanes": 256,
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": null
+  },
+  "backend": "cpu-reference",
+  "device": null,
+  "results": [
+    {
+      "lanes": 1024,
+      "workers": 12,
+      "seconds": 155.36,
+      "lanes_per_s": 6.591
+    },
+    {
+      "lanes": 1024,
+      "workers": 6,
+      "seconds": 213.76,
+      "lanes_per_s": 4.791
+    }
+  ]
+}

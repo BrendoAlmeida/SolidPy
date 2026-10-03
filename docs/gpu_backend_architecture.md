@@ -832,6 +832,26 @@ Reference-path behaviour that the batched solver reproduces on purpose (the refe
   The packer treats an instance-level override as an unsupported feature instead of reading `burn_rate_a`
   and `burn_rate_n`.
 
+### 14.4 Status after the first implementation round (2026-10-03)
+
+Phases 0 to 3 are implemented on `feat/gpu-batch-backend`, with the gate of Phase 3 **met**
+(`docs/gpu_backend_benchmarks.md`): 11.8x the scalar reference on all cores of the same machine at 4,096 lanes on
+the full corpus workload, 54.7x on the typical workload, in float64 on an 8 GiB consumer GPU.
+
+Implemented: the backend registry and extras, the golden corpus, `ProblemBatch`, the geometry, propellant, nozzle
+and right-hand-side kernels, the batched DOP853 with burnout and blowdown events, canonical results with the
+reference `physics_provider_hash`, the `cpu-reference`, `cpu-vectorized` and `jax` backends, `simulate_burn` with
+capability routing and fallback, iteration-capped tiers (a result of the measurements: section 6.3 expected
+cost-sorted chunks, but sorting cannot help when the per-iteration cost is flat; capping iterations and rerunning
+the unfinished lanes in smaller batches does), and the benchmark suite.
+
+Not implemented, in the order they matter: igniter, activation and ramp sources; tabulated burn rate and
+thermochemistry (these lanes run on the reference); the `uniform:N` and `decimated:N` history policies; the
+heterogeneous CPU+GPU executor (the last tier is latency bound and suits spare CPU cores, benchmarks section
+"What the numbers say"); Tier 1 physics; a data-center GPU measurement. Open point 14.2.1 (typical batch sizes)
+now has a first answer: the speedup is large from about 2,000 lanes up and is below the reference under a few
+hundred lanes, so `backend="auto"` keeps the reference for small batches.
+
 ## Appendix A. State vector and padded batch schema
 
 State per lane (size `G + 7`):
