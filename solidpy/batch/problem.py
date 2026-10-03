@@ -89,6 +89,15 @@ TABLE_FIELDS = (
     "thermo_tc_c3", "thermo_k_c0", "thermo_k_c1", "thermo_k_c2", "thermo_k_c3", "mach_x", "mach_n", "mach_c0",
     "mach_c1", "mach_c2", "mach_c3",
 )
+#: The table arrays by family, for ``ProblemBatch.with_table_buckets``: the abscissae (padded with values that keep
+#: increasing) and the columns that share their width (padded with zeros). The breakpoints are padded with ``inf``.
+_TABLE_FAMILIES = (
+    (("igniter_table_t",), ("igniter_table_m",)),
+    (("activation_table_t",), ("activation_table_a",)),
+    (("rate_table_x",), tuple(f"rate_table_c{i}" for i in range(4))),
+    (("thermo_x",), tuple(f"thermo_{name}_c{i}" for name in ("tc", "k") for i in range(4))),
+    (("mach_x",), tuple(f"mach_c{i}" for i in range(4))),
+)
 #: Points of the grid on which the exit Mach number is tabulated against ``k`` for pressure-dependent ``k``.
 MACH_GRID_POINTS = 33
 
@@ -440,6 +449,15 @@ def _lane_values(motor, propellant, environment, settings: Mapping[str, Any], fe
     )
 
 
+def table_bucket(width: int) -> int:
+    """The width a table axis is padded to: at least 8, then in steps of a quarter of an octave, so that batches with
+    similar tables share a compiled program and no table grows by more than a quarter."""
+    if width <= 8:
+        return 8
+    step = 1 << ((width - 1).bit_length() - 3)
+    return -(-width // step) * step
+
+
 @dataclass
 class ProblemBatch:
     """Many independent motors as arrays. Build one with :meth:`from_objects`.
@@ -579,6 +597,28 @@ class ProblemBatch:
         for name in GRAIN_FIELDS:
             padding = np.full((len(self), extra), _PADDING[name], dtype=arrays[name].dtype)
             arrays[name] = np.concatenate([arrays[name], padding], axis=1)
+        return ProblemBatch(arrays, self.lane_features, self.n_grains, self.motors, self.propellants,
+                            self.environments, self.settings)
+
+    def with_table_buckets(self) -> "ProblemBatch":
+        """The same lanes with every table axis padded to a bucket width (see :func:`table_bucket`).
+
+        Compiled backends specialise on array shapes, so a sweep whose lanes carry tables of slightly different
+        lengths would recompile for each. The padding is never read: each lane keeps its real length in its count
+        array, and the padded abscissae stay finite and increasing so that no discarded branch divides by zero.
+        """
+        arrays = dict(self.arrays)
+        lanes = len(self)
+        for abscissae, columns in _TABLE_FAMILIES:
+            for name in abscissae:
+                extra = table_bucket(arrays[name].shape[1]) - arrays[name].shape[1]
+                if extra:
+                    arrays[name] = np.concatenate([arrays[name], arrays[name][:, -1:] + np.arange(1, extra + 1)], axis=1)
+                    for column in columns:
+                        arrays[column] = np.concatenate([arrays[column], np.zeros((lanes, extra))], axis=1)
+        extra = table_bucket(arrays["breakpoints"].shape[1]) - arrays["breakpoints"].shape[1]
+        if extra:
+            arrays["breakpoints"] = np.concatenate([arrays["breakpoints"], np.full((lanes, extra), np.inf)], axis=1)
         return ProblemBatch(arrays, self.lane_features, self.n_grains, self.motors, self.propellants,
                             self.environments, self.settings)
 

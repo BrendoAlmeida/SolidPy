@@ -7,8 +7,8 @@ of each solve with JAX's scoped switch, never as global state. JAX is imported w
 so ``import solidpy`` and ``solidpy.backends.available()`` never load it.
 
 Compiling takes 10 to 60 s the first time a batch shape is seen. Lanes are therefore padded to a power-of-two
-count and the grain axis to a bucket, so a sweep reuses one program; a persistent cache can be enabled with
-``JAX_COMPILATION_CACHE_DIR``.
+count, and the grain axis and every table axis to a bucket, so a sweep reuses one program; a persistent cache can
+be enabled with ``JAX_COMPILATION_CACHE_DIR``.
 """
 
 from __future__ import annotations
@@ -178,6 +178,7 @@ class JaxBackend:
         refused = refused_lanes(batch, self.capabilities())
         if refused:
             raise unsupported_lane_error(self.name, refused)
+        batch = batch.with_table_buckets()  # table widths are part of the compiled shapes
         full = options.history == "full"
         max_steps = options.max_steps or DEFAULT_MAX_STEPS[options.history]
         # a full history is for inspection, not throughput: capped tiers would allocate and discard its buffers

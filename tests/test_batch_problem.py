@@ -417,3 +417,73 @@ def test_burn_rate_tables_and_power_laws_that_stay_positive_are_not_flagged(tmp_
 
     for propellant in (table, flat, power):
         assert pb.INVALID_BURN_RATE not in pack(motor, propellant).lane_features[0]
+
+
+@pytest.mark.parametrize("width", list(range(1, 70)) + [77, 513, 1002, 4000])
+def test_a_table_bucket_is_close_above_the_width_and_never_below_it(width):
+    bucket = pb.table_bucket(width)
+
+    assert bucket >= max(width, 8) and bucket <= max(8, width * 1.25 + 1)
+    assert pb.table_bucket(bucket) == bucket  # buckets are fixed points
+
+
+def _table_lanes(per_family=1):
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+    picks = []
+    for family in ("igniter-table", "activation-table", "combo-table", "ratetable", "thermotable", "tubular"):
+        members = [c for c in corpus if c["family"] == family and reference[c["id"]]["history_points"] < 150]
+        picks += sorted(members, key=lambda c: reference[c["id"]]["history_points"])[:per_family]
+    built = [gc.build_objects(c) for c in picks]
+    return picks, ProblemBatch.from_objects([b[1] for b in built], [b[2] for b in built], [b[3] for b in built],
+                                            [b[4] for b in built])
+
+
+def test_table_buckets_give_batches_with_different_tables_the_same_shapes():
+    import copy
+
+    case = next(c for c in gc.load_corpus()["cases"] if c["family"] == "igniter-table")
+    batches = []
+    for knots in (3, 6):
+        variant = copy.deepcopy(case)
+        variant["simulation"]["igniter_mass_flow"] = [[0.02 * i, 0.01 * (i + 1)] for i in range(knots)]
+        built = gc.build_objects(variant)
+        batches.append(ProblemBatch.from_objects(built[1], built[2], built[3], built[4]))
+    names = ("igniter_table_t", "igniter_table_m", "breakpoints")
+
+    assert batches[0].arrays["igniter_table_t"].shape != batches[1].arrays["igniter_table_t"].shape
+    a, b = (batch.with_table_buckets().arrays for batch in batches)
+    assert [a[n].shape for n in names] == [b[n].shape for n in names]
+    assert a["rate_table_x"].shape == b["rate_table_x"].shape == (1, 8)
+
+
+def test_table_buckets_pad_without_touching_the_real_entries():
+    _, batch = _table_lanes()
+    bucketed = batch.with_table_buckets()
+
+    for name in pb.TABLE_FIELDS:
+        old, new = batch.arrays[name], bucketed.arrays[name]
+        if name.endswith("_n"):
+            np.testing.assert_array_equal(new, old)  # real lengths do not change
+            continue
+        np.testing.assert_array_equal(new[:, : old.shape[1]], old)
+        if name.endswith(("_t", "_x")):
+            assert (np.diff(new, axis=1) > 0).all(), name  # abscissae stay finite and increasing
+        elif name == "breakpoints":
+            assert np.isinf(new[:, old.shape[1]:]).all()
+        else:
+            assert (new[:, old.shape[1]:] == 0.0).all(), name
+    assert bucketed.lane_features == batch.lane_features and bucketed.motors is batch.motors
+
+
+def test_table_buckets_do_not_change_a_result():
+    from solidpy import backends
+
+    cases, batch = _table_lanes()
+    backend = backends.get_backend("cpu-vectorized")
+
+    plain = backend.solve_burn(batch).to_results()
+    padded = backend.solve_burn(batch.with_table_buckets()).to_results()
+
+    for case, a, b in zip(cases, plain, padded):
+        assert a["metrics"] == b["metrics"] and a["status"] == b["status"], case["id"]
