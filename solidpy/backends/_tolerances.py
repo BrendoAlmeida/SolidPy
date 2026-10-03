@@ -11,7 +11,7 @@ Never edit a value to make a failing test pass. A change needs a written cause i
 new ``TOLERANCES_VERSION``.
 """
 
-TOLERANCES_VERSION = "3"
+TOLERANCES_VERSION = "4"
 
 # Version 2 (cause): the first measurement of the batched solver on the golden corpus, 160 completed lanes
 # that include tolerances from rtol 1e-6 to 1e-9, gave event times up to 1.5e-6 (median 3e-10) and the maximum
@@ -23,6 +23,19 @@ TOLERANCES_VERSION = "3"
 # from the refined value (its coarse grid misses the peak), batched 3e-4. The limits therefore cover the error
 # of the reference itself, not a bias of the batched solver; tests/test_batch_accuracy.py keeps the batched
 # error from exceeding the reference's. The peak limit is still 4x inside the 2 % acceptance policy.
+
+# Version 4 (cause): adds limits for what the robustness analysis reads from a run, which the earlier versions never
+# compared; no existing value changed. Measured on a four-grain tabulated design (max step 0.02 s), nine robustness
+# scenarios, scalar path against the NumPy backend, JAX on the CPU device and JAX on the GPU, and against a refined
+# scalar run (rtol 1e-11, max step 2 ms) of every lane:
+# * the maximum generated mass flow, a spike narrower than the step grid, is under-sampled by every solver, the
+#   scalar one included: errors against the refined run up to 2.4e-2 (scalar), 2.4e-2 (NumPy), 2.2e-2 (JAX CPU) and
+#   2.4e-2 (JAX GPU), all low, so solvers differ from one another by up to 2.2e-2 (the corpus limit stays at 1.5e-2);
+# * the maximum pressure rise rate, a finite difference of consecutive accepted points, has errors up to 4.6e-2
+#   (scalar) and 4.0e-2 (NumPy) against the refined run, and the backends differ from the scalar path by up to 3.5e-2;
+# * the series the detailed ballistics interpolates from the accepted points differ by up to 3.3e-3 of their
+#   maximum, and the throat ablation, accumulated over those points, by 2.8e-5 in its final value;
+# * the mass balance residual is at rounding level (<= 8e-8 %) in both paths.
 
 #: Relative error of one kernel against the scalar method it mirrors.
 KERNEL_RTOL_NUMPY = 1e-12
@@ -42,3 +55,20 @@ GENERATED_FLOW_PEAK_RTOL = 1.5e-2
 
 #: Event times (grain burnout, blowdown cutoff) and the final time.
 TIME_RTOL = 5e-6
+
+#: Series the detailed ballistics builds by interpolating the accepted points (thrust, pressure, mass, ablation),
+#: relative to the largest value of the series. The two solvers take different steps, so the points differ
+#: (worst measured 3.3e-3, version 4).
+DETAILED_SERIES_RTOL = 1e-2
+
+#: The maximum generated mass flow of workloads on a coarse step grid (detailed ballistics, max step 0.01 to 0.02 s)
+#: with a sharp ignition spike; see the version 4 note. ``GENERATED_FLOW_PEAK_RTOL`` still applies to the corpus.
+GENERATED_FLOW_PEAK_COARSE_RTOL = 3e-2
+
+#: Maximum pressure rise rate: the largest finite difference between consecutive accepted points, so it depends on
+#: the step sequence itself, and the scalar value is itself up to 4.6e-2 from a refined run (version 4).
+FINITE_DIFFERENCE_RTOL = 6e-2
+
+#: Mass balance residual in percent. Both paths leave a rounding-level residual (<= 8e-8 %), so the comparison is
+#: absolute (version 4).
+MASS_BALANCE_ATOL_PCT = 1e-6

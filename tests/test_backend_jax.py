@@ -257,3 +257,42 @@ def test_the_accelerator_and_the_cpu_device_agree_within_the_parity_limits(subse
     for a, b in zip(on_gpu, on_cpu):
         assert a["status"]["termination_reason"] == b["status"]["termination_reason"]
         assert a["metrics"]["total_impulse_ns"] == pytest.approx(b["metrics"]["total_impulse_ns"], rel=tol.INTEGRAL_RTOL)
+
+
+# ---- robustness scenarios as lanes ------------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def robustness_inputs():
+    from solidpy import run_robustness_analysis
+    from test_batch_robustness import KWARGS, scenarios
+    from test_robustness import make_motor_stack
+
+    design = make_motor_stack()
+    options = dict(scenarios=scenarios(), **KWARGS)
+    return design, options, run_robustness_analysis(*design, **options)
+
+
+def test_jax_on_the_cpu_device_gives_the_scalar_robustness_report_within_the_tolerances(robustness_inputs):
+    from solidpy import run_robustness_analysis
+    from test_batch_robustness import assert_reports_close
+
+    design, options, scalar = robustness_inputs
+
+    report = run_robustness_analysis(*design, backend="jax", device="cpu", **options)
+
+    assert_reports_close(report, scalar)
+    execution = report["scenarios"][0]["canonical_result"]["provenance"]["execution"]
+    assert execution["backend"] == "jax" and execution["device"] == "cpu"
+    assert execution["scenario_inputs"]["burn_rate_factor"] == pytest.approx(0.94)
+
+
+@pytest.mark.gpu
+def test_on_the_accelerator_the_robustness_report_matches_the_scalar_one(robustness_inputs):
+    from solidpy import run_robustness_analysis
+    from test_batch_robustness import assert_reports_close
+
+    design, options, scalar = robustness_inputs
+
+    report = run_robustness_analysis(*design, backend="jax", device="cuda:0", **options)
+
+    assert_reports_close(report, scalar)
+    assert report["nominal"]["canonical_result"]["provenance"]["execution"]["device"] == "cuda:0"

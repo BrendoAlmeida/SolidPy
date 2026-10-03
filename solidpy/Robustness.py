@@ -233,6 +233,45 @@ def summarize_robustness(scenario_results):
     return output
 
 
+def _build_report(results, validator=None):
+    """The robustness report of ``results``: the nominal run first, then one result per scenario."""
+    nominal = results[0]
+    summary = summarize_robustness(results)
+    if validator is not None:
+        validation = np.asarray(
+            [bool(result.get("valid", True)) for result in results if result["scenario_id"] != "nominal"],
+            dtype=bool,
+        )
+        if len(validation):
+            summary["simulation.robustness.valid_ratio"] = float(np.mean(validation))
+
+    scenario_statuses = [
+        result.get("status", {}).get("completed") is True
+        for result in results
+    ]
+    provider_hashes = {
+        result["scenario_id"]: result.get("provenance", {}).get("physics_provider_hash")
+        for result in results
+    }
+    return {
+        "robustness_policy_id": "solidpy_robustness_ensemble_v1",
+        "result_role": "ensemble",
+        "status": "completed" if all(scenario_statuses) else "incomplete",
+        "scenario_ids": [result["scenario_id"] for result in results[1:]],
+        "nominal": nominal,
+        "scenarios": results[1:],
+        "summary": summary,
+        "provenance": {
+            "physics_provider": "solidpy_detailed_ballistics",
+            "physics_provider_hashes": provider_hashes,
+            "solidpy_git_shas": {
+                result["scenario_id"]: result.get("provenance", {}).get("solidpy_git_sha")
+                for result in results
+            },
+        },
+    }
+
+
 def run_robustness_analysis(
     grain,
     motor,
@@ -244,9 +283,34 @@ def run_robustness_analysis(
     max_step_size=0.01,
     max_time_points=1000,
     validator=None,
+    backend=None,
+    device=None,
+    workers=None,
     **simulation_kwargs,
 ):
-    """Run nominal and perturbed detailed ballistics, then aggregate statistics."""
+    """Run nominal and perturbed detailed ballistics, then aggregate statistics.
+
+    By default every scenario is simulated in turn with ``BurnSimulation``. With ``backend`` (a name from
+    ``solidpy.backends``, or ``"auto"``) the nominal run and the scenarios are solved together as lanes of one batch
+    (``solidpy.ensemble.run_robustness_ensemble``), and ``device`` and ``workers`` go to that backend. A single design
+    is only about 27 lanes, so a GPU backend pays off for many designs at once: use ``run_robustness_ensemble``.
+    """
+    if backend is not None:
+        from .ensemble import run_robustness_ensemble
+
+        return run_robustness_ensemble(
+            [(grain, motor, propellant, environment)],
+            scenarios=scenarios,
+            monte_carlo_sample_count=monte_carlo_sample_count,
+            monte_carlo_seed=monte_carlo_seed,
+            max_step_size=max_step_size,
+            max_time_points=max_time_points,
+            validator=validator,
+            backend=backend,
+            device=device,
+            workers=workers,
+            **simulation_kwargs,
+        )[0]
     scenario_list = list(scenarios) if scenarios is not None else default_robustness_scenarios()
     scenario_list.extend(
         build_latin_hypercube_scenarios(
@@ -300,37 +364,4 @@ def run_robustness_analysis(
             result["valid"] = bool(validator(result))
         results.append(result)
 
-    summary = summarize_robustness(results)
-    if validator is not None:
-        validation = np.asarray(
-            [bool(result.get("valid", True)) for result in results if result["scenario_id"] != "nominal"],
-            dtype=bool,
-        )
-        if len(validation):
-            summary["simulation.robustness.valid_ratio"] = float(np.mean(validation))
-
-    scenario_statuses = [
-        result.get("status", {}).get("completed") is True
-        for result in results
-    ]
-    provider_hashes = {
-        result["scenario_id"]: result.get("provenance", {}).get("physics_provider_hash")
-        for result in results
-    }
-    return {
-        "robustness_policy_id": "solidpy_robustness_ensemble_v1",
-        "result_role": "ensemble",
-        "status": "completed" if all(scenario_statuses) else "incomplete",
-        "scenario_ids": [result["scenario_id"] for result in results[1:]],
-        "nominal": nominal,
-        "scenarios": results[1:],
-        "summary": summary,
-        "provenance": {
-            "physics_provider": "solidpy_detailed_ballistics",
-            "physics_provider_hashes": provider_hashes,
-            "solidpy_git_shas": {
-                result["scenario_id"]: result.get("provenance", {}).get("solidpy_git_sha")
-                for result in results
-            },
-        },
-    }
+    return _build_report(results, validator)

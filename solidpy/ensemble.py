@@ -14,6 +14,7 @@ works exactly as before.
 
 from __future__ import annotations
 
+import copy
 import numbers
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +27,7 @@ from .batch import ProblemBatch
 from .batch.kernels.tables import evaluate as evaluate_table
 from .batch.result import BatchResult
 
-__all__ = ["ProblemBatch", "SolveOptions", "UnsupportedLane", "lane_cost", "simulate_burn"]
+__all__ = ["ProblemBatch", "SolveOptions", "UnsupportedLane", "lane_cost", "run_robustness_ensemble", "simulate_burn"]
 
 #: Backends ``backend="auto"`` may pick, best first, and the smallest batch worth sending to one.
 AUTO_ACCELERATORS = ("jax",)
@@ -182,3 +183,127 @@ def simulate_burn(
     summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
                "fallback_lanes": sorted(int(i) for i in reasons), "chunks": len(chunks), "tiers": tier_log}
     return BatchResult(results, backend, summary)
+
+
+#: Arguments of ``run_detailed_ballistics`` that shape its post-processing and not the burn.
+_DETAIL_ARGUMENTS = ("resample_step", "nozzle_ablation_scale", "ablation_pressure_exponent", "ablation_mass_flow_exponent")
+
+
+def _robustness_design(entry):
+    entry = tuple(entry)
+    if not 3 <= len(entry) <= 5:
+        raise ValueError("a design is (grain, motor, propellant[, environment[, simulation_kwargs]])")
+    grain, motor, propellant = entry[:3]
+    environment = entry[3] if len(entry) > 3 else None
+    own = dict(entry[4]) if len(entry) > 4 and entry[4] else {}
+    return grain, motor, propellant, environment, own
+
+
+def run_robustness_ensemble(
+    designs,
+    *,
+    scenarios=None,
+    monte_carlo_sample_count: int = 0,
+    monte_carlo_seed: int = 20260504,
+    max_step_size: float = 0.01,
+    max_time_points: Optional[int] = 1000,
+    validator=None,
+    backend: Optional[str] = "auto",
+    device: Optional[str] = None,
+    strict: bool = False,
+    workers: Optional[int] = None,
+    max_steps: Optional[int] = None,
+    chunk_lanes: int = 4096,
+    **simulation_kwargs: Any,
+) -> List[Dict[str, Any]]:
+    """Robustness analysis of many designs: every (design, scenario) pair is a lane of one batch.
+
+    Returns one report per design, in the form ``run_robustness_analysis`` returns for it. ``designs`` holds
+    ``(grain, motor, propellant[, environment[, simulation_kwargs]])`` tuples; ``simulation_kwargs`` given here
+    apply to every design and the ones in a design's tuple override them (that includes ``max_step_size`` and
+    ``max_time_points``). The scenarios are the same for every
+    design (the default ones, or ``scenarios``, plus ``monte_carlo_sample_count`` Latin-hypercube samples).
+
+    The burns run on ``backend`` (a name, ``"auto"``, or ``None`` for the selected one; see ``simulate_burn``) with
+    the full history; the detailed ballistics of every lane is then built on the CPU from the lane's result, so the
+    reports are what the scalar path gives within the numerical tolerances of ``solidpy.backends._tolerances``.
+    ``chunk_lanes`` bounds how many lanes are solved and held at once. Invalid inputs raise when the batch is packed,
+    before any burn is solved; the scalar path raises as it reaches them.
+    """
+    from .batch.simulation_view import SimulationView
+    from .DetailedBallistics import _validate_dry_hardware, build_detailed_ballistics
+    from .Environment import Environment
+    from .Robustness import (
+        _build_report, _rescale_thrust, _scenario_objects, build_latin_hypercube_scenarios, default_robustness_scenarios,
+    )
+
+    if isinstance(chunk_lanes, bool) or not isinstance(chunk_lanes, numbers.Integral) or chunk_lanes < 1:
+        raise ValueError(f"chunk_lanes must be a positive integer, got {chunk_lanes!r}")
+    parsed = [_robustness_design(entry) for entry in designs]
+    scenario_list = list(scenarios) if scenarios is not None else default_robustness_scenarios()
+    scenario_list.extend(build_latin_hypercube_scenarios(sample_count=monte_carlo_sample_count, seed=monte_carlo_seed))
+    lanes_per_design = 1 + len(scenario_list)
+    for _, motor, _, _, _ in parsed:
+        _validate_dry_hardware(motor)
+
+    reports: List[Dict[str, Any]] = []
+    designs_per_chunk = max(1, int(chunk_lanes) // lanes_per_design)
+    for start in range(0, len(parsed), designs_per_chunk):
+        chunk = parsed[start : start + designs_per_chunk]
+        motors, propellants, environments, settings, factors, details = [], [], [], [], [], []
+        for grain, motor, propellant, environment, own in chunk:
+            merged = {**simulation_kwargs, **own}
+            step = merged.pop("max_step_size", max_step_size)
+            detail = {name: merged.pop(name) for name in _DETAIL_ARGUMENTS if name in merged}
+            detail.setdefault("resample_step", step)
+            detail["max_time_points"] = merged.pop("max_time_points", max_time_points)
+            burn_kwargs = {"max_step_size": step, "tail_off_evaluation": merged.pop("tail_off_evaluation", True), **merged}
+            nominal = copy.deepcopy((grain, motor, propellant, environment))
+            lanes = [(nominal[1], nominal[2], nominal[3] if nominal[3] is not None else Environment(), burn_kwargs, 1.0,
+                      detail)]
+            for scenario in scenario_list:
+                _, scenario_motor, scenario_propellant, scenario_environment, factor = _scenario_objects(
+                    grain, motor, propellant, environment, scenario
+                )
+                lane_kwargs = dict(burn_kwargs)
+                lane_kwargs.update({
+                    "igniter_mass_flow": merged.get("igniter_mass_flow"),
+                    "igniter_burn_time": merged.get("igniter_burn_time", 0.0) * float(scenario.igniter_energy_factor),
+                    "igniter_temperature": merged.get("igniter_temperature"),
+                    "burn_area_activation": merged.get("burn_area_activation"),
+                    "ignition_ramp_time": merged.get("ignition_ramp_time", 0.0),
+                    "tail_off_method": merged.get("tail_off_method", "numerical"),
+                })
+                lane_detail = dict(detail, nozzle_ablation_scale=float(scenario.nozzle_ablation_scale_factor))
+                lanes.append((scenario_motor, scenario_propellant, scenario_environment, lane_kwargs, factor, lane_detail))
+            for motor_i, propellant_i, environment_i, kwargs_i, factor_i, detail_i in lanes:
+                motors.append(motor_i)
+                propellants.append(propellant_i)
+                environments.append(environment_i)
+                settings.append(kwargs_i)
+                factors.append(factor_i)
+                details.append(detail_i)
+
+        batch = ProblemBatch.from_objects(motors, propellants, environments, settings, burn_rate_factor=factors)
+        solved = simulate_burn(batch, backend=backend, device=device, history="full", strict=strict, workers=workers,
+                               max_steps=max_steps).to_results()
+        detailed = []
+        for lane, canonical in enumerate(solved):
+            view = SimulationView.from_lane(batch, lane, canonical)
+            result = build_detailed_ballistics(view, **details[lane])
+            result["simulation"] = view
+            detailed.append(result)
+        for design in range(len(chunk)):
+            lane0 = design * lanes_per_design
+            results = detailed[lane0 : lane0 + lanes_per_design]
+            results[0]["scenario_id"] = "nominal"
+            results[0]["scenario_kind"] = "nominal"
+            for scenario, result in zip(scenario_list, results[1:]):
+                _rescale_thrust(result, scenario.isp_factor)
+                result["scenario_id"] = scenario.scenario_id
+                result["scenario_kind"] = scenario.scenario_kind
+                result["scenario_factors"] = scenario.__dict__.copy()
+                if validator is not None:
+                    result["valid"] = bool(validator(result))
+            reports.append(_build_report(results, validator))
+    return reports
