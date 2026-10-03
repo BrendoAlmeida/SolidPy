@@ -112,6 +112,7 @@ class JaxBackend:
         self.max_lanes = int(max_lanes)
         self._device = self._select_device(device)
         self.device = self._label(self._device)
+        self._structural_compiled_cache = {}
         #: Seconds of the last ``solve_burn``: ``device_s`` (padding, transfer, compute, copy back) and
         #: ``assemble_s`` (result mappings on the host). The first call of a shape includes compilation.
         self.last_timings: Dict[str, float] = {}
@@ -150,7 +151,7 @@ class JaxBackend:
 
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES}, history_policies=("metrics", "full"),
-                            services=("thermal_ablation",))
+                            services=("thermal_ablation", "structural_response"))
 
     def _x64(self):
         jax = self._jax
@@ -290,6 +291,82 @@ class JaxBackend:
             "failed_lanes": [i for i, r in enumerate(results) if r is None],
             "radau_steps": steps_taken, "radau_attempts": attempts,
         })
+
+    def structural_response(
+        self, geometry, chamber_pressure_pa, casing_material, casing_strength_factor=1.0, *,
+        bolt_count=0, bolt_diameter_m=0.0, bolt_strength_mpa=0.0,
+        closure_bolts_applicable=True, thermal=None,
+    ):
+        """Evaluate structural peak-pressure lanes on the selected JAX device."""
+        from ..batch.kernels.structural_response import structural_response_vectorized
+        from ..Multiphysics import _closure_bolt_configuration
+
+        jax = self._jax
+        jnp = jax.numpy
+        start = time.perf_counter()
+        wall_temperature = (thermal or {}).get(
+            "simulation.advanced.thermal.casing_inner_wall_temp_c"
+        )
+        geometry_key = tuple(getattr(geometry, name) for name in (
+            "motor_length_m", "motor_inner_diameter_m", "casing_wall_thickness_m", "dry_mass_kg",
+        ))
+        material_key = tuple(getattr(casing_material, name) for name in (
+            "density_kg_m3", "modulus_gpa", "yield_strength_mpa", "resolved_allowable_stress_mpa",
+            "resolved_ultimate_strength_mpa", "poisson_ratio", "max_service_temp_c", "material_family",
+        ))
+        cache_key = (
+            geometry_key, material_key, float(casing_strength_factor), int(bolt_count),
+            float(bolt_diameter_m), float(bolt_strength_mpa), bool(closure_bolts_applicable),
+            wall_temperature, tuple(np.shape(chamber_pressure_pa)),
+        )
+        with self._x64(), jax.default_device(self._device):
+            pressures = jax.device_put(jnp.asarray(chamber_pressure_pa, dtype=jnp.float64), self._device)
+            compiled = self._structural_compiled_cache.get(cache_key)
+            if compiled is None:
+                def numerical(values):
+                    output = structural_response_vectorized(
+                        geometry, values, casing_material, casing_strength_factor,
+                        bolt_count=bolt_count, bolt_diameter_m=bolt_diameter_m,
+                        bolt_strength_mpa=bolt_strength_mpa,
+                        closure_bolts_applicable=closure_bolts_applicable,
+                        thermal=(None if wall_temperature is None else {
+                            "simulation.advanced.thermal.casing_inner_wall_temp_c": wall_temperature,
+                        }), xp=jnp,
+                    )
+                    return {name: value for name, value in output.items()
+                            if not isinstance(value, (str, type(None)))}
+
+                compiled = jax.jit(numerical)
+                self._structural_compiled_cache[cache_key] = compiled
+                if len(self._structural_compiled_cache) > 32:
+                    self._structural_compiled_cache.pop(next(iter(self._structural_compiled_cache)))
+            output = jax.device_get(compiled(pressures))
+        self._device_s = time.perf_counter() - start
+        status, applicability, reason = _closure_bolt_configuration(
+            bolt_count, bolt_diameter_m, bolt_strength_mpa, closure_bolts_applicable,
+        )
+        output = {name: np.asarray(value) for name, value in output.items()}
+        output.update({
+            "simulation.advanced.structural.closure_bolt_status": status,
+            "simulation.advanced.structural.closure_bolt_applicability": applicability,
+            "simulation.advanced.structural.closure_bolt_reason": reason,
+            "simulation.advanced.structural.thermal_service_status":
+                "computed" if wall_temperature is not None
+                else "not_modeled",
+        })
+        if status != "configured":
+            output.update({
+                "simulation.advanced.structural.closure_bolt_shear_safety_factor": None,
+                "simulation.advanced.structural.closure_bolt_bearing_safety_factor": None,
+                "simulation.advanced.structural.closure_bolt_shear_stress_mpa": None,
+                "simulation.advanced.structural.closure_bolt_bearing_stress_mpa": None,
+            })
+        if wall_temperature is None:
+            output.update({
+                "simulation.advanced.structural.thermal_service_margin": None,
+                "simulation.advanced.structural.thermoelastic_margin": None,
+            })
+        return output
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

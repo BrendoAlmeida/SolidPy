@@ -38,7 +38,7 @@ class NumpyBackend:
 
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in self.SUPPORTED_FEATURES}, history_policies=("metrics", "full"),
-                            services=("thermal_ablation",))
+                            services=("thermal_ablation", "structural_response"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -103,6 +103,23 @@ class NumpyBackend:
             "failed_lanes": [i for i, r in enumerate(results) if r is None],
             "radau_steps": int(np.sum(out["steps"])), "radau_attempts": int(np.sum(out["attempts"])),
         })
+
+    def structural_response(
+        self, geometry, chamber_pressure_pa, casing_material, casing_strength_factor=1.0, *,
+        bolt_count=0, bolt_diameter_m=0.0, bolt_strength_mpa=0.0,
+        closure_bolts_applicable=True, thermal=None,
+    ):
+        """Evaluate the synthetic peak-pressure structural response as NumPy lanes."""
+        import numpy as np
+
+        from ..batch.kernels.structural_response import structural_response_vectorized
+
+        return structural_response_vectorized(
+            geometry, chamber_pressure_pa, casing_material, casing_strength_factor,
+            bolt_count=bolt_count, bolt_diameter_m=bolt_diameter_m,
+            bolt_strength_mpa=bolt_strength_mpa,
+            closure_bolts_applicable=closure_bolts_applicable, thermal=thermal, xp=np,
+        )
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

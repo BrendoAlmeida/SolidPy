@@ -30,7 +30,13 @@ note = "1-D wall conduction, a Radau IIA(5) solve per time step (solidpy.ensembl
 path = "solidpy.Multiphysics.simulate_structural_response"
 tier = "T1"
 batched = false
-note = "algebra over the time series"
+note = "general transient curves remain scalar; StructuralMonteCarlo's synthetic peak-pressure histories use a separate lane kernel"
+
+[[entry]]
+path = "solidpy.Multiphysics.StructuralMonteCarlo.run"
+tier = "T1"
+batched = true
+note = "W4 peak-pressure scenarios are lanes on cpu-vectorized or JAX; callback sampling and report assembly stay on the host"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_cfd_proxies"

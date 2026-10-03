@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from numbers import Integral, Real
 from pathlib import Path
@@ -2574,31 +2575,212 @@ class StructuralMonteCarlo:
             self._last_failure = {"type": type(exc).__name__, "message": str(exc)}
             return None
 
-    def run(self, n_iterations):
+    def _run_structural_batch(self, samples, pmax_perturbs, backend, strict):
+        """Sample pressures on the host, then evaluate their structural response in one backend call."""
+        from .backends._protocol import UnsupportedLane
+
+        outcomes = [None] * len(samples)
+        failures = [None] * len(samples)
+        pressures = []
+        lane_indices = []
+        for index, (sample, pmax_perturb) in enumerate(zip(samples, pmax_perturbs)):
+            try:
+                if self.peak_pressure_distribution is not None:
+                    peak_pressure = float(self.peak_pressure_distribution())
+                else:
+                    peak_pressure = self._extract_peak_pressure(self.ballistics_callable(sample))
+                peak_pressure = max(
+                    _structural_number("peak_pressure_pa", peak_pressure + pmax_perturb), 0.0
+                )
+                pressures.append(peak_pressure)
+                lane_indices.append(index)
+            except Exception as exc:
+                failures[index] = {"type": type(exc).__name__, "message": str(exc)}
+
+        if not lane_indices:
+            return outcomes, failures, {"fallback_lanes": [], "fallback_reason": None}
+
+        synthetic_curve = {
+            "time_s": np.asarray([0.0, 0.001, 1.0]),
+            "thrust_n": np.zeros(3),
+            "chamber_pressure_pa": np.zeros(3),
+        }
+        try:
+            schema = simulate_structural_response(
+                self.geometry, synthetic_curve, self.thermal, casing_material=self.casing_material,
+                casing_strength_factor=self.casing_strength_factor, bolt_count=self.bolt_count,
+                bolt_diameter_m=self.bolt_diameter_m, bolt_strength_mpa=self.bolt_strength_mpa,
+                closure_bolts_applicable=self.closure_bolts_applicable,
+            )
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            for index in lane_indices:
+                failures[index] = error
+            return outcomes, failures, {"fallback_lanes": [], "fallback_reason": None}
+
+        try:
+            capabilities = backend.capabilities()
+        except Exception as exc:
+            if strict:
+                raise
+            service_result = None
+            fallback_reason = f"{type(exc).__name__}: {exc}"
+        else:
+            if not capabilities.provides("structural_response"):
+                if strict:
+                    raise UnsupportedLane(
+                        f"backend {backend.name!r} does not provide the 'structural_response' service"
+                    )
+                service_result = None
+                fallback_reason = "service_not_supported"
+            else:
+                try:
+                    service_result = backend.structural_response(
+                        self.geometry, np.asarray(pressures, dtype=float), self.casing_material,
+                        self.casing_strength_factor, bolt_count=self.bolt_count,
+                        bolt_diameter_m=self.bolt_diameter_m, bolt_strength_mpa=self.bolt_strength_mpa,
+                        closure_bolts_applicable=self.closure_bolts_applicable, thermal=self.thermal,
+                    )
+                    fallback_reason = None
+                except Exception as exc:
+                    if strict:
+                        raise
+                    service_result = None
+                    fallback_reason = f"{type(exc).__name__}: {exc}"
+
+        fallback_lanes = []
+        if service_result is not None:
+            try:
+                if not isinstance(service_result, Mapping):
+                    raise TypeError("structural_response must return a mapping")
+                if set(service_result) != set(schema):
+                    raise ValueError("structural_response returned a different metric schema than the scalar model")
+                count = len(lane_indices)
+                arrays, constants = {}, {}
+                for name, expected in schema.items():
+                    values = service_result[name]
+                    if expected is None or isinstance(expected, str):
+                        if values != expected:
+                            raise ValueError(f"structural_response field {name!r} must equal {expected!r}")
+                        constants[name] = values
+                    else:
+                        array = np.asarray(values)
+                        if array.shape != (count,):
+                            raise ValueError(
+                                f"structural_response field {name!r} has shape {array.shape}; expected ({count},)"
+                            )
+                        arrays[name] = array
+            except Exception as exc:
+                if strict:
+                    raise
+                service_result = None
+                fallback_reason = f"{type(exc).__name__}: {exc}"
+
+        if service_result is not None:
+            for local, (index, pressure) in enumerate(zip(lane_indices, pressures)):
+                row = dict(constants)
+                try:
+                    row.update({name: float(values[local]) for name, values in arrays.items()})
+                    mismatch = any(
+                        (isinstance(schema[name], Real) and not isinstance(row[name], Real))
+                        or (isinstance(schema[name], str) and row[name] != schema[name])
+                        or (schema[name] is None and row[name] is not None)
+                        for name in schema
+                    )
+                    non_finite = any(
+                        isinstance(value, Real) and not math.isfinite(float(value))
+                        for value in row.values()
+                    )
+                    if mismatch or non_finite:
+                        if strict:
+                            reason = "does not match the scalar result" if mismatch else "contains a non-finite metric"
+                            raise ValueError(f"backend {backend.name!r} returned a structural response that {reason}")
+                        fallback_lanes.append(index)
+                        fallback_reason = fallback_reason or (
+                            "metric_schema_mismatch" if mismatch else "non_finite_metric"
+                        )
+                        continue
+                    outcomes[index] = (pressure, row)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    if strict:
+                        raise
+                    fallback_lanes.append(index)
+                    fallback_reason = fallback_reason or f"invalid_metric_value: {exc}"
+
+        if service_result is None:
+            fallback_lanes.extend(lane_indices)
+        if fallback_lanes:
+            for index in sorted(set(fallback_lanes)):
+                local = lane_indices.index(index)
+                pressure = pressures[local]
+                curve = {
+                    "time_s": np.asarray([0.0, 0.001, 1.0]),
+                    "thrust_n": np.zeros(3),
+                    "chamber_pressure_pa": np.asarray([0.0, pressure, 0.0]),
+                }
+                try:
+                    structural = simulate_structural_response(
+                        self.geometry, curve, self.thermal, casing_material=self.casing_material,
+                        casing_strength_factor=self.casing_strength_factor, bolt_count=self.bolt_count,
+                        bolt_diameter_m=self.bolt_diameter_m, bolt_strength_mpa=self.bolt_strength_mpa,
+                        closure_bolts_applicable=self.closure_bolts_applicable,
+                    )
+                    outcomes[index] = (pressure, structural)
+                except Exception as exc:
+                    failures[index] = {"type": type(exc).__name__, "message": str(exc)}
+        return outcomes, failures, {
+            "fallback_lanes": sorted(set(fallback_lanes)), "fallback_reason": fallback_reason,
+        }
+
+    def run(self, n_iterations, *, backend=None, device=None, strict=False):
         """Evaluate structural scenarios without combining them with nominal data.
 
         Failure probabilities use evaluated scenarios only. Missing bolt models
         and ensembles with no evaluated samples return nullable probabilities.
-        Every attempted scenario retains its ID, factors and completion status.
+        Every attempted scenario retains its ID, factors and completion status. ``backend`` and ``device`` select
+        the structural-response service; an unsupported service or failed lane falls back to the scalar model unless
+        ``strict=True``. With the default CPU-reference backend, the legacy scalar path is preserved.
         """
         if (isinstance(n_iterations, (bool, np.bool_))
                 or not isinstance(n_iterations, Integral) or n_iterations < 1):
             raise ValueError("n_iterations must be a positive integer")
+        if not isinstance(strict, (bool, np.bool_)):
+            raise TypeError("strict must be a boolean")
+        from . import backends
+
+        requested_backend = backend
+        if backend is None:
+            if device is not None:
+                raise ValueError("device requires an explicit backend")
+            chosen = backends.get_backend("cpu-reference")
+        else:
+            chosen = backends.get_backend(backend, device)
         rng = np.random.default_rng(self.random_seed)
         samples, pmax_perturbs = self._sample_parameters(n_iterations, rng)
         peak_pressures, burst_sf_list, governing_sf_list = [], [], []
         bolt_shear_sf_list, bolt_bearing_sf_list = [], []
         records, evaluated_ids = [], []
         failures_casing = failures_burst = failures_bolts = failures_any = 0
+        backend_execution = None
+        if chosen.name == "cpu-reference":
+            scenario_results, scenario_errors = [], []
+            for sample, perturb in zip(samples, pmax_perturbs):
+                result = self._run_single(sample, perturb)
+                scenario_results.append(result)
+                scenario_errors.append(self._last_failure if result is None else None)
+        else:
+            scenario_results, scenario_errors, backend_execution = self._run_structural_batch(
+                samples, pmax_perturbs, chosen, bool(strict)
+            )
         for index, (sample, pmax_perturb) in enumerate(zip(samples, pmax_perturbs)):
             scenario_id = f"structural_sample_{index:06d}"
             record = {
                 "scenario_id": scenario_id,
                 "scenario_factors": {**sample, "perturb_peak_pressure_pa": float(pmax_perturb)},
             }
-            result = self._run_single(sample, pmax_perturb)
+            result = scenario_results[index]
             if result is None:
-                records.append({**record, "status": "failed", "error": self._last_failure})
+                records.append({**record, "status": "failed", "error": scenario_errors[index]})
                 continue
             peak_pressure, structural = result
             records.append({**record, "status": "completed", "peak_pressure_pa": peak_pressure,
@@ -2663,6 +2845,17 @@ class StructuralMonteCarlo:
             ).encode("utf-8")
         )
         provenance["physics_provider_hash"] = hash_digest.hexdigest()
+        if chosen.name != "cpu-reference":
+            from .batch.assemble import kernel_source_hash
+
+            provenance["execution"] = {
+                **chosen.provenance(),
+                "requested_backend": requested_backend,
+                "service": "structural_response",
+                "kernel_source_hash": kernel_source_hash(),
+                "fallback_lanes": backend_execution["fallback_lanes"] if backend_execution else [],
+                "fallback_reason": backend_execution["fallback_reason"] if backend_execution else None,
+            }
         return {
             "robustness_policy_id": "structural_monte_carlo_v1", "result_role": "ensemble",
             "status": "completed" if n_evaluated == n_iterations else "incomplete",

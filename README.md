@@ -100,6 +100,11 @@ as one batch (`simulate_thermal(ThermalBatch.from_objects(...))` is the thermal 
 same steps as scipy's, so the results agree with the scalar ones to 1e-12; on the GPU it runs 36x the scalar model on all
 CPU threads at 4,096 lanes, and the whole advanced physics 5.8x (the models after the thermal one run on the CPU).
 
+`StructuralMonteCarlo.run(100_000, backend="jax", device="cuda:0")` batches the structural evaluation of its sampled
+peak pressures; omitting `backend` preserves its scalar path. `compute_structural_features_vectorized(..., xp=jax.numpy)`
+also keeps its numeric results on the selected JAX device. The W4 benchmark is
+`benchmarks/bench_structural_monte_carlo.py`; general time-varying structural curves are still evaluated on the CPU.
+
 The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are marked `gpu` and skip without a device.
 
 ## Authors
@@ -116,5 +121,4 @@ The slow whole-corpus parity tests run with `pytest --runslow`; GPU tests are ma
 - Erosive burning is neglected
 - BATES grain
 - some others
-
 

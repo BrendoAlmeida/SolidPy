@@ -73,7 +73,8 @@ class ReferenceBackend:
         # the scalar code runs every lane, including custom classes and instance-level overrides
         # the result always carries the full adaptive history, which contains everything "metrics" asks for
         return Capabilities({feature: SUPPORTED for feature in FEATURES + THERMAL_FEATURES},
-                            history_policies=("metrics", "full"), services=("thermal_ablation",))
+                            history_policies=("metrics", "full"),
+                            services=("thermal_ablation", "structural_response"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -130,6 +131,39 @@ class ReferenceBackend:
             if results[i] is None:
                 results[i] = _run_thermal_lane(lane)
         return BatchResult(results, self.name, {**self.provenance(), "service": "thermal_ablation"})
+
+    def structural_response(
+        self, geometry, chamber_pressure_pa, casing_material, casing_strength_factor=1.0, *,
+        bolt_count=0, bolt_diameter_m=0.0, bolt_strength_mpa=0.0,
+        closure_bolts_applicable=True, thermal=None,
+    ):
+        """Evaluate peak-pressure lanes through the scalar structural reference."""
+        import numpy as np
+
+        from ..Multiphysics import simulate_structural_response
+
+        responses = []
+        for pressure in np.asarray(chamber_pressure_pa, dtype=float):
+            curve = {
+                "time_s": np.asarray([0.0, 0.001, 1.0]),
+                "thrust_n": np.zeros(3),
+                "chamber_pressure_pa": np.asarray([0.0, float(pressure), 0.0]),
+            }
+            responses.append(simulate_structural_response(
+                geometry, curve, thermal, casing_material=casing_material,
+                casing_strength_factor=casing_strength_factor, bolt_count=bolt_count,
+                bolt_diameter_m=bolt_diameter_m, bolt_strength_mpa=bolt_strength_mpa,
+                closure_bolts_applicable=closure_bolts_applicable,
+            ))
+        if not responses:
+            return {}
+        result = {}
+        for name in responses[0]:
+            values = [response[name] for response in responses]
+            result[name] = None if values[0] is None else (
+                values[0] if isinstance(values[0], str) else np.asarray(values, dtype=float)
+            )
+        return result
 
     def provenance(self) -> Dict[str, Any]:
         import numpy

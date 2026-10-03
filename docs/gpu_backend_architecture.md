@@ -510,8 +510,8 @@ workloads; **T2** later or CPU-only by design.
 | `AxialFlow` (axial mass flux, diagnostics) | per-grain vector math over history | T0 | batched, memory-bound |
 | `Robustness` (`run_robustness_analysis`, Latin hypercube) | many perturbed copies of one design | T0 | scenarios become extra lanes of one batch; scenario application stays on CPU at pack time; thrust rescale is vector math |
 | `surrogate_physics` (static, structural features, vectorized variants) | NumPy vector code already | T0 | accept `xp=` and run on the device |
-| `Multiphysics.simulate_structural_response` | algebra over time series | T1 | vectorized over lanes and time |
-| `Multiphysics.StructuralMonteCarlo` | many independent samples | T1 | trivially batched once the response is vectorized |
+| `Multiphysics.simulate_structural_response` | algebra over time series | T1 | general transient curves remain scalar; the synthetic peak-pressure history used by `StructuralMonteCarlo` is batched |
+| `Multiphysics.StructuralMonteCarlo` | many independent samples | T1 | W4 peak-pressure scenarios run as lanes on NumPy or JAX; callback sampling and report assembly stay on the host |
 | `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | **done (4b)**: batched Radau IIA(5) with the scipy controller, tridiagonal factorizations, ragged node counts padded (section 14.6) |
 | `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies | T1 | vectorized |
 | `Multiphysics.geometry_from_components` (mass, CG, bulkheads) | vector algebra (vectorized variants exist) | T1 | `xp=` |
@@ -949,9 +949,29 @@ walls up to 18 cells); the whole advanced physics runs 5.8x, limited by the stru
 stay on one CPU core (5.3 ms per lane, 90 % of the batched run).
 
 Not done: those CPU models and the detailed ballistics of the robustness ensembles are now the ceiling of both ensembles and
-share a fix (a process pool or batching them, section 6.4); the structural response and `StructuralMonteCarlo` as vector code (W4);
-`xp=` for `surrogate_physics`; `decimated:N` / `uniform:N` histories. Couplings between the batched thermal code and the scalar
-model, and the 1e-3 quadrature error of the scalar heat load, are in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
+share a fix (a process pool or batching them, section 6.4); the general transient structural response over arbitrary curves;
+`decimated:N` / `uniform:N` histories. W4 peak-pressure sampling and `xp=` for `surrogate_physics` are recorded in section 14.7.
+Couplings between the batched thermal code and the scalar model, and the 1e-3 quadrature error of the scalar heat load, are
+in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
+
+### 14.7 Status after the first W4 structural batch (2026-10-03)
+
+`StructuralMonteCarlo.run(n, backend=...)` now evaluates its synthetic peak-pressure structural responses in one batch on
+`cpu-vectorized` or JAX. With `backend=None`, it keeps the existing scalar code path. The sample callbacks remain on the
+host; a callback failure is recorded against its sample, while unsupported services, malformed outputs and non-finite
+lane metrics fall back to the scalar response unless `strict=True`. Numeric outputs are checked against the scalar schema
+and every metric must have one value per lane. Accelerated reports carry backend/device/version provenance and the batch
+kernel source hash without changing `physics_provider_hash` across backends.
+
+Parity tests cover steel and composite cases, configured/unavailable bolts, optional thermal service metrics, callback
+failures, backend fallback and the scalar reference. Optional JAX CPU and GPU tests are present. The W4 harness is
+`benchmarks/bench_structural_monte_carlo.py` (100,000 samples per design by default); a 100,000-sample GPU result is
+still pending because the current verification host has no working NVIDIA driver or installed JAX package.
+
+This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `StructuralMonteCarlo`. General
+`simulate_structural_response` curves, including time-varying thrust and lane-specific geometry, remain CPU work, as do
+the post-thermal CFD, ignition and flight proxies and detailed-ballistics post-processing. The vectorized static
+surrogate API now accepts `xp=`; its JAX numerical kernel is separately JIT-tested when the optional dependency exists.
 
 ## Appendix A. State vector and padded batch schema
 

@@ -33,7 +33,8 @@ class Capabilities:
 
     ``features`` maps a lane feature name to ``"supported"``, ``"partial"`` or ``"unsupported"``. A feature
     that is not listed is unsupported: the router never assumes support (design principle 3). ``services`` lists
-    the optional Tier 1 services the backend implements besides ``solve_burn`` (``"thermal_ablation"``).
+    the optional Tier 1 services the backend implements besides ``solve_burn`` (currently ``"thermal_ablation"``
+    and ``"structural_response"``).
     """
 
     features: Mapping[str, str] = field(default_factory=dict)
@@ -121,5 +122,6 @@ class Backend(Protocol):
 
     # Optional Tier 1 services, advertised in ``Capabilities.services``:
     #   def thermal_ablation(self, batch: ThermalBatch, options: SolveOptions) -> BatchResult
+    #   def structural_response(self, geometry, chamber_pressure_pa, casing_material, ...) -> Mapping[str, Any]
 
     def provenance(self) -> Dict[str, Any]: ...

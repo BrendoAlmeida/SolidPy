@@ -231,9 +231,27 @@ What the numbers say:
 
 ## Not covered yet
 
-The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, the structural response and
-`StructuralMonteCarlo` as vector code, spreading the CPU post-processing (detailed ballistics, the proxies after the thermal
-ablation) over cores, and a data-center GPU. All numbers are for one machine; they say nothing about other devices.
+The `uniform:N` and `decimated:N` history policies, the CPU+GPU executor, multi-GPU, general transient structural
+responses (W4's synthetic peak-pressure path is implemented), spreading the CPU post-processing (detailed ballistics,
+the proxies after the thermal ablation) over cores, and a data-center GPU. W4's 100,000-sample harness is
+`benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain pending. All measured numbers are for one machine;
+they say nothing about other devices.
+
+## Structural Monte Carlo (W4)
+
+Measured on 2026-10-03 on the Ryzen 5 3600 host above, with one design and 100,000 peak-pressure samples. The numbers
+include host sampling and assembly of the full `StructuralMonteCarlo` report. This host has no working NVIDIA driver or
+JAX installation, so the comparison is the scalar reference and NumPy vectorization on one process:
+
+| Path | Samples | First call | Samples/s | Fallback lanes |
+|---|---:|---:|---:|---:|
+| CPU scalar reference | 100,000 | 14.43 s | 6,932 | 0 |
+| CPU vectorized | 100,000 | 5.16 s | 19,398 | 0 |
+
+The NumPy path is 2.8x faster in this single-process measurement. It does not establish a GPU speedup or compare against
+the scalar model spread over all CPU cores. Raw results are in `benchmarks/results/w4_cpu_reference_100k.json` and
+`benchmarks/results/w4_cpu_vectorized_100k.json`; the GPU and four-design run remain to be measured on an available JAX
+CUDA host.
 
 ## Reproducing
 
@@ -250,6 +268,13 @@ Robustness ensembles (W3):
 python benchmarks/bench_robustness.py --backend cpu-scalar --workers 12,6 --designs 36 --out benchmarks/results/w3_cpu_scalar.json
 python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0.json
 python tools/profile_workloads.py --out benchmarks/results/offloaded_share.json
+```
+
+Structural Monte Carlo (W4):
+
+```
+python benchmarks/bench_structural_monte_carlo.py --backend cpu-reference --iterations 100000 --designs 4 --out benchmarks/results/w4_cpu_reference.json
+python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --out benchmarks/results/w4_jax_cuda0.json
 ```
 
 Thermal ablation (phase 4b):
