@@ -86,14 +86,28 @@ def test_chunking_and_sorting_keep_every_result_in_its_lane(batch):
         assert other["status"]["termination_reason"] == one["status"]["termination_reason"]
 
 
-def test_history_and_step_limits_reach_the_backend(batch):
+def test_history_reaches_the_backend_and_a_full_history_runs_in_one_uncapped_solve(batch):
     lanes = batch.select([0])
 
-    full = simulate_burn(lanes, backend="cpu-vectorized", history="full", max_steps=900).to_results()[0]
-    short = simulate_burn(lanes, backend="cpu-vectorized", max_steps=20).to_results()[0]
+    full = simulate_burn(lanes, backend="cpu-vectorized", history="full", max_steps=900)
 
-    assert full["history"]["time_s"][0] == 0.0 and len(full["history"]["time_s"]) > 20
-    assert short["history"] is None and short["provenance"]["execution"]["step_overflow"] is True
+    assert full.to_results()[0]["history"]["time_s"][0] == 0.0 and len(full.to_results()[0]["history"]["time_s"]) > 20
+    assert full.execution["tiers"] == [[(None, 1, 0)]]  # a full history is for inspection: no capped tiers
+
+
+def test_a_lane_that_exhausts_the_step_budget_is_rerun_on_the_reference_and_flagged(batch, scalar):
+    lanes = batch.select([0, 2])
+
+    result = simulate_burn(lanes, backend="cpu-vectorized", max_steps=20)
+
+    assert result.execution["fallback_lanes"] == [0, 1]
+    for lane, got in zip((0, 2), result.to_results()):
+        execution = got["provenance"]["execution"]
+        assert execution["backend"] == "cpu-reference" and execution["requested_backend"] == "cpu-vectorized"
+        assert execution["fallback"] == {"lane_reason": ["step_overflow"], "ran_on": "cpu-reference"}
+        assert got["status"]["completed"] and got["metrics"] == scalar[lane]["metrics"]  # the reference result
+    direct = backends.get_backend("cpu-vectorized").solve_burn(lanes, backends.SolveOptions(max_steps=20))
+    assert all(r["provenance"]["execution"]["step_overflow"] for r in direct.to_results())  # the backend alone fails them
 
 
 def test_auto_picks_the_reference_when_no_accelerator_is_usable(batch):
@@ -128,3 +142,65 @@ def test_lanes_without_a_power_law_burn_rate_sort_last():
     cost = lane_cost(lanes)
 
     assert cost[0] == np.finfo(float).max and cost[1] < cost[0]
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.5, True])
+def test_a_chunk_size_that_is_not_a_positive_integer_is_an_error(batch, bad):
+    with pytest.raises(ValueError, match="chunk_size must be a positive integer or None"):
+        simulate_burn(batch.select([0]), backend="cpu-vectorized", chunk_size=bad)
+
+
+def test_sorting_is_skipped_when_one_chunk_holds_every_lane(batch, monkeypatch):
+    from solidpy import ensemble
+
+    def refuse(_):
+        raise AssertionError("lane_cost must not run for a single chunk")
+
+    monkeypatch.setattr(ensemble, "lane_cost", refuse)
+
+    result = simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized")
+
+    assert result.execution["chunks"] == 1
+    with pytest.raises(AssertionError, match="must not run"):
+        simulate_burn(batch.select(SUPPORTED_LANES), backend="cpu-vectorized", chunk_size=1)
+
+
+class FakeAccelerator:
+    name = "fake-gpu"
+    api_version = backends.BACKEND_API_VERSION
+
+    def __init__(self, device=None):
+        self.device = device or "cuda:0"
+
+    def capabilities(self):
+        return backends.get_backend("cpu-vectorized").capabilities()
+
+    def devices(self):
+        return ["cuda:0"]
+
+    def solve_burn(self, batch, options):
+        return backends.get_backend("cpu-vectorized").solve_burn(batch, options)
+
+    def provenance(self):
+        return {"backend": self.name}
+
+
+def test_auto_counts_only_the_lanes_the_accelerator_can_run_and_records_what_was_asked(batch, monkeypatch):
+    from solidpy import ensemble
+
+    backends.register_backend("fake-gpu", FakeAccelerator, replace=True)
+    monkeypatch.setattr(ensemble, "AUTO_ACCELERATORS", ("fake-gpu",))
+    monkeypatch.setattr(ensemble, "AUTO_MIN_LANES", 4)
+    try:
+        enough = batch.select([0, 2, 4, 0])
+        too_few = batch.select([0, 1, 3, 4])  # two of the four lanes need the reference
+
+        assert ensemble._auto_backend(enough) == "fake-gpu"
+        assert ensemble._auto_backend(too_few) == "cpu-reference"
+        result = simulate_burn(enough, backend="auto")
+        assert result.execution["requested_backend"] == "auto" and result.execution["effective_backend"] == "fake-gpu"
+        assert {r["provenance"]["execution"]["requested_backend"] for r in result.to_results()} == {"auto"}
+        # an explicit device does not break a choice of the reference
+        assert simulate_burn(batch.select([0]), backend="auto", device="cuda:0").backend == "cpu-reference"
+    finally:
+        backends.unregister_backend("fake-gpu")

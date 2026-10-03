@@ -20,6 +20,7 @@ import numpy as np
 
 from . import backends
 from .backends import SolveOptions, UnsupportedLane
+from .backends._protocol import refused_lanes, unsupported_lane_error
 from .batch import ProblemBatch
 from .batch.result import BatchResult
 
@@ -39,13 +40,13 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
     describe (NaN burn rate) sort last.
     """
     a = batch.arrays
-    cstar = np.sqrt(a["gas_constant"] * a["source_temperature"] / a["gamma"]) * (
-        (a["gamma"] + 1.0) / 2.0
-    ) ** ((a["gamma"] + 1.0) / (2.0 * (a["gamma"] - 1.0)))
-    burning_area = (np.where(a["grain_valid"], np.pi * (a["outer_radius"] ** 2 - a["inner_radius0"] ** 2), 0.0)).sum(axis=1)
-    kn = np.maximum(burning_area, 1e-12) / a["throat_area"]
-    n = a["burn_rate_n"]
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"):  # lanes the kernels cannot describe have NaN inputs
+        cstar = np.sqrt(a["gas_constant"] * a["source_temperature"] / a["gamma"]) * (
+            (a["gamma"] + 1.0) / 2.0
+        ) ** ((a["gamma"] + 1.0) / (2.0 * (a["gamma"] - 1.0)))
+        burning_area = np.where(a["grain_valid"], np.pi * (a["outer_radius"] ** 2 - a["inner_radius0"] ** 2), 0.0).sum(axis=1)
+        kn = np.maximum(burning_area, 1e-12) / a["throat_area"]
+        n = a["burn_rate_n"]
         pressure = (a["density"] * a["burn_rate_a"] * (1e-6) ** n * kn * cstar / (1000.0 * a["discharge_coefficient"])) ** (
             1.0 / (1.0 - n)
         )
@@ -56,21 +57,23 @@ def lane_cost(batch: ProblemBatch) -> np.ndarray:
 
 
 def _auto_backend(batch: ProblemBatch) -> str:
-    """An accelerator when one is usable and the batch is large enough to amortise it, else the reference."""
-    if len(batch) >= AUTO_MIN_LANES:
-        status = backends.available()
-        for name in AUTO_ACCELERATORS:
-            if status.get(name) == "ok":
-                try:
-                    if any(not d.startswith("cpu") for d in backends.get_backend(name).devices()):
-                        return name
-                except ImportError:
-                    continue
+    """An accelerator when one is usable and enough lanes can run on it to amortise it, else the reference."""
+    status = backends.available()
+    for name in AUTO_ACCELERATORS:
+        if status.get(name) != "ok":
+            continue
+        try:
+            accelerator = backends.get_backend(name)
+            usable = any(not d.startswith("cpu") for d in accelerator.devices())
+        except ImportError:
+            continue
+        if usable and len(batch) - len(refused_lanes(batch, accelerator.capabilities())) >= AUTO_MIN_LANES:
+            return name
     return "cpu-reference"
 
 
 def _chunks(order: np.ndarray, chunk_size: Optional[int]) -> List[np.ndarray]:
-    if not chunk_size or chunk_size >= len(order):
+    if chunk_size is None or chunk_size >= len(order):
         return [order]
     return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
 
@@ -93,53 +96,65 @@ def simulate_burn(
     ``backend`` is a backend name, ``"auto"``, or ``None`` for the one selected with ``set_backend``,
     ``use_backend`` or the environment (default ``"cpu-reference"``). ``history`` is ``"metrics"`` or ``"full"``.
     ``chunk_size`` bounds how many lanes one solve holds (memory); ``sort`` groups lanes of similar estimated
-    cost into the same chunk, which matters when lanes need very different numbers of steps. ``tiers`` are the
+    cost into the same chunk, which matters when lanes need very different numbers of steps (and is skipped when
+    one chunk holds every lane). A lane that exhausts the step budget of a batched backend is rerun on the
+    reference and flagged ``step_overflow`` in ``provenance["execution"]["fallback"]``. ``tiers`` are the
     iteration caps a batched backend runs before its uncapped tier (``None``: ``batch.tiers.DEFAULT_TIERS``,
     ``()``: one uncapped solve); see ``solidpy.batch.tiers``.
     """
     if not isinstance(batch, ProblemBatch):
         raise TypeError("simulate_burn needs a ProblemBatch; build one with ProblemBatch.from_objects")
+    if chunk_size is not None and (isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1):
+        raise ValueError(f"chunk_size must be a positive integer or None, got {chunk_size!r}")
+    requested = backend
     if backend == "auto":
         backend = _auto_backend(batch)
+        if device is not None and backend == "cpu-reference":
+            device = None  # "auto" chose the reference, which has no other device
     if backend is None:
         backend, selected_device = backends.current_backend()
+        requested = backend
         device = device if device is not None else selected_device
     chosen = backends.get_backend(backend, device)
     options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
 
-    missing = batch.unsupported(chosen.capabilities())
-    refused = {lane: features for lane, features in enumerate(missing) if features}
+    refused = refused_lanes(batch, chosen.capabilities())
     if refused and strict:
-        raise UnsupportedLane(
-            f"backend {backend!r} cannot run lane(s) "
-            + "; ".join(f"{lane}: {', '.join(features)}" for lane, features in refused.items())
-        )
+        raise unsupported_lane_error(backend, refused)
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(batch)
     supported = np.asarray([lane for lane in range(len(batch)) if lane not in refused], dtype=int)
     chunks: List[np.ndarray] = []
     tier_log: List[Any] = []
     if len(supported):
-        order = supported[np.argsort(lane_cost(batch.select(supported)), kind="stable")] if sort else supported
+        # sorting only matters when there are several chunks to fill; one chunk holds every lane whatever the order
+        several = chunk_size is not None and chunk_size < len(supported)
+        order = supported[np.argsort(lane_cost(batch.select(supported)), kind="stable")] if sort and several else supported
         chunks = _chunks(order, chunk_size)
         for chunk in chunks:
             outcome = chosen.solve_burn(batch.select(chunk), options)
             tier_log.append(outcome.execution.get("tiers"))
             for lane, result in zip(chunk, outcome.to_results()):
                 results[int(lane)] = result
-    if refused:
+    reasons: Dict[int, List[str]] = {lane: list(features) for lane, features in refused.items()}
+    if backend != "cpu-reference":
+        # a lane that ran out of its step budget is a failure of the budget, not of the physics: rerun it on the reference
+        for lane, result in enumerate(results):
+            if result is not None and result["provenance"]["execution"].get("step_overflow"):
+                reasons[lane] = ["step_overflow"]
+    if reasons:
         reference = backends.get_backend("cpu-reference")
-        lanes = np.asarray(sorted(refused), dtype=int)
+        lanes = np.asarray(sorted(reasons), dtype=int)
         solved = reference.solve_burn(batch.select(lanes), options).to_results()
         for lane, result in zip(lanes, solved):
             execution = dict(reference.provenance())
-            execution["fallback"] = {"lane_reason": list(refused[int(lane)]), "ran_on": "cpu-reference"}
+            execution["fallback"] = {"lane_reason": reasons[int(lane)], "ran_on": "cpu-reference"}
             result["provenance"]["execution"] = execution
             results[int(lane)] = result
     if backend != "cpu-reference":
         for result in results:
-            result["provenance"]["execution"]["requested_backend"] = backend
+            result["provenance"]["execution"]["requested_backend"] = requested
 
-    summary = {"requested_backend": backend, "lanes": len(batch), "fallback_lanes": sorted(int(i) for i in refused),
-               "chunks": len(chunks), "tiers": tier_log}
+    summary = {"requested_backend": requested, "effective_backend": backend, "lanes": len(batch),
+               "fallback_lanes": sorted(int(i) for i in reasons), "chunks": len(chunks), "tiers": tier_log}
     return BatchResult(results, backend, summary)
