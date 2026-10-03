@@ -5,7 +5,8 @@ import golden_corpus as gc
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch
 from solidpy.batch import problem as pb
-from solidpy.batch.kernels import geometry
+from solidpy import Burn
+from solidpy.batch.kernels import geometry, nozzle, propellant
 
 RTOL = tol.KERNEL_RTOL_NUMPY
 
@@ -123,3 +124,138 @@ def test_the_packed_inputs_of_the_geometry_match_the_grain_attributes(lanes):
             assert a["is_star"][lane, slot] == (grain.geometry == "star")
             assert a["burnout_depth"][lane, slot] == grain.burnout_regression_m
     assert pb.UNKNOWN_GEOMETRY not in set().union(*batch.lane_features)
+
+
+def lane_view(P):
+    """Lane arrays as ``[B, 1]`` so they broadcast against ``[B, S]`` samples."""
+    return {name: array[:, None] if array.ndim == 1 else array for name, array in P.items()}
+
+
+def scalar_burn(batch, lane):
+    settings = batch.settings[lane]
+    return Burn(
+        batch.motors[lane].grains[0], batch.motors[lane], batch.propellants[lane], batch.environments[lane],
+        eta_c=settings["eta_c"], eta_Cf=settings["eta_Cf"], discharge_coefficient=settings["discharge_coefficient"],
+    )
+
+
+def pressure_samples(a):
+    """Chamber pressures around ambient, the choking boundary and far above it, shape ``[B, S]``."""
+    ambient, k = a["ambient_pressure"][:, None], a["gamma"][:, None]
+    boundary = ambient / nozzle.critical_pressure_ratio(np, k)
+    return np.concatenate(
+        [
+            0.3 * ambient, ambient * (1 - 1e-12), ambient, ambient * (1 + 1e-9), 1.1 * ambient,
+            0.5 * (ambient + boundary), boundary * (1 - 1e-9), boundary, boundary * (1 + 1e-9),
+            3 * boundary, 10 * boundary, 40 * boundary, 100 * boundary, np.full_like(ambient, 1e8),
+        ],
+        axis=1,
+    )
+
+
+def test_nozzle_flow_and_thrust_match_burn_at_the_choking_boundary_and_below_ambient(lanes):
+    cases, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.THERMO_SCALAR in f]
+    sub = batch.select(keep)
+    V = lane_view(sub.namespace(np))
+    pressure = pressure_samples(sub.arrays)
+    temperature = sub.arrays["source_temperature"][:, None] * np.random.default_rng(7).uniform(0.3, 1.05, pressure.shape)
+
+    k = V["gamma"]
+    flow = nozzle.nozzle_mass_flow(np, pressure, temperature, k, V)
+    ideal, momentum, pressure_thrust, total = nozzle.thrust_components(np, pressure, temperature, flow, k, V["exit_mach"], V)
+
+    for row, lane in enumerate(keep):
+        burn = scalar_burn(batch, lane)
+        for s in range(pressure.shape[1]):
+            p, t = pressure[row, s], temperature[row, s]
+            where = f"{cases[lane]['id']} pressure {p!r}"
+            scalar = burn.evaluate_thrust_components(p, chamber_temperature=t)
+            close(flow[row, s], burn.evaluate_nozzle_mass_flow(p, chamber_temperature=t), "mass flow " + where)
+            close(ideal[row, s], scalar["momentum_ideal_n"], "ideal momentum " + where)
+            close(momentum[row, s], scalar["momentum_n"], "momentum " + where)
+            # pressure thrust is (p_exit - p_ambient) * A_e: a cancellation when the flow is barely choked
+            close(pressure_thrust[row, s], scalar["pressure_n"], "pressure thrust " + where,
+                  scale=p * sub.arrays["exit_area"][row])
+            close(total[row, s], scalar["total_n"], "total thrust " + where,
+                  scale=p * sub.arrays["exit_area"][row])
+
+
+def test_no_flow_and_no_thrust_at_or_below_ambient_pressure(lanes):
+    _, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.THERMO_SCALAR in f]
+    sub = batch.select(keep)
+    V = lane_view(sub.namespace(np))
+    ambient = sub.arrays["ambient_pressure"][:, None]
+    pressure = ambient * np.array([[0.0, 0.5, 1.0 - 1e-12, 1.0]])
+    temperature = np.full_like(pressure, 2000.0)
+
+    flow = nozzle.nozzle_mass_flow(np, pressure, temperature, V["gamma"], V)
+    parts = nozzle.thrust_components(np, pressure, temperature, flow, V["gamma"], V["exit_mach"], V)
+
+    assert not flow.any()
+    assert all(not part.any() for part in parts)
+    assert all(np.isfinite(part).all() for part in parts)
+
+
+def test_choked_and_unchoked_flow_are_continuous_at_the_boundary(lanes):
+    _, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.THERMO_SCALAR in f]
+    sub = batch.select(keep)
+    V = lane_view(sub.namespace(np))
+    k = V["gamma"]
+    boundary = sub.arrays["ambient_pressure"][:, None] / nozzle.critical_pressure_ratio(np, k)
+    temperature = np.full_like(boundary, 2500.0)
+
+    below = nozzle.nozzle_mass_flow(np, boundary * (1 - 1e-9), temperature, k, V)
+    above = nozzle.nozzle_mass_flow(np, boundary * (1 + 1e-9), temperature, k, V)
+
+    np.testing.assert_allclose(below, above, rtol=1e-8)
+
+
+def test_burn_rate_matches_the_propellant_with_and_without_the_erosive_term(lanes):
+    cases, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.BURN_RATE_POWER_LAW in f]
+    sub = batch.select(keep)
+    V = lane_view(sub.namespace(np))
+    pressures = np.array([-5e5, 0.0, 1e5, 1e6, 3.3e6, 8e6, 2e7])
+    fluxes = np.array([0.0, 5e-4, 1e-3, 1.0000001e-3, 0.5, 20.0, 300.0, 5e3])
+    p = np.repeat(pressures, len(fluxes))[None, :].repeat(len(keep), axis=0)
+    g = np.tile(fluxes, len(pressures))[None, :].repeat(len(keep), axis=0)
+
+    rate = propellant.burn_rate(np, p, g, V)
+
+    erosive_lanes = 0
+    for row, lane in enumerate(keep):
+        scalar = batch.propellants[lane]
+        erosive_lanes += pb.EROSIVE_BURNING in batch.lane_features[lane]
+        for s in range(p.shape[1]):
+            close(rate[row, s], scalar.evaluate_burn_rate(p[row, s], g[row, s]),
+                  f"burn rate {cases[lane]['id']} pressure {p[row, s]!r} flux {g[row, s]!r}")
+    assert erosive_lanes >= 10
+
+
+def test_the_erosive_term_switches_on_only_above_the_flux_threshold(lanes):
+    _, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.EROSIVE_BURNING in f]
+    V = lane_view(batch.select(keep).namespace(np))
+    pressure = np.full((len(keep), 1), 3e6)
+
+    plain = propellant.burn_rate(np, pressure, np.full_like(pressure, 1e-3), V)
+    eroded = propellant.burn_rate(np, pressure, np.full_like(pressure, 300.0), V)
+    base = propellant.burn_rate(np, pressure, np.zeros_like(pressure), V)
+
+    np.testing.assert_array_equal(plain, base)  # G = 1e-3 is not above the threshold
+    assert (eroded > base).all()
+
+
+def test_scalar_thermochemistry_gives_the_lane_constants(lanes):
+    _, batch = lanes
+    keep = [i for i, f in enumerate(batch.lane_features) if pb.THERMO_SCALAR in f]
+    sub = batch.select(keep)
+    V = lane_view(sub.namespace(np))
+
+    source_temperature, k = propellant.gas_properties(np, np.full((len(keep), 3), 2e6), V)
+
+    np.testing.assert_array_equal(source_temperature[:, 0], sub.arrays["source_temperature"])
+    np.testing.assert_array_equal(k[:, 0], sub.arrays["gamma"])
