@@ -321,6 +321,8 @@ def run_robustness_analysis(
     (``solidpy.ensemble.run_robustness_ensemble``), and ``device`` and ``workers`` go to that backend. A single design
     is only about 27 lanes, so a GPU backend pays off for many designs at once: use ``run_robustness_ensemble``.
     """
+    if backend is None and (device is not None or workers is not None):
+        raise ValueError("device and workers apply to a batch backend: pass backend= as well")
     if backend is not None:
         from .ensemble import run_robustness_ensemble
 

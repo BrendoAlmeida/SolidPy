@@ -174,7 +174,8 @@ def test_dropping_the_series_keeps_every_scalar_output_and_the_statistics():
     assert slim["summary"] == full["summary"] and slim["status"] == full["status"]
     assert slim["provenance"] == full["provenance"] and slim["scenario_ids"] == full["scenario_ids"]
     for a, b in zip([slim["nominal"]] + slim["scenarios"], [full["nominal"]] + full["scenarios"]):
-        assert set(a) <= set(ensemble._SCALAR_KEYS) and "thrust_n" not in a and "canonical_result" not in a
+        assert not any(isinstance(v, np.ndarray) for v in a.values()) and "canonical_result" not in a
+        assert "simulation" not in a and a["interpolation"] == b["interpolation"]  # small mappings are kept
         assert a["summary"] == b["summary"] and a["status"] == b["status"] and a["scenario_id"] == b["scenario_id"]
         assert a.get("valid") == b.get("valid") and a.get("scenario_factors") == b.get("scenario_factors")
         assert a["provenance"]["physics_provider_hash"] == b["provenance"]["physics_provider_hash"]
@@ -217,6 +218,9 @@ def test_lanes_the_backend_cannot_run_fall_back_to_the_reference_and_strict_refu
     for got, want in zip([report["nominal"]] + report["scenarios"], [expected["nominal"]] + expected["scenarios"]):
         assert got["canonical_result"]["provenance"]["execution"]["fallback"]["ran_on"] == "cpu-reference"
         assert got["summary"] == want["summary"]
+    factors = [r["canonical_result"]["provenance"]["execution"]["scenario_inputs"]["burn_rate_factor"]
+               for r in [report["nominal"]] + report["scenarios"]]
+    assert factors == [1.0, pytest.approx(0.94), 1.0]  # the reference lanes record the factor they ran with too
     with pytest.raises(backends.UnsupportedLane, match="igniter_callable"):
         run_robustness_ensemble([design], backend="cpu-vectorized", strict=True, **options, **sources)
 
@@ -254,6 +258,19 @@ def test_a_missing_dry_hardware_is_refused_before_anything_is_solved(design, mon
 def test_invalid_arguments_are_refused(designs, kwargs, error):
     with pytest.raises(ValueError, match=error):
         run_robustness_ensemble(designs, backend="cpu-vectorized", **kwargs)
+
+
+def test_device_and_workers_need_a_backend(design):
+    for argument in ({"device": "cuda:0"}, {"workers": 4}):
+        with pytest.raises(ValueError, match="pass backend= as well"):
+            run_robustness_analysis(*design, scenarios=[], **argument)
+
+
+def test_a_design_is_never_split_across_chunks():
+    one = run_robustness_ensemble([make_motor_stack()], scenarios=scenarios()[:3], max_step_size=0.03, max_time_points=200,
+                                  backend="cpu-vectorized", chunk_lanes=2)  # a design is 4 lanes, more than the limit
+
+    assert len(one) == 1 and len(one[0]["scenarios"]) == 3
 
 
 def test_no_designs_give_no_reports():

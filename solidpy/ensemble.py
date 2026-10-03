@@ -176,6 +176,7 @@ def simulate_burn(
         for lane, result in zip(lanes, solved):
             execution = dict(reference.provenance())
             execution["fallback"] = {"lane_reason": reasons[int(lane)], "ran_on": "cpu-reference"}
+            execution["scenario_inputs"] = {"burn_rate_factor": float(batch.arrays["burn_rate_factor"][int(lane)])}
             result.setdefault("provenance", {})["execution"] = execution
             results[int(lane)] = result
     if backend != "cpu-reference":
@@ -187,9 +188,8 @@ def simulate_burn(
     return BatchResult(results, backend, summary)
 
 
-#: What a lane keeps with ``keep_series=False``: the scalar outputs and the identification of the scenario.
-_SCALAR_KEYS = ("summary", "status", "provenance", "schema_version", "gamma", "scenario_id", "scenario_kind",
-                "scenario_factors", "valid")
+#: What a lane drops with ``keep_series=False``, besides every array: the canonical history and the simulation view.
+_HEAVY_KEYS = ("canonical_result", "simulation")
 
 #: Arguments of ``run_detailed_ballistics`` that shape its post-processing and not the burn.
 _DETAIL_ARGUMENTS = ("resample_step", "nozzle_ablation_scale", "ablation_pressure_exponent", "ablation_mass_flow_exponent")
@@ -235,15 +235,20 @@ def run_robustness_ensemble(
     The burns run on ``backend`` (a name, ``"auto"``, or ``None`` for the selected one; see ``simulate_burn``) with
     the full history; the detailed ballistics of every lane is then built on the CPU from the lane's result, so the
     reports are what the scalar path gives within the numerical tolerances of ``solidpy.backends._tolerances``.
-    ``chunk_lanes`` bounds how many lanes are solved and held at once. Invalid inputs raise when the batch is packed,
+    Invalid inputs raise when the batch is packed,
     before any burn is solved; the scalar path raises as it reaches them. A dict passed as ``timings`` receives the
     seconds spent packing (``pack_s``), solving (``solve_s``), building the detailed ballistics (``postprocess_s``) and
     assembling the reports (``report_s``).
 
     Every lane of a report holds its full series and canonical history, about 200 kB each for a four-grain design, as
     the scalar path's does.
-    For thousands of lanes pass ``keep_series=False``: each lane then keeps only ``summary``, ``status``, ``provenance``
-    and the scenario fields (and ``valid``), and the report, its statistics and its validity ratio are unchanged.
+    For thousands of lanes pass ``keep_series=False``: each lane then drops every array, its canonical history and its
+    simulation view and keeps its scalar outputs (``summary``, ``status``, ``provenance``, the scenario fields,
+    ``valid``), and the report, its statistics and its validity ratio are unchanged.
+
+    ``chunk_lanes`` is the most lanes a launch holds, except that a design is never split: a chunk is at least one design
+    (27 lanes with the defaults, more with many Latin-hypercube samples). ``workers`` is the process count of the
+    ``cpu-reference`` backend; the detailed ballistics of the lanes is built serially in this process.
     """
     from .batch.simulation_view import SimulationView
     from .DetailedBallistics import _validate_dry_hardware, build_detailed_ballistics
@@ -314,7 +319,8 @@ def run_robustness_ensemble(
                 result["scenario_kind"] = "nominal"
             else:
                 _finish_scenario_result(result, scenario, validator)
-            results.append(result if keep_series else {key: result[key] for key in _SCALAR_KEYS if key in result})
+            results.append(result if keep_series else {key: value for key, value in result.items()
+                                                       if key not in _HEAVY_KEYS and not isinstance(value, np.ndarray)})
         clock["postprocess_s"] += time.perf_counter() - mark
         mark = time.perf_counter()
         for design in range(len(chunk)):
