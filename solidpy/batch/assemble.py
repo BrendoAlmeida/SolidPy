@@ -295,7 +295,8 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
         numerical_completed = reason == "completed"
         if not scalar:
             reason = "unsupported_thermochemistry"
-        stage_two = bool(out["burned_out"][lane]) and bool(tail_off[lane])
+        # the scalar code sets the cutoff once the source-only stage has succeeded, even if the blowdown then fails
+        stage_two = bool(out["burned_out"][lane]) and bool(tail_off[lane]) and bool(out["source_ok"][lane])
         row = {name: array[lane] for name, array in a.items() if array.ndim == 1}
         motor, propellant, environment = batch.motors[lane], batch.propellants[lane], batch.environments[lane]
         settings = batch.settings[lane]

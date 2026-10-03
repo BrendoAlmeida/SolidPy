@@ -11,6 +11,7 @@ from solidpy import backends, evaluate_numerical_acceptance
 from solidpy.backends import SolveOptions, UnsupportedLane
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch, assemble
+from solidpy.batch.integrators import solver
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 LIVE_FAMILIES = ("tubular", "star", "ends-star", "mixed", "erosive", "efficiency", "lowkn", "replicated")
@@ -234,6 +235,22 @@ def test_the_tail_off_can_be_omitted_per_lane(corpus_cases):
         assert got["status"]["blowdown_cutoff_pressure_pa"] is None
         assert got["metrics"]["total_impulse_ns"] == pytest.approx(stored["metrics"]["total_impulse_ns"], rel=tol.INTEGRAL_RTOL)
     assert results[-1]["status"]["termination_reason"] == "completed"  # a lane that does run the blowdown
+
+
+def test_the_cutoff_is_reported_when_the_blowdown_fails_but_not_when_the_source_only_stage_does(corpus_cases):
+    by_id, _ = corpus_cases
+    batch = pack([by_id["tubular-000"]])
+    out = solver.solve_burn_and_blowdown(solver.numpy_driver(), batch.namespace(np), batch.initial_state())
+    blowdown_failed = dict(out, tail_ok=np.array([False]))
+    sources_failed = dict(out, tail_ok=np.array([False]), source_ok=np.array([False]))
+
+    ok, late, early = (assemble.assemble(batch, o)[0]["status"] for o in (out, blowdown_failed, sources_failed))
+
+    assert ok["blowdown_cutoff_pressure_pa"] == pytest.approx(float(out["cutoff"][0])) and ok["termination_reason"] == "completed"
+    assert late["termination_reason"] == early["termination_reason"] == "solver_failure"
+    assert late["blowdown_cutoff_pressure_pa"] == ok["blowdown_cutoff_pressure_pa"]  # as BurnSimulation sets it
+    assert late["blowdown_reference_peak_pressure_pa"] == ok["blowdown_reference_peak_pressure_pa"]
+    assert early["blowdown_cutoff_pressure_pa"] is None and early["blowdown_reference_peak_pressure_pa"] is None
 
 
 def test_a_lane_that_runs_out_of_points_is_a_solver_failure_flagged_in_the_provenance(corpus_cases):

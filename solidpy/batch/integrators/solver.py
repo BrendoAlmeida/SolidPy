@@ -401,7 +401,7 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
         "pmax": tail["pmax"], "tmax": tail["tmax"], "gmax": tail["gmax"], "nmax": tail["nmax"],
         "gen_start": tail["gen_start"], "gen_end": tail["gen_end"], "noz_start": tail["noz_start"],
         "noz_end": tail["noz_end"], "burn_t": burn["burn_t"], "burn_ok": burn["ok"], "burned_out": burned_out,
-        "tail_ok": tail["ok"], "reached_cutoff": tail["reached_cutoff"], "cutoff": cutoff, "peak_burn": peak_burn,
+        "source_ok": sources["ok"], "tail_ok": tail["ok"], "reached_cutoff": tail["reached_cutoff"], "cutoff": cutoff, "peak_burn": peak_burn,
         "overflow": tail["overflow"], "burn_end": burn["t"], "burn_iterations": burn["iterations"],
         "tail_iterations": tail["iterations"], "source_iterations": sources["iterations"],
         "unfinished": ~burn["done"] | ~sources["done"] | ~tail["done"],
