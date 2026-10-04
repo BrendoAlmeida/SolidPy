@@ -481,6 +481,39 @@ python benchmarks/bench_structural_monte_carlo.py --backend cpu-vectorized --ite
 XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 3 --out benchmarks/results/w4_jax_cuda0_100k_4designs_post_validation.json
 ```
 
+## Flight dispersion (W5; CPU reference, reported and non-gating)
+
+Measured on 2026-10-04 with `benchmarks/bench_flight_dispersion.py`. The benchmark exercises the public
+`DispersionAnalysis.run` and `simulate_flight_3dof` APIs with 16 sampled flights. It builds a four-grain KNSB
+burn using `BurnSimulation`, derives a complete `MotorGeometry` with `geometry_from_components`, and passes
+the burn's time, thrust and grain-regression histories to each flight. Remaining propellant mass is calculated
+from those regression histories. Samples vary launch angle, azimuth, wind speed and direction, and drag factor.
+Impact points come from the flight reports' `landing_*` fields; the separate `trajectory` arrays cover powered
+flight and are checked for consistent shapes and finite values.
+
+The run used 12 CPU process workers and returned 16 finite flights. Campaign timing includes process-pool
+startup, flight simulation and report assembly; preparation of the shared burn took 0.350716752 s separately.
+The fixed seed reproduced identical impact coordinates across campaigns:
+
+| Measure | Time / throughput |
+|---|---:|
+| First call | 2.02 s |
+| Repeat 1 | 2.11 s |
+| Repeat 2 | 2.34 s |
+| Median repeat | 2.22 s |
+| Throughput at median repeat | 7.20 flights/s |
+
+W5 remains a T2 CPU workload and is reported, not gating. This CPU reference measurement does not implement or
+measure GPU flight execution and does not demonstrate a GPU speedup. The raw result, including machine metadata,
+sampled inputs and impact coordinates, is in
+`benchmarks/results/w5_cpu_reference_flight_dispersion.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_flight_dispersion.py --samples 16 --repeat 2 --seed 20261004 --out benchmarks/results/w5_cpu_reference_flight_dispersion.json
+```
+
 ## Reproducing
 
 ```

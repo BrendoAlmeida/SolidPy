@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.17). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; the Phase 5 multi-GPU criterion remains pending because this host has one GPU. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.17). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -808,10 +808,10 @@ localization and exact dense output) and Phase 3 decides the future of the rest.
 
 **Verified in the repository and recorded measurements**
 
-* The benchmark suite covers defined workloads and batch sizes, and the current single-GPU measurements include
-  the RTX 4060. These results describe the tested cases; they do not establish the distribution of batch sizes in
-  production. The first routing observations recorded in section 14.4 are a performance heuristic, not production
-  workload telemetry.
+* Published accelerated benchmark results cover W1-W4 at the selected batch sizes, with single-GPU measurements
+  on the RTX 4060; W5 has a reported, non-gating CPU-reference flight-dispersion benchmark. These results describe
+  only the measured cases and do not establish the distribution of batch sizes in production. The first routing
+  observations recorded in section 14.4 are a performance heuristic, not production workload telemetry.
 * The optional GPU workflow is configured for a self-hosted Linux runner labelled `gpu` and installs the
   `jax-cuda12` extra. The repository's `pyproject.toml` declares the MIT license and optional `jax`, `jax-cuda12`
   and `gpu` extras. These files establish the checked-in configuration, not runner availability, successful
@@ -821,8 +821,8 @@ localization and exact dense output) and Phase 3 decides the future of the rest.
 
 1. **Representative production batch sizes.** Obtain real workload sizes to assess how often the measured
    performance regimes and heterogeneous scheduling apply.
-2. **GPU runner and release constraints.** Confirm that the self-hosted GPU runner is available and whether
-   external licensing or optional-dependency policies constrain distribution or GPU CI.
+2. **GPU runner and external policy.** Confirm that the self-hosted GPU runner is available and has executed the
+   workflow; confirm any external licensing or optional-dependency policy that constrains distribution or GPU CI.
 3. **Cloud-notebook GPU.** Record and benchmark a cloud GPU only if cloud notebooks remain a target environment.
 4. **Differentiability (optional Phase 6).** Decide whether gradient access for calibration or sensitivity is a
    goal; this is not a Phase 4 or 5 exit requirement.
@@ -1263,16 +1263,27 @@ W4's `StructuralMonteCarlo` report now carries a physics class and a certificate
 that fell back entirely identify `cpu-reference` as the effective backend. Its JAX GPU parity test passed on the RTX.
 
 Phase 5's executor, inter-chunk refill, W2/W3 overlap, install documentation and optional self-hosted GPU workflow are
-implemented. The remaining multi-GPU criterion is empirical: this host has one RTX 4060, so the two-device test skips.
-Intra-launch lane replacement stays deferred until profiling shows material unused device capacity within a chunk.
+implemented. The formal Phase 5 exit criterion in the section 12 table is publication of benchmark-suite results and
+complete documentation. Multi-GPU execution is listed as a deliverable, but validation of concurrent JAX launches on
+real multi-GPU hardware remains an open hardware test under section 6.2; this host has one RTX 4060, so the two-device
+test skips. These are distinct statements: the open hardware validation is not the exit-criterion wording in the
+table. Intra-launch lane replacement stays deferred until profiling shows material unused device capacity within a
+chunk.
+
+The non-gating W5 CPU-reference flight-dispersion benchmark is now measured: 16 flights with 12 process workers took a
+median 2.22 s, or 7.20 flights/s. The campaign timing includes process-pool startup and report assembly; shared burn
+preparation is reported separately in `docs/gpu_backend_benchmarks.md`. W4 still shows no GPU throughput gain over
+NumPy: CPU-vectorized achieved 102,207 samples/s and JAX on the RTX 4060 achieved 98,098 samples/s (0.96x).
 
 The remaining external inputs are representative production batch sizes; confirmation that the configured self-hosted
 GPU runner is available and has executed the workflow; and any external licensing or optional-dependency constraints
 on distribution. A cloud-notebook GPU benchmark is pending only if that environment remains a target. If the Ampere-class
 24 GB data-center GPU in section 14.1 remains a target, an integrated/end-to-end SolidPy benchmark on that device is
-also pending; the PyTorch RHS microbenchmark in Appendix D does not cover the integrator or a complete simulation.
-Differentiability remains an optional Phase 6 decision. The multi-GPU criterion is still unverified because this host
-has one RTX 4060.
+also pending. The current VM exposes neither AVX nor the X86_V2 ISA level, which prevents the current JAX and NumPy
+builds from importing there; this requires resolving CPU ISA exposure to the VM or providing a backend that SolidPy
+can execute on that host. The PyTorch RHS microbenchmark in Appendix D measures only the right-hand side, without an
+integrator or event handling, and is not an integrated simulation result. Differentiability remains an optional Phase
+6 decision. Real multi-GPU validation remains open under section 6.2 because this host has one RTX 4060.
 
 ## Appendix A. State vector and padded batch schema
 
@@ -1392,12 +1403,13 @@ policies of section 5.8 are necessary, not optional.
 **Reading against the plan.** The measured saturation figure (about 45-49x against 6 physical cores,
 before sorting) lies inside the 15-60x planning range of section 10.1. The Phase 3 criterion (>= 5x
 against all CPU cores at 4,000 lanes or more) is met by a wide margin on this consumer GPU in double
-precision. This is the end-to-end result for the consumer GPU; it does not establish end-to-end performance on the
-data-center GPU described below.
+precision. This is the end-to-end result for the **burn simulation** on the consumer GPU; it does not measure the full
+advanced-physics pipeline or establish end-to-end performance on the data-center GPU described below.
 
-**Data-center GPU, through PyTorch (the machine above, 24 GB Ampere-class card, float64).** The existing result is a
-right-hand-side microbenchmark only, using the same operations as in 10.1 and no integrator or event handling; an
-integrated/end-to-end SolidPy benchmark on this device has not been measured. In that microbenchmark, eager mode
+**Data-center GPU, through PyTorch (the machine above, 24 GB Ampere-class card, float64).** The existing result is only
+a PyTorch right-hand-side microbenchmark, using the same operations as in 10.1; it has no integrator or event handling
+and does not run a complete SolidPy simulation. An integrated/end-to-end SolidPy benchmark on this device has not been
+measured. In that microbenchmark, eager mode
 was 2.2-2.5 ms per evaluation at any batch size (launch-bound, host core of that machine); CUDA-graph replay took
 0.43 ms at 2,048 lanes, 1.16 ms
 at 8,192 and 1.14 ms at 32,768 lanes, i.e. 0.035 microseconds per lane-evaluation at 32 k lanes versus

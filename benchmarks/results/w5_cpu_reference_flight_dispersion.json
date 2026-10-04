@@ -1,0 +1,419 @@
+{
+  "burn": {
+    "curve_duration_s": 3.4276463664795216,
+    "curve_points": 182,
+    "peak_thrust_n": 1121.4889412664188,
+    "preparation_s": 0.35071675200015306,
+    "propellant_mass_final_kg": 0.0,
+    "propellant_mass_initial_kg": 2.7471628710114806,
+    "solver_settings": {
+      "atol": 1e-10,
+      "burn_timeout_s": 100.0,
+      "max_step_size_s": 0.03,
+      "method": "DOP853",
+      "rtol": 1e-08,
+      "tail_off_method": "numerical",
+      "tail_off_timeout_s": 100.0
+    },
+    "termination_reason": "completed",
+    "total_impulse_ns": 3671.180897614816
+  },
+  "configuration": {
+    "burn_api": "solidpy.BurnSimulation",
+    "dispersion_api": "solidpy.DispersionAnalysis.run",
+    "flight_api": "solidpy.simulate_flight_3dof",
+    "geometry_api": "solidpy.geometry_from_components",
+    "repeat": 2,
+    "sample_distributions": {
+      "drag_coefficient_factor": {
+        "mean": 1.0,
+        "sigma": 0.025
+      },
+      "launch_angle_deg": {
+        "mean": 82.0,
+        "sigma": 0.4
+      },
+      "launch_azimuth_deg": {
+        "mean": 45.0,
+        "sigma": 1.0
+      },
+      "wind_direction_deg": {
+        "mean": 270.0,
+        "sigma": 5.0
+      },
+      "wind_speed_m_s": {
+        "mean": 5.0,
+        "sigma": 1.0
+      }
+    },
+    "samples": 16,
+    "seed": 20261004
+  },
+  "dispersion": {
+    "simulation.monte_carlo.confidence": 0.95,
+    "simulation.monte_carlo.crossrange_mean_m": -681.0748269866385,
+    "simulation.monte_carlo.crossrange_std_m": 438.11588642756055,
+    "simulation.monte_carlo.downrange_mean_m": 1391.4256776435082,
+    "simulation.monte_carlo.downrange_std_m": 192.61101054759058,
+    "simulation.monte_carlo.iterations": 16.0,
+    "simulation.monte_carlo.orientation_angle_rad": -1.5883831577827887,
+    "simulation.monte_carlo.semi_major_axis_m": 1107.7048646002463,
+    "simulation.monte_carlo.semi_minor_axis_m": 486.61031776547054
+  },
+  "dispersion_ellipse": {
+    "area_m2": 1693383.207841227,
+    "center_m": [
+      1391.425677643508,
+      -681.0748269866386
+    ],
+    "chi_square_scale": 2.447746830680816,
+    "confidence": 0.95,
+    "covariance_matrix": [
+      [
+        39572.26814310831,
+        2906.0088990752256
+      ],
+      [
+        2906.0088990752256,
+        204741.89860288764
+      ]
+    ],
+    "eigenvalues": [
+      204793.0113600214,
+      39521.15538597456
+    ],
+    "eigenvectors": [
+      [
+        -0.01758592441066982,
+        -0.9998453556738773
+      ],
+      [
+        -0.9998453556738773,
+        0.01758592441066982
+      ]
+    ],
+    "orientation_angle_deg": -91.00765119061612,
+    "orientation_angle_rad": -1.5883831577827887,
+    "semi_major_axis_m": 1107.7048646002463,
+    "semi_minor_axis_m": 486.61031776547054
+  },
+  "execution": {
+    "accelerator_used": false,
+    "backend": "cpu-reference",
+    "process_workers": 12,
+    "service": "flight_dispersion"
+  },
+  "flight_metrics": [
+    {
+      "flight_time_s": 51.116010150091945,
+      "landing_crossrange_m": 155.42864293293817,
+      "landing_downrange_m": 1594.6544607414924,
+      "max_altitude_m": 2969.83546775474
+    },
+    {
+      "flight_time_s": 50.67708382849008,
+      "landing_crossrange_m": -805.6557167232077,
+      "landing_downrange_m": 1606.4743390270328,
+      "max_altitude_m": 2919.5679174007932
+    },
+    {
+      "flight_time_s": 50.1926575798833,
+      "landing_crossrange_m": -953.9115055007825,
+      "landing_downrange_m": 1687.8955449424361,
+      "max_altitude_m": 2864.2296503044804
+    },
+    {
+      "flight_time_s": 51.26976122179375,
+      "landing_crossrange_m": 116.07910385398004,
+      "landing_downrange_m": 1107.0934620429487,
+      "max_altitude_m": 2987.2545731517157
+    },
+    {
+      "flight_time_s": 50.943443715774194,
+      "landing_crossrange_m": -155.39811380508408,
+      "landing_downrange_m": 1491.1915070723037,
+      "max_altitude_m": 2948.762683017808
+    },
+    {
+      "flight_time_s": 50.836689134057984,
+      "landing_crossrange_m": -831.2497407809675,
+      "landing_downrange_m": 1285.6075890240731,
+      "max_altitude_m": 2936.9771534827964
+    },
+    {
+      "flight_time_s": 50.37071236725918,
+      "landing_crossrange_m": -713.9226183889313,
+      "landing_downrange_m": 1593.3502990437719,
+      "max_altitude_m": 2883.5740264751685
+    },
+    {
+      "flight_time_s": 50.15256465633092,
+      "landing_crossrange_m": -1403.8538274681778,
+      "landing_downrange_m": 1177.9476724761735,
+      "max_altitude_m": 2859.443558313492
+    },
+    {
+      "flight_time_s": 50.317667242200336,
+      "landing_crossrange_m": -838.7878707839307,
+      "landing_downrange_m": 1561.2173709269,
+      "max_altitude_m": 2877.7118345780696
+    },
+    {
+      "flight_time_s": 50.743631705386676,
+      "landing_crossrange_m": -597.5782687229738,
+      "landing_downrange_m": 1447.003961321045,
+      "max_altitude_m": 2926.073248792566
+    },
+    {
+      "flight_time_s": 51.09011646655268,
+      "landing_crossrange_m": -856.1920543614511,
+      "landing_downrange_m": 1174.7741294465527,
+      "max_altitude_m": 2966.5565874049626
+    },
+    {
+      "flight_time_s": 50.815097822502956,
+      "landing_crossrange_m": -937.1863962882433,
+      "landing_downrange_m": 1402.0468673418445,
+      "max_altitude_m": 2935.1454122751898
+    },
+    {
+      "flight_time_s": 50.71249061339766,
+      "landing_crossrange_m": -824.3414225174903,
+      "landing_downrange_m": 1138.5719378430947,
+      "max_altitude_m": 2921.920408972236
+    },
+    {
+      "flight_time_s": 50.681636315363875,
+      "landing_crossrange_m": -1155.1204805777743,
+      "landing_downrange_m": 1204.734534209897,
+      "max_altitude_m": 2919.857603662994
+    },
+    {
+      "flight_time_s": 50.82300626652757,
+      "landing_crossrange_m": -1003.1109181497841,
+      "landing_downrange_m": 1556.3920746495257,
+      "max_altitude_m": 2936.5746421622407
+    },
+    {
+      "flight_time_s": 51.23447482016656,
+      "landing_crossrange_m": -92.39604450433546,
+      "landing_downrange_m": 1233.855092187039,
+      "max_altitude_m": 2983.390856039169
+    }
+  ],
+  "gating": false,
+  "geometry": {
+    "grain_height_m": 0.12384,
+    "grain_initial_inner_radius_m": 0.015960000000000002,
+    "grain_outer_radius_m": 0.03596,
+    "mass_scope": "explicit_dry_mass_override",
+    "motor_dry_mass_kg": 3.0,
+    "motor_final_mass_kg": 3.0,
+    "motor_grains": 4,
+    "motor_initial_mass_kg": 5.747162871011481,
+    "propellant_mass_kg": 2.7471628710114806
+  },
+  "impact_points_m": [
+    [
+      1594.6544607414924,
+      155.42864293293817
+    ],
+    [
+      1606.4743390270328,
+      -805.6557167232077
+    ],
+    [
+      1687.8955449424361,
+      -953.9115055007825
+    ],
+    [
+      1107.0934620429487,
+      116.07910385398004
+    ],
+    [
+      1491.1915070723037,
+      -155.39811380508408
+    ],
+    [
+      1285.6075890240731,
+      -831.2497407809675
+    ],
+    [
+      1593.3502990437719,
+      -713.9226183889313
+    ],
+    [
+      1177.9476724761735,
+      -1403.8538274681778
+    ],
+    [
+      1561.2173709269,
+      -838.7878707839307
+    ],
+    [
+      1447.003961321045,
+      -597.5782687229738
+    ],
+    [
+      1174.7741294465527,
+      -856.1920543614511
+    ],
+    [
+      1402.0468673418445,
+      -937.1863962882433
+    ],
+    [
+      1138.5719378430947,
+      -824.3414225174903
+    ],
+    [
+      1204.734534209897,
+      -1155.1204805777743
+    ],
+    [
+      1556.3920746495257,
+      -1003.1109181497841
+    ],
+    [
+      1233.855092187039,
+      -92.39604450433546
+    ]
+  ],
+  "machine": {
+    "accelerator_used": false,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "logical_cpu_count": 12,
+    "numpy": "2.4.4",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "python": "3.12.13",
+    "scipy": "1.17.1",
+    "solidpy": "0.1.0"
+  },
+  "recorded_at_utc": "2026-10-04T04:26:50.965316+00:00",
+  "sampled_inputs": [
+    {
+      "drag_coefficient_factor": 0.9680622618802974,
+      "launch_angle_deg": 81.6141051011419,
+      "launch_azimuth_deg": 44.31447663469163,
+      "wind_direction_deg": 275.59033662501474,
+      "wind_speed_m_s": 3.207242492436508
+    },
+    {
+      "drag_coefficient_factor": 0.9823462424092624,
+      "launch_angle_deg": 82.16950414986323,
+      "launch_azimuth_deg": 44.90994875377593,
+      "wind_direction_deg": 277.5636242812535,
+      "wind_speed_m_s": 5.502384430490225
+    },
+    {
+      "drag_coefficient_factor": 1.016340137844971,
+      "launch_angle_deg": 81.96620766182308,
+      "launch_azimuth_deg": 44.32563371141632,
+      "wind_direction_deg": 278.8468181572269,
+      "wind_speed_m_s": 6.037275748608849
+    },
+    {
+      "drag_coefficient_factor": 0.9943914495352323,
+      "launch_angle_deg": 82.53248236637117,
+      "launch_azimuth_deg": 44.8370564539062,
+      "wind_direction_deg": 260.5259670008181,
+      "wind_speed_m_s": 2.971413467088252
+    },
+    {
+      "drag_coefficient_factor": 0.9964270827748112,
+      "launch_angle_deg": 81.70885437020141,
+      "launch_azimuth_deg": 44.94801096519181,
+      "wind_direction_deg": 272.5226665363969,
+      "wind_speed_m_s": 3.9791123027654933
+    },
+    {
+      "drag_coefficient_factor": 0.9941199883958414,
+      "launch_angle_deg": 82.04824633537227,
+      "launch_azimuth_deg": 44.83889142915534,
+      "wind_direction_deg": 268.11437877907326,
+      "wind_speed_m_s": 5.549847506470762
+    },
+    {
+      "drag_coefficient_factor": 1.0282707973792138,
+      "launch_angle_deg": 81.33277739222751,
+      "launch_azimuth_deg": 44.69271705603344,
+      "wind_direction_deg": 273.9020218330881,
+      "wind_speed_m_s": 5.613795577095346
+    },
+    {
+      "drag_coefficient_factor": 1.0252408491501395,
+      "launch_angle_deg": 82.49048764527457,
+      "launch_azimuth_deg": 47.230704254380946,
+      "wind_direction_deg": 269.9344938676019,
+      "wind_speed_m_s": 7.1126288748189115
+    },
+    {
+      "drag_coefficient_factor": 1.0285323893595266,
+      "launch_angle_deg": 82.074400513957,
+      "launch_azimuth_deg": 44.72290851546741,
+      "wind_direction_deg": 276.5190339278365,
+      "wind_speed_m_s": 5.662209262136845
+    },
+    {
+      "drag_coefficient_factor": 1.0068334460329778,
+      "launch_angle_deg": 81.74486814984543,
+      "launch_azimuth_deg": 44.58929324493492,
+      "wind_direction_deg": 271.11339716788694,
+      "wind_speed_m_s": 5.076815149767112
+    },
+    {
+      "drag_coefficient_factor": 0.9716682947870129,
+      "launch_angle_deg": 82.37672178087323,
+      "launch_azimuth_deg": 43.42771213989426,
+      "wind_direction_deg": 265.2745306351808,
+      "wind_speed_m_s": 5.369959250987315
+    },
+    {
+      "drag_coefficient_factor": 0.9772836119167021,
+      "launch_angle_deg": 82.08763016137098,
+      "launch_azimuth_deg": 45.028555230222125,
+      "wind_direction_deg": 271.41593059368967,
+      "wind_speed_m_s": 5.8137821086270325
+    },
+    {
+      "drag_coefficient_factor": 1.0246026937346082,
+      "launch_angle_deg": 82.02290306391455,
+      "launch_azimuth_deg": 44.78426330152604,
+      "wind_direction_deg": 264.37134859893064,
+      "wind_speed_m_s": 5.584788161743749
+    },
+    {
+      "drag_coefficient_factor": 0.9898024751809039,
+      "launch_angle_deg": 82.17006833259036,
+      "launch_azimuth_deg": 44.179899599248444,
+      "wind_direction_deg": 266.8327190262573,
+      "wind_speed_m_s": 6.317465251083859
+    },
+    {
+      "drag_coefficient_factor": 0.9581207129782471,
+      "launch_angle_deg": 82.47916503331669,
+      "launch_azimuth_deg": 45.28689684540954,
+      "wind_direction_deg": 277.04367253325216,
+      "wind_speed_m_s": 5.870456548401771
+    },
+    {
+      "drag_coefficient_factor": 0.9857796681686405,
+      "launch_angle_deg": 82.10234570519036,
+      "launch_azimuth_deg": 45.508106279817056,
+      "wind_direction_deg": 265.04951593907583,
+      "wind_speed_m_s": 3.686348962377286
+    }
+  ],
+  "schema_version": 1,
+  "timing": {
+    "first_call_s": 2.024250390008092,
+    "median_repeat_s": 2.2219535684998846,
+    "repeat_times_s": [
+      2.106801201007329,
+      2.33710593599244
+    ],
+    "samples_per_s": 7.200870543303989,
+    "scope": "DispersionAnalysis.run including process-pool startup and report assembly; shared burn preparation is reported separately"
+  },
+  "workload": "W5"
+}
