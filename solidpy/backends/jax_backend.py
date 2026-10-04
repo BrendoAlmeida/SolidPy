@@ -97,6 +97,16 @@ def _compiled_advanced_physics_proxies():
     return jax.jit(lambda arrays: advanced_physics_proxies(arrays, jax.numpy))
 
 
+@functools.lru_cache(maxsize=16)
+def _compiled_detailed_ballistics():
+    """Jitted detailed-ballistics kernel, cached for each padded history and grain shape."""
+    import jax
+
+    from ..batch.kernels.detailed_ballistics import detailed_ballistics
+
+    return jax.jit(lambda arrays: detailed_ballistics(arrays, jax.numpy))
+
+
 @functools.lru_cache(maxsize=None)
 def _compiled(keep_history: bool, max_steps: int):
     """The jitted solve for one history policy and step budget (jax caches per input shape)."""
@@ -163,7 +173,8 @@ class JaxBackend:
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES},
                             history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies",
+                                      "detailed_ballistics"))
 
     def _x64(self):
         jax = self._jax
@@ -390,13 +401,28 @@ class JaxBackend:
 
         jax = self._jax
         jnp = jax.numpy
-        arrays = batch.namespace(jnp)
         with self._x64(), jax.default_device(self._device):
+            arrays = batch.namespace(jnp)
             placed = jax.tree_util.tree_map(lambda value: jax.device_put(value, self._device), arrays)
             output = jax.device_get(_compiled_advanced_physics_proxies()(placed))
         return BatchResult(
             assemble_advanced_physics_proxies(batch, output), self.name,
             {**self.provenance(), "service": "advanced_physics_proxies"},
+        )
+
+    def detailed_ballistics(self, batch, options=None):
+        """Build detailed histories on the selected JAX device; unsupported lanes return ``None``."""
+        from ..batch.detailed_ballistics import assemble_detailed_ballistics
+        from ..batch.result import BatchResult
+
+        jax = self._jax
+        with self._x64(), jax.default_device(self._device):
+            arrays = batch.namespace(jax.numpy)
+            placed = jax.tree_util.tree_map(lambda value: jax.device_put(value, self._device), arrays)
+            output = jax.device_get(_compiled_detailed_ballistics()(placed))
+        return BatchResult(
+            assemble_detailed_ballistics(batch, output), self.name,
+            {**self.provenance(), "service": "detailed_ballistics"},
         )
 
     def provenance(self) -> Dict[str, Any]:

@@ -97,8 +97,8 @@ Each engine pulls chunks from a shared cost-ordered queue; results remain in inp
 accelerator lanes are retried on `cpu-reference` with the reason recorded in their provenance. Pass `strict=True` to
 reject lanes no selected engine supports. `simulate_thermal` and `run_advanced_physics_ensemble` accept the same engine
 list. With `workers > 1`, advanced-physics thermal chunks, batched structural/CFD/ignition proxies and CPU models flow
-through a bounded pipeline; robustness does the same for burn and detailed-ballistics chunks. `reserved_cores` can
-reserve host cores for accelerator feeders.
+through a bounded pipeline. Robustness sends detailed histories through the backend batch service and keeps scalar
+fallback work in the bounded pipeline. `reserved_cores` can reserve host cores for accelerator feeders.
 CPU worker pools use `spawn`, so applications should call the API under an `if __name__ == "__main__":` guard when
 process workers are enabled.
 
@@ -107,9 +107,10 @@ solver on all 12 threads of the CPU at 4,096 lanes, and slower than it below a f
 `docs/gpu_backend_benchmarks.md` for the method and numbers, and `docs/gpu_backend_architecture.md` for the design.
 Robustness analysis uses the same machinery: `run_robustness_analysis(..., backend="cpu-vectorized")` solves the nominal
 run and the scenarios as lanes of one batch, and `solidpy.ensemble.run_robustness_ensemble(designs, backend="jax")` does it
-for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). With `workers > 1`,
-burn/design chunks and detailed-ballistics post-processing flow through an ordered, bounded process pipeline; the default
-remains serial. Without `backend` the analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass
+for many designs at once (pass `keep_series=False` to keep only the scalar outputs of each lane). Detailed-ballistics
+histories run through the selected backend service; custom activation callbacks use the scalar path. `workers > 1`
+bounds and overlaps scalar fallback work with later burn chunks; the default remains serial. Without `backend` the
+analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass
 `workers > 1` must call these APIs inside an `if __name__ == "__main__":` guard.
 
 The wall conduction and throat ablation of advanced physics (`Multiphysics.simulate_thermal_ablation`, a Radau solve per

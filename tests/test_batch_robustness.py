@@ -230,7 +230,11 @@ def test_postprocessing_pipeline_preserves_reports_across_solve_chunks():
     assert len(together) == 2
     assert execution == {
         "schedule": "burn_postprocess_pipeline", "lanes": 2, "chunks": 2,
-        "process_batches": 2, "overlap": True,
+        "process_batches": 0, "overlap": False,
+        "detailed_ballistics": {
+            "service": "detailed_ballistics", "lanes": 2, "accelerated_lanes": 2,
+            "scalar_lanes": 0, "backend_lanes": {"cpu-vectorized": 2}, "fallback_errors": {},
+        },
     }
     for got, expected in zip(together, alone):
         assert_reports_close(got, expected)

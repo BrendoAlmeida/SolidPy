@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.11). Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.13). The W1-W3 CPU-reference coverage gate passes; updated GPU throughput and real multi-GPU verification remain pending on a compatible accelerator host. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -495,13 +495,13 @@ by CPU affinity, a library-wide ceiling of 16, and the configured core reservati
 
 ### 6.4 Overlapping accelerator and CPU work
 
-The advanced-physics and robustness ensemble APIs accept `workers > 1` for bounded CPU post-processing. W2 feeds thermal
-chunks through the batched structural, CFD and ignition proxies, then into the CPU process window for flight and scalar
-fallbacks; while workers process one chunk, the caller packs and solves the next. W3 applies the same bounded
-producer/consumer flow across design chunks. `workers` sets the CPU post-processing pool size; a concurrent reference
-fallback uses one worker. `pack_s`, `thermal_s`/`solve_s`, `proxy_s` and `models_s`/`postprocess_s` report cumulative
-stage times, so solve, proxy and model work may overlap. These pipelines preserve lane and design order and use one
-spawned process pool per call.
+The advanced-physics and robustness ensemble APIs accept `workers > 1` for bounded CPU fallback work. W2 batches the
+structural, CFD and ignition proxies, then sends flight and scalar fallbacks to the CPU process window; while workers
+process a chunk, the caller packs and solves the next one. W3 sends each solved history through the selected backend's
+`detailed_ballistics` service; custom activation callbacks and backend failures retain the scalar post-processing path.
+`workers` sets the fallback process count. `pack_s`, `thermal_s`/`solve_s`, `proxy_s`, `detail_s` and
+`models_s`/`postprocess_s` report cumulative stage times. Only CPU fallback work overlaps later solves. These pipelines
+preserve lane and design order and use one spawned process pool per call.
 
 ## 7. Coverage map (what runs where)
 
@@ -525,7 +525,7 @@ workloads; **T2** later or CPU-only by design.
 | `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | **done (4b)**: batched Radau IIA(5) with the scipy controller, tridiagonal factorizations, ragged node counts padded (section 14.6) |
 | `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies over curve histories | T1 | `advanced_physics_proxies` lane service |
 | `Multiphysics.geometry_from_components` (mass, CG, bulkheads) | vector algebra (vectorized variants exist) | T1 | `xp=` |
-| `DetailedBallistics` (`build_detailed_ballistics`, stability, nozzle ablation rate) | post-processing of histories | T1 | vectorized over lanes; interpolation of histories to uniform grids is a batched `interp` |
+| `DetailedBallistics` (`build_detailed_ballistics`, stability, nozzle ablation rate) | post-processing of histories | T1 | `detailed_ballistics` service batches ragged histories and grain geometry on NumPy/JAX; display-grid construction stays on the host |
 | `TwoPhaseFlow` | profile algebra | T1 | vectorized |
 | `Acceptance.evaluate_numerical_acceptance` | compares two result mappings | T2 | stays on CPU (operates on results) |
 | `Multiphysics.simulate_flight_1d`, `simulate_flight_3dof`, `evaluate_barrowman_stability`, `evaluate_cd_by_components` | separate ODE systems with events/stages | T2 | optional second integrator target after the burn solver is validated |
@@ -891,7 +891,7 @@ Implemented, on the same branch and with `Burn.py`, `Grain.py` and `Propellant.p
   `BurnSimulation`, built from a batch lane's canonical result. Its detailed ballistics equals that of a real simulation
   bit for bit.
 * `solidpy.ensemble.run_robustness_ensemble(designs, ...)`: every (design, scenario) pair is a lane of one batch, solved on
-  any backend with the full history; the detailed ballistics of each lane is built on the CPU. `run_robustness_analysis`
+  any backend with the full history; detailed histories use the backend service when supported. `run_robustness_analysis`
   gains optional `backend`, `device` and `workers` (without `backend` it is the unchanged scalar path, and `device` or
   `workers` alone raise). Through `cpu-reference` the report equals the scalar one bit for bit; through the batched
   backends it agrees within the limits of tolerances version 4, each set from the worst difference measured on eight
@@ -981,9 +981,9 @@ failures, backend fallback and the scalar reference. Optional JAX CPU and GPU te
 still pending because the current verification host has no working NVIDIA driver or installed JAX package.
 
 This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `StructuralMonteCarlo`. General transient
-structural, CFD and ignition proxies are now batched as described in section 14.12. Flight and detailed-ballistics
-post-processing remain CPU work. The vectorized static surrogate API now accepts `xp=`; its JAX numerical kernel is
-separately JIT-tested when the optional dependency exists.
+structural, CFD and ignition proxies are now batched as described in section 14.12. Flight remains CPU work.
+Detailed-ballistics batching is described in section 14.13. The vectorized static surrogate API accepts `xp=`; its JAX
+numerical kernel is separately JIT-tested when the optional dependency exists.
 
 ### 14.8 CPU post-processing for W2 and W3 ensembles (2026-10-03)
 
@@ -1044,11 +1044,12 @@ chunks based on completion time; it does not perform a separate calibration pass
 
 `run_advanced_physics_ensemble(..., workers=N)` now submits each solved thermal chunk into a bounded ordered process
 window while the producer prepares and solves the next chunk. `run_robustness_ensemble` uses the same pattern across
-design chunks, so detailed ballistics can run while the next burn batch is solved. Both preserve the scalar result schema
-and lane/design order; timings report cumulative stage work and can overlap. When `workers > 1`, the producer keeps the
-reference solve to one worker and reserves two host cores from the post-processing pool for the producer and a possible
-reference fallback. Heterogeneous engines also support `reserved_cores`; the default reservation is one core per
-non-CPU feeder. Native math-library threads in spawned workers are limited to one.
+design chunks for CPU post-processing. Both preserve the scalar result schema and lane/design order; timings report
+cumulative stage work. When `workers > 1`, the producer keeps the reference solve to one worker and reserves two host
+cores from the post-processing pool for the producer and a possible reference fallback. Heterogeneous engines also
+support `reserved_cores`; the default reservation is one core per non-CPU feeder. Native math-library threads in spawned
+workers are limited to one. W3 detailed histories now use the backend batch service when available (section 14.13),
+so the CPU process pool handles scalar fallback lanes.
 
 Thermal heterogeneous execution keeps per-lane routing and fallback details in `BatchResult.execution`, so the thermal
 result mappings remain unchanged for `simulate_advanced_physics` compatibility. Engine summaries include the observed
@@ -1081,12 +1082,31 @@ post-processing path. Flight simulation remains on the CPU. The public per-desig
 Parity tests compare every numeric proxy field and the optional/category fields against the scalar functions for steel and
 composite casings, varying curve lengths (including a one-point curve), thermal-wall metrics and the reference backend.
 An optional JAX CPU parity test is included. This verification host has no JAX package or working NVIDIA driver, so neither
-JAX execution nor GPU throughput has been verified here. `DetailedBallistics.build_detailed_ballistics` remains the largest
-unbatched W3 post-processing item; detailed ballistics and flight are still CPU work.
+JAX execution nor GPU throughput has been verified here. Detailed-ballistics batching follows in section 14.13; flight
+simulation remains CPU work.
 
 The updated scalar-reference profile (`benchmarks/results/offloaded_share_post_proxy.json`) reports offloaded shares of
 0.987 for W1, 0.990 for W2 and 0.993 for W3, all above the 0.8 coverage gate. These measurements validate the coverage
 map only; JAX/GPU execution and throughput still require the configured accelerator runner.
+
+### 14.13 Batched detailed-ballistics post-processing (2026-10-03)
+
+The `detailed_ballistics` service packs ragged canonical histories, display grids and grain geometry into padded lanes.
+NumPy and JAX kernels interpolate each lane's channels, compute remaining propellant mass and centers of mass for mixed
+tubular/star grains, estimate regression rate and integrate nozzle ablation. Display-grid construction and burnout-event
+placement stay on the host and preserve the scalar rules. The assembler keeps the scalar schema, including summary,
+status, canonical result and provenance references.
+
+`run_robustness_ensemble` sends each solved lane through the service provided by its burn backend, including
+heterogeneous schedules. Each service batch is capped at 512 histories; lanes with callback activation, unsupported grain
+geometry, service errors or scalar burn fallbacks use `build_detailed_ballistics` on the CPU. Execution records report
+service counts and fallback errors; timings add `detail_s`. Optional JAX CPU parity coverage is included, but this host
+has no JAX installation or working NVIDIA driver, so device execution and updated W3 GPU throughput remain unverified.
+
+The current CPU-vectorized W3 measurement (`benchmarks/results/w3_cpu_vectorized_detail_batch.json`) processes 216 lanes
+in 11.88 s (18.2 lanes/s); all lanes use the batch service, which accounts for 0.36 s. The updated scalar-reference
+coverage profile (`benchmarks/results/offloaded_share_post_detail_batch.json`) measures W1 0.977, W2 0.994 and W3 0.999.
+These CPU measurements pass the coverage gate but do not replace GPU throughput verification.
 
 ## Appendix A. State vector and padded batch schema
 

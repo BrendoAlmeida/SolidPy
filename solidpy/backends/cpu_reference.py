@@ -73,7 +73,8 @@ class ReferenceBackend:
         # the result always carries the full adaptive history, which contains everything "metrics" asks for
         return Capabilities({feature: SUPPORTED for feature in FEATURES + THERMAL_FEATURES},
                             history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies",
+                                      "detailed_ballistics"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -206,6 +207,16 @@ class ReferenceBackend:
         return BatchResult(
             scalar_advanced_physics_proxies(batch), self.name,
             {**self.provenance(), "service": "advanced_physics_proxies"},
+        )
+
+    def detailed_ballistics(self, batch, options=None):
+        """Build detailed histories through the scalar reference implementation."""
+        from ..batch.detailed_ballistics import scalar_detailed_ballistics
+        from ..batch.result import BatchResult
+
+        return BatchResult(
+            scalar_detailed_ballistics(batch), self.name,
+            {**self.provenance(), "service": "detailed_ballistics"},
         )
 
     def provenance(self) -> Dict[str, Any]:

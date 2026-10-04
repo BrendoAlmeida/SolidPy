@@ -128,19 +128,20 @@ test on 2026-10-03 (892 s).
 workloads (wall clock around the outermost call, so Python-heavy code is not inflated the way a profiler would). The
 offloaded share is the time in entry points that have a batched implementation over the whole workload
 (`docs/gpu_backend_architecture.md`, section 7.1). The latest profile was measured 2026-10-03 on the machine above after
-the transient proxy kernels were added (`benchmarks/results/offloaded_share_post_proxy.json`). The earlier Phase 4b
-profile is preserved as `benchmarks/results/offloaded_share.json`; before thermal batching, W2 read 0.757:
+the detailed-ballistics service was added (`benchmarks/results/offloaded_share_post_detail_batch.json`). The previous
+profiles are preserved as `benchmarks/results/offloaded_share_post_proxy.json` and
+`benchmarks/results/offloaded_share.json`; before thermal batching, W2 read 0.757:
 
-| Workload | Designs | Scalar time | Burn (batched) | Thermal (batched) | Structural/CFD/ignition proxies (batched) | CPU and other | **Offloaded share** |
-|---|---|---|---|---|---|---|---|
-| W1 burn only (corpus mix) | 12 | 3.6 s | 98.7 % | - | - | 1.3 % | **0.987** |
-| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.3 s | 74.9 % | 23.9 % | 0.2 % | 1.0 % | **0.990** |
-| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.6 s | 99.3 % | - | - | 0.7 % | **0.993** |
+| Workload | Designs | Scalar time | Burn (batched) | Thermal (batched) | Detailed ballistics (batched) | Structural/CFD/ignition proxies (batched) | CPU and other | **Offloaded share** |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| W1 burn only (corpus mix) | 12 | 3.7 s | 97.7 % | - | - | - | 2.3 % | **0.977** |
+| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.5 s | 76.0 % | 22.8 % | 0.4 % | 0.2 % | 0.6 % | **0.994** |
+| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 21.5 s | 99.3 % | - | 0.6 % | - | 0.1 % | **0.999** |
 
 The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with burn batching; W2
-also batches thermal ablation and transient structural, CFD and ignition proxies. Detailed ballistics, flight and the
-remaining host work together account for about 1 % of W2's scalar time. These shares measure available batched coverage;
-they do not establish that a JAX/GPU run completed, and they do not predict device throughput.
+also batches thermal ablation, detailed ballistics and transient structural, CFD and ignition proxies. Flight and other
+host work account for about 0.6 % of W2's scalar time. The measured share can vary with host load; these numbers measure
+available batched coverage, do not establish that a JAX/GPU run completed, and do not predict device throughput.
 
 ## Robustness ensembles (W3) on the GPU (Phase 4a)
 
@@ -164,12 +165,10 @@ the best static schedule the CPU has because designs are independent, and it inc
 First calls, which also compile the full-history program of each shape: 74, 90, 207 and 154 s. No lane left the batched
 backend (`fallback_lanes = 0`) and every design completed.
 
-Where the warm time goes (seconds, 4,104 lanes): packing 1.4, the burns on the device 16.7 (246 lanes/s on their own),
-the detailed ballistics of every lane on **one CPU core** 11.8 (2.9 ms per lane, 39 % of the run), report assembly 0.08.
-So the gate of the architecture document (at least 5x the CPU on all cores at 4,096 lanes or more) is met with a margin,
-and the next limit in this measured serial path is not the device: building detailed ballistics on the host in a loop
-caps the run at about 137 lanes/s. The W3 producer-consumer pipeline described in section 6.4 was implemented later;
-these throughput figures have not been rerun with that pipeline, so its GPU benefit is not yet measured.
+Before the `detailed_ballistics` service was added, the 4,104-lane warm run spent 1.4 s packing, 16.7 s on device burns
+(246 lanes/s on their own), 11.8 s building detailed histories on one CPU core (2.9 ms per lane, 39 % of the run), and
+0.08 s assembling reports. Those historical numbers met the 5x gate but were capped near 137 lanes/s by the serial
+post-processing loop. The CPU-only rerun after batching is recorded below; GPU throughput must be remeasured on a GPU host.
 
 Two things to know when using it:
 
@@ -233,9 +232,9 @@ What the numbers say:
 
 ## Not covered yet
 
-Replacing finished lanes inside an active accelerator launch and detailed-ballistics post-processing remain
-unimplemented. General transient structural, CFD and ignition proxy kernels are implemented; W4's synthetic
-peak-pressure path is implemented separately. Completion rates are reported from real chunks, so a separate
+Replacing finished lanes inside an active accelerator launch remains unimplemented. Detailed-ballistics, general
+transient structural, CFD and ignition proxy kernels are implemented; W4's synthetic peak-pressure path is a separate
+kernel. Completion rates are reported from real chunks, so a separate
 throughput-calibration solve is not used. The heterogeneous executor and bounded W2/W3 post-processing pipeline are
 implemented, but this host has no JAX or working GPU driver, so concurrent device execution has only been checked with
 fake backends. W4's 100,000-sample harness is `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain
@@ -243,11 +242,11 @@ pending. All measured numbers are for one machine; they say nothing about other 
 
 ## CPU post-processing workers (W2 and W3)
 
-`run_advanced_physics_ensemble` and `run_robustness_ensemble` accept `workers > 1` to run post-processing after the
-batched solve in a bounded process pool. The default (`workers=None` or `1`) stays serial. Each row below is one timed
-warm CPU-vectorized call on the Ryzen 5 3600 host, after an initial call; process startup is included. No GPU or JAX was
-available. W2 uses 256 or 1,024 curves. W3 uses 8 designs and 216 lanes, with 16 Latin-hypercube samples per design and
-`keep_series=False`.
+`run_advanced_physics_ensemble` and `run_robustness_ensemble` accept `workers > 1` for scalar CPU fallback work after the
+batched solve. The rows below predate the `advanced_physics_proxies` and `detailed_ballistics` services. Each row is one
+timed warm CPU-vectorized call on the Ryzen 5 3600 host, after an initial call; process startup is included. No GPU or
+JAX was available. W2 uses 256 or 1,024 curves. W3 uses 8 designs and 216 lanes, with 16 Latin-hypercube samples per
+design and `keep_series=False`.
 
 | Workload | Workers | Total (s) | Batched solve (s) | CPU post-processing (s) |
 |---|---:|---:|---:|---:|
@@ -314,6 +313,22 @@ Reproduce with:
 ```
 python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 1 --lanes 1024 --repeat 1
 python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --chunk-size 256 --repeat 1
+```
+
+## W3 detailed-ballistics service after batching (CPU-only)
+
+Measured on 2026-10-03 on the same Ryzen 5 3600 host with eight designs and 216 lanes (27 per design), using
+`cpu-vectorized`, one solve chunk, and `keep_series=False`. The warm call took 11.88 s (18.2 lanes/s): 0.069 s to pack,
+11.422 s to solve burns, 0.363 s in the detailed-ballistics service, and 0.005 s to assemble reports. All 216 histories
+used the batch service; there were no scalar fallbacks. This CPU run checks the updated stage accounting and does not
+predict the W3 GPU throughput. It is not directly comparable to the older six-worker, four-chunk pipeline sample above.
+
+Raw result: `benchmarks/results/w3_cpu_vectorized_detail_batch.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_robustness.py --backend cpu-vectorized --designs 8 --workers 1 --repeat 1 --out benchmarks/results/w3_cpu_vectorized_detail_batch.json
 ```
 
 ## Structural Monte Carlo (W4)

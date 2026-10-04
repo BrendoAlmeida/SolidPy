@@ -1,0 +1,55 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": null,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": null
+  },
+  "monte_carlo_samples": 16,
+  "max_step_size": 0.01,
+  "results": [
+    {
+      "backend": "cpu-vectorized",
+      "device": null,
+      "designs": 8,
+      "lanes": 216,
+      "workers": 1,
+      "chunk_lanes": 4096,
+      "first_call_s": 11.958814768004231,
+      "seconds": 11.875324360007653,
+      "lanes_per_s": 18.18897686091168,
+      "timings": {
+        "pack_s": 0.06884053800604306,
+        "solve_s": 11.42221109601087,
+        "detail_s": 0.3629712089896202,
+        "postprocess_s": 0.0,
+        "report_s": 0.004646859015338123
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 8,
+      "max_steps": 2000,
+      "keep_series": false,
+      "execution": {
+        "schedule": "burn_postprocess_pipeline",
+        "lanes": 216,
+        "chunks": 1,
+        "process_batches": 0,
+        "overlap": false,
+        "detailed_ballistics": {
+          "service": "detailed_ballistics",
+          "lanes": 216,
+          "accelerated_lanes": 216,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "cpu-vectorized": 216
+          },
+          "fallback_errors": {}
+        }
+      }
+    }
+  ]
+}

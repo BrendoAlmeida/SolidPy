@@ -12,8 +12,8 @@ the CPU has because every design is independent.
     python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --out gpu.json
 
 The first call of an accelerator shape compiles; it is timed apart (``first_call_s``) and the throughput is the best of
-``--repeat`` warm runs. ``timings`` splits a run into packing, the burns, the detailed ballistics of every lane (on the
-CPU, optionally in a process pool) and the report assembly.
+``--repeat`` warm runs. ``timings`` splits a run into packing, burns, the batched detailed-ballistics service, scalar
+fallback work and report assembly.
 """
 
 import argparse

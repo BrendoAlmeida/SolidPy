@@ -17,8 +17,8 @@ note = "burn and tail-off solve and the canonical result (solidpy.ensemble.simul
 [[entry]]
 path = "solidpy.DetailedBallistics.build_detailed_ballistics"
 tier = "T1"
-batched = false
-note = "post-processing of one history on the CPU (about 7 ms per lane); stays on the host in phase 4a"
+batched = true
+note = "ragged histories and grain geometries use the detailed_ballistics service on NumPy/JAX; callbacks and unsupported grain shapes use the scalar path"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_thermal_ablation"

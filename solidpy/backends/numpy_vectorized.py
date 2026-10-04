@@ -41,7 +41,8 @@ class NumpyBackend:
 
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in self.SUPPORTED_FEATURES}, history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies",
+                                      "detailed_ballistics"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -138,6 +139,20 @@ class NumpyBackend:
         return BatchResult(
             assemble_advanced_physics_proxies(batch, output), self.name,
             {**self.provenance(), "service": "advanced_physics_proxies"},
+        )
+
+    def detailed_ballistics(self, batch, options=None):
+        """Build detailed-ballistics histories as NumPy lanes; unsupported lanes return ``None``."""
+        import numpy as np
+
+        from ..batch.detailed_ballistics import assemble_detailed_ballistics
+        from ..batch.kernels.detailed_ballistics import detailed_ballistics
+        from ..batch.result import BatchResult
+
+        output = detailed_ballistics(batch.namespace(np), np)
+        return BatchResult(
+            assemble_detailed_ballistics(batch, output), self.name,
+            {**self.provenance(), "service": "detailed_ballistics"},
         )
 
     def provenance(self) -> Dict[str, Any]:

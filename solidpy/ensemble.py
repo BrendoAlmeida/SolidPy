@@ -177,6 +177,8 @@ def _pickle_safe(value) -> bool:
 
 def _detailed_ballistics_process_safe(job) -> bool:
     """Check picklability without serializing the large history arrays in a ``SimulationView``."""
+    if len(job) > 6 and job[6] is not None:
+        return False
     _, view, scenario, options = job[:4]
     return _pickle_safe((view.motor, view.propellant, view.environment_pressure, view._activation_inputs,
                          view.result, scenario, options))
@@ -358,9 +360,136 @@ def _timed_detailed_ballistics_batch(jobs):
 
     results = []
     for job in jobs:
+        if len(job) > 6 and job[6] is not None:
+            results.append((job[6], 0.0))
+            continue
         started = time.perf_counter()
         results.append((build_detailed_ballistics(job[1], **job[3]), time.perf_counter() - started))
     return results
+
+
+def _validate_detailed_ballistics_service_result(result, lane):
+    """Require the complete scalar schema and preserve each lane's canonical references."""
+    from .DetailedBallistics import _validate_result_series
+    from .batch.detailed_ballistics import _RESULT_FIELDS
+
+    expected = set(_RESULT_FIELDS) | {
+        "schema_version", "interpolation", "gamma", "summary", "canonical_result", "status", "provenance",
+    }
+    if not isinstance(result, dict) or result.keys() != expected:
+        raise ValueError("backend returned an invalid detailed-ballistics result schema")
+    if result["canonical_result"] is not lane["canonical"]:
+        raise ValueError("backend changed the canonical-result reference of a detailed-ballistics lane")
+    if result["status"] is not lane["canonical"]["status"] or result["provenance"] is not lane["canonical"]["provenance"]:
+        raise ValueError("backend changed the status or provenance reference of a detailed-ballistics lane")
+    _validate_result_series(result, result["time_s"])
+
+
+def _detailed_ballistics_batch_block(views, options, *, effective_backend, device, execution):
+    """Route supported detailed-history lanes through the solver's backend and retain scalar fallbacks."""
+    from .batch.detailed_ballistics import DetailedBallisticsBatch
+
+    count = len(views)
+    results: List[Optional[Dict[str, Any]]] = [None] * count
+    summary = {
+        "service": "detailed_ballistics", "lanes": count, "accelerated_lanes": 0,
+        "scalar_lanes": 0, "backend_lanes": {}, "fallback_errors": {},
+    }
+    if not count:
+        return results, summary
+    batch = DetailedBallisticsBatch.from_views(views, options)
+    unsupported = set(batch.unsupported_lanes)
+    lane_backends = execution.get("lane_backends", {})
+    fallback_lanes = execution.get("fallback_lanes", {})
+    if isinstance(fallback_lanes, dict):
+        fallback_indices = {int(index) for index in fallback_lanes}
+    else:
+        fallback_indices = {int(index) for index in fallback_lanes}
+
+    groups: Dict[Tuple[str, Optional[str]], List[int]] = {}
+    for lane in range(count):
+        info = lane_backends.get(lane, lane_backends.get(str(lane))) if lane_backends else None
+        if info is not None:
+            name, selected_device = info.get("backend", "cpu-reference"), info.get("device")
+        elif lane in fallback_indices or effective_backend in ("heterogeneous", "auto", None):
+            name, selected_device = "cpu-reference", None
+        else:
+            name, selected_device = effective_backend, device
+        groups.setdefault((name, selected_device), []).append(lane)
+
+    for (name, selected_device), indices in groups.items():
+        summary["backend_lanes"][name] = summary["backend_lanes"].get(name, 0) + len(indices)
+        eligible = [lane for lane in indices if lane not in unsupported]
+        summary["scalar_lanes"] += len(indices) - len(eligible)
+        if name == "cpu-reference" or not eligible:
+            summary["scalar_lanes"] += len(eligible)
+            continue
+        try:
+            selected = backends.get_backend(name, selected_device)
+            if not selected.capabilities().provides("detailed_ballistics"):
+                summary["scalar_lanes"] += len(eligible)
+                continue
+        except Exception as exc:
+            selected = None
+            lookup_error = f"{type(exc).__name__}: {exc}"
+        else:
+            lookup_error = None
+
+        backend_limit = getattr(selected, "max_lanes", None) if selected is not None else None
+        limit = min(2048, int(backend_limit)) if backend_limit is not None else 2048
+        for start in range(0, len(eligible), max(limit, 1)):
+            current = eligible[start : start + max(limit, 1)]
+            sub_batch = batch.select(current)
+            try:
+                if lookup_error is not None:
+                    raise RuntimeError(lookup_error)
+                returned = selected.detailed_ballistics(sub_batch, SolveOptions()).to_results()
+                if len(returned) != len(current):
+                    raise RuntimeError("backend returned an unexpected number of detailed-ballistics results")
+            except Exception as exc:
+                summary["scalar_lanes"] += len(current)
+                summary["fallback_errors"].update({
+                    lane: f"{type(exc).__name__}: {exc}" for lane in current
+                })
+                continue
+            for local_lane, (lane, value) in enumerate(zip(current, returned)):
+                try:
+                    if value is None:
+                        raise RuntimeError("backend marked a supported detailed-ballistics lane unsupported")
+                    _validate_detailed_ballistics_service_result(value, sub_batch.lanes[local_lane])
+                except Exception as exc:
+                    summary["scalar_lanes"] += 1
+                    summary["fallback_errors"][lane] = f"{type(exc).__name__}: {exc}"
+                else:
+                    results[lane] = value
+                    summary["accelerated_lanes"] += 1
+    return results, summary
+
+
+def _iter_detailed_ballistics_batches(views, options, *, effective_backend, device, execution):
+    """Yield detailed results in memory-bounded blocks of at most 512 histories."""
+    count = len(views)
+    lane_backends = execution.get("lane_backends", {})
+    fallback_lanes = execution.get("fallback_lanes", {})
+    fallback_items = fallback_lanes.items() if isinstance(fallback_lanes, dict) else ((lane, None) for lane in fallback_lanes)
+    fallback_items = {int(lane): detail for lane, detail in fallback_items}
+
+    for start in range(0, count, 512):
+        end = min(start + 512, count)
+        started = time.perf_counter()
+        block_execution = dict(execution)
+        block_execution["lane_backends"] = {
+            int(lane) - start: detail for lane, detail in lane_backends.items()
+            if start <= int(lane) < end
+        }
+        block_execution["fallback_lanes"] = {
+            lane - start: detail for lane, detail in fallback_items.items() if start <= lane < end
+        }
+        block_results, block_summary = _detailed_ballistics_batch_block(
+            views[start:end], options[start:end], effective_backend=effective_backend, device=device,
+            execution=block_execution,
+        )
+        yield start, block_results, block_summary, time.perf_counter() - started
 
 
 def _execution(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -835,14 +964,15 @@ def run_robustness_ensemble(
 
     The burns run on ``backend`` (a name, ``"auto"``, a heterogeneous engine list, or ``None`` for the selected one;
     see ``simulate_burn``) with
-    the full history; the detailed ballistics of every lane is then built on the CPU from the lane's result, so the
-    reports are what the scalar path gives within the numerical tolerances of ``solidpy.backends._tolerances``.
+    the full history; detailed ballistics then runs as lanes through the selected backend's ``detailed_ballistics``
+    service when available, with unsupported lanes sent through the scalar implementation. Reports match the scalar
+    result within the numerical tolerances of ``solidpy.backends._tolerances``.
     Invalid inputs raise when the batch is packed,
     before any burn is solved; the scalar path raises as it reaches them. A dict passed as ``timings`` receives the
-    seconds spent packing (``pack_s``), solving chunks (``solve_s``), worker CPU time for detailed ballistics
-    (``postprocess_s``) and assembling reports (``report_s``); solve and post-process work may overlap.
-    A dict passed as ``execution`` receives the solve-chunk count, process-batch count and whether those stages could
-    overlap in this run.
+    seconds spent packing (``pack_s``), solving chunks (``solve_s``), batched detailed-ballistics services
+    (``detail_s``), scalar fallback work (``postprocess_s``) and assembling reports (``report_s``). A dict passed as
+    ``execution`` receives the solve-chunk count, process-batch count, lane service routes and whether solve and
+    fallback work overlapped.
 
     Every lane of a report holds its full series and canonical history, about 200 kB each for a four-grain design, as
     the scalar path's does.
@@ -875,12 +1005,13 @@ def run_robustness_ensemble(
     for _, motor, _, _, _ in parsed:
         _validate_dry_hardware(motor)
 
-    clock = {"pack_s": 0.0, "solve_s": 0.0, "postprocess_s": 0.0, "report_s": 0.0}
+    clock = {"pack_s": 0.0, "solve_s": 0.0, "detail_s": 0.0, "postprocess_s": 0.0, "report_s": 0.0}
     reports: List[Dict[str, Any]] = []
     designs_per_chunk = max(1, int(chunk_lanes) // lanes_per_design)
     total_lanes = len(parsed) * lanes_per_design
     solver_workers, postprocess_workers = _pipeline_worker_counts(workers)
     solve_chunks = 0
+    detail_summaries = []
 
     def lane_jobs():
         nonlocal solve_chunks
@@ -922,18 +1053,31 @@ def run_robustness_ensemble(
             batch = ProblemBatch.from_objects(motors, propellants, environments, settings, burn_rate_factor=factors)
             clock["pack_s"] += time.perf_counter() - mark
             mark = time.perf_counter()
-            solved = simulate_burn(
+            outcome = simulate_burn(
                 batch, backend=backend, device=device, history="full", strict=strict, workers=solver_workers,
                 reserved_cores=reserved_cores, max_steps=max_steps,
-            ).to_results()
+            )
+            solved = outcome.to_results()
             clock["solve_s"] += time.perf_counter() - mark
             solve_chunks += 1
+            views = []
             for lane in range(len(solved)):
-                local_design, scenario_index = divmod(lane, lanes_per_design)
-                scenario = None if scenario_index == 0 else scenario_list[scenario_index - 1]
-                view = SimulationView.from_lane(batch, lane, solved[lane])
-                solved[lane] = None  # the bounded window now owns the lane's result and history
-                yield (lane, view, scenario, details[lane], start + local_design, scenario_index)
+                views.append(SimulationView.from_lane(batch, lane, solved[lane]))
+            solved = None  # the detailed batch or the bounded window now owns each lane's history
+            for block_start, detailed_results, detail_summary, elapsed in _iter_detailed_ballistics_batches(
+                views, details, effective_backend=outcome.backend, device=device, execution=outcome.execution,
+            ):
+                clock["detail_s"] += elapsed
+                detail_summaries.append((start * lanes_per_design + block_start, detail_summary))
+                for offset, detailed_result in enumerate(detailed_results):
+                    lane = block_start + offset
+                    local_design, scenario_index = divmod(lane, lanes_per_design)
+                    scenario = None if scenario_index == 0 else scenario_list[scenario_index - 1]
+                    yield (
+                        lane, views[lane], scenario, details[lane], start + local_design, scenario_index,
+                        detailed_result,
+                    )
+            views = None
             solved = None
 
     design_results: List[Dict[str, Any]] = []
@@ -946,7 +1090,7 @@ def run_robustness_ensemble(
         process_safe=_detailed_ballistics_process_safe, reserved_cores=postprocess_reserved_cores,
         schedule=postprocess_schedule,
     ):
-        _, view, scenario, _, design_index, local_lane = job
+        _, view, scenario, _, design_index, local_lane, _ = job
         if design_index != len(reports):
             raise RuntimeError(
                 f"robustness post-processing changed design order: expected {len(reports)}, got {design_index}"
@@ -973,11 +1117,27 @@ def run_robustness_ensemble(
     if timings is not None:
         timings.update(clock)
     if execution is not None:
+        detailed_execution = {
+            "service": "detailed_ballistics",
+            "lanes": sum(summary["lanes"] for _, summary in detail_summaries),
+            "accelerated_lanes": sum(summary["accelerated_lanes"] for _, summary in detail_summaries),
+            "scalar_lanes": sum(summary["scalar_lanes"] for _, summary in detail_summaries),
+            "backend_lanes": {
+                name: sum(summary["backend_lanes"].get(name, 0) for _, summary in detail_summaries)
+                for name in {name for _, summary in detail_summaries for name in summary["backend_lanes"]}
+            },
+            "fallback_errors": {
+                start + lane: error
+                for start, summary in detail_summaries
+                for lane, error in summary["fallback_errors"].items()
+            },
+        }
         execution.update(
             schedule="burn_postprocess_pipeline",
             lanes=total_lanes,
             chunks=solve_chunks,
             process_batches=postprocess_schedule.get("process_batches", 0),
             overlap=solve_chunks > 1 and postprocess_schedule.get("process_batches", 0) > 0,
+            detailed_ballistics=detailed_execution,
         )
     return reports

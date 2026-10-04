@@ -51,7 +51,7 @@ class Capabilities:
     ``features`` maps a lane feature name to ``"supported"``, ``"partial"`` or ``"unsupported"``. A feature
     that is not listed is unsupported: the router never assumes support (design principle 3). ``services`` lists
     the optional Tier 1 services the backend implements besides ``solve_burn`` (currently ``"thermal_ablation"``,
-    ``"structural_response"`` and ``"advanced_physics_proxies"``). ``history_policies`` may use
+    ``"structural_response"``, ``"advanced_physics_proxies"`` and ``"detailed_ballistics"``). ``history_policies`` may use
     ``"decimated:N"`` and ``"uniform:N"`` templates
     to advertise policies whose point count is chosen per solve.
     """
@@ -143,5 +143,6 @@ class Backend(Protocol):
     #   def thermal_ablation(self, batch: ThermalBatch, options: SolveOptions) -> BatchResult
     #   def structural_response(self, geometry, chamber_pressure_pa, casing_material, ...) -> Mapping[str, Any]
     #   def advanced_physics_proxies(self, batch: AdvancedPhysicsBatch, options: SolveOptions) -> BatchResult
+    #   def detailed_ballistics(self, batch: DetailedBallisticsBatch, options: SolveOptions) -> BatchResult
 
     def provenance(self) -> Dict[str, Any]: ...
