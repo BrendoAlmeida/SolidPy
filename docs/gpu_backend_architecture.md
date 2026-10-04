@@ -804,15 +804,28 @@ localization and exact dense output) and Phase 3 decides the future of the rest.
 | 5 | History needs | **Investigated** (5.8): consumers need metrics, a handful of uniform-grid curves and a few native-grid diagnostics, never the raw adaptive history; the `"uniform:N"` policy is added. |
 | 6 | Callable inputs | **Investigated:** a typical consumer passes no igniter and no activation profile at all (defaults), uses scalar thermochemistry only, and rejects live RocketCEA results. For that use the impact of tabulated-only GPU inputs is zero. Tables, scalars and the built-in ramp run on the device; arbitrary Python callables fall back to the CPU (or, in the JAX backend, are accepted when they are written with array operations and can be traced). |
 
-### 14.2 Still open
+### 14.2 Verified facts and external inputs
 
-1. **Typical batch sizes** in real use (decides how much of the heterogeneous executor is needed and
-   whether refill batching in 6.3 is Phase 5 or earlier).
-2. **Differentiability.** Is gradient access (calibration, sensitivity) a goal? It favours JAX and
-   affects how the integrator is written (adjoint vs unrolled).
-3. **CI and licensing.** Is GPU CI available (self-hosted or on demand), and are there constraints on
-   optional dependencies for a public package?
-4. **Cloud-notebook GPU model(s)** to record for the benchmark baseline.
+**Verified in the repository and recorded measurements**
+
+* The benchmark suite covers defined workloads and batch sizes, and the current single-GPU measurements include
+  the RTX 4060. These results describe the tested cases; they do not establish the distribution of batch sizes in
+  production. The first routing observations recorded in section 14.4 are a performance heuristic, not production
+  workload telemetry.
+* The optional GPU workflow is configured for a self-hosted Linux runner labelled `gpu` and installs the
+  `jax-cuda12` extra. The repository's `pyproject.toml` declares the MIT license and optional `jax`, `jax-cuda12`
+  and `gpu` extras. These files establish the checked-in configuration, not runner availability, successful
+  workflow execution or any external publication policy.
+
+**Inputs still requiring external confirmation or a product decision**
+
+1. **Representative production batch sizes.** Obtain real workload sizes to assess how often the measured
+   performance regimes and heterogeneous scheduling apply.
+2. **GPU runner and release constraints.** Confirm that the self-hosted GPU runner is available and whether
+   external licensing or optional-dependency policies constrain distribution or GPU CI.
+3. **Cloud-notebook GPU.** Record and benchmark a cloud GPU only if cloud notebooks remain a target environment.
+4. **Differentiability (optional Phase 6).** Decide whether gradient access for calibration or sensitivity is a
+   goal; this is not a Phase 4 or 5 exit requirement.
 
 ### 14.3 Decisions taken at implementation start (2026-10-02)
 
@@ -1253,8 +1266,13 @@ Phase 5's executor, inter-chunk refill, W2/W3 overlap, install documentation and
 implemented. The remaining multi-GPU criterion is empirical: this host has one RTX 4060, so the two-device test skips.
 Intra-launch lane replacement stays deferred until profiling shows material unused device capacity within a chunk.
 
-The plan's remaining open inputs are representative production batch sizes, availability of the self-hosted GPU runner,
-and a cloud-notebook GPU model if that benchmark is still needed. Differentiability remains an optional Phase 6 decision.
+The remaining external inputs are representative production batch sizes; confirmation that the configured self-hosted
+GPU runner is available and has executed the workflow; and any external licensing or optional-dependency constraints
+on distribution. A cloud-notebook GPU benchmark is pending only if that environment remains a target. If the Ampere-class
+24 GB data-center GPU in section 14.1 remains a target, an integrated/end-to-end SolidPy benchmark on that device is
+also pending; the PyTorch RHS microbenchmark in Appendix D does not cover the integrator or a complete simulation.
+Differentiability remains an optional Phase 6 decision. The multi-GPU criterion is still unverified because this host
+has one RTX 4060.
 
 ## Appendix A. State vector and padded batch schema
 
@@ -1374,11 +1392,14 @@ policies of section 5.8 are necessary, not optional.
 **Reading against the plan.** The measured saturation figure (about 45-49x against 6 physical cores,
 before sorting) lies inside the 15-60x planning range of section 10.1. The Phase 3 criterion (>= 5x
 against all CPU cores at 4,000 lanes or more) is met by a wide margin on this consumer GPU in double
-precision. Results on a data-center GPU are pending.
+precision. This is the end-to-end result for the consumer GPU; it does not establish end-to-end performance on the
+data-center GPU described below.
 
-**Data-center GPU, through PyTorch (the machine above, 24 GB Ampere-class card, float64).** Same
-right-hand-side micro-benchmark as in 10.1 (no integrator): eager mode 2.2-2.5 ms per evaluation at any
-batch size (launch-bound, host core of that machine); CUDA-graph replay 0.43 ms at 2,048 lanes, 1.16 ms
+**Data-center GPU, through PyTorch (the machine above, 24 GB Ampere-class card, float64).** The existing result is a
+right-hand-side microbenchmark only, using the same operations as in 10.1 and no integrator or event handling; an
+integrated/end-to-end SolidPy benchmark on this device has not been measured. In that microbenchmark, eager mode
+was 2.2-2.5 ms per evaluation at any batch size (launch-bound, host core of that machine); CUDA-graph replay took
+0.43 ms at 2,048 lanes, 1.16 ms
 at 8,192 and 1.14 ms at 32,768 lanes, i.e. 0.035 microseconds per lane-evaluation at 32 k lanes versus
 0.064 on the consumer card (about 1.8x), although the card's double-precision peak is ~20x higher: this
 kernel family is latency- and memory-bound, not arithmetic-bound, so a larger GPU buys roughly 2x until the
