@@ -7,6 +7,7 @@ import pytest
 from solidpy import CasingMaterial, MotorGeometry, StructuralMonteCarlo, backends
 from solidpy.backends import Capabilities
 from solidpy.backends.numpy_vectorized import NumpyBackend
+from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS
 
 
 def make_geometry():
@@ -89,6 +90,10 @@ def test_cpu_vectorized_structural_monte_carlo_matches_scalar_reference():
     assert vectorized["provenance"]["execution"]["backend"] == "cpu-vectorized"
     assert vectorized["provenance"]["execution"]["service"] == "structural_response"
     assert vectorized["provenance"]["physics_provider_hash"] == reference["provenance"]["physics_provider_hash"]
+    execution = vectorized["provenance"]["execution"]
+    assert execution["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+    assert execution["parity_certificate"]["kernel_source_hash"] == execution["kernel_source_hash"]
+    assert execution["parity_certificate"]["tolerances_version"] == execution["tolerances_version"]
 
 
 def test_backend_none_keeps_the_legacy_reference_even_in_a_backend_context():
@@ -136,6 +141,8 @@ def test_structural_monte_carlo_falls_back_for_backend_without_service():
         assert result["n_evaluated"] == 3
         assert result["provenance"]["execution"]["fallback_lanes"] == [0, 1, 2]
         assert result["provenance"]["execution"]["fallback_reason"] == "service_not_supported"
+        assert result["provenance"]["execution"]["backend"] == "cpu-reference"
+        assert result["provenance"]["execution"]["requested_backend"] == "no-structural-service"
         with pytest.raises(ValueError, match="does not provide"):
             _model(lambda: 3.0e6).run(1, backend="no-structural-service", strict=True)
     finally:
@@ -227,6 +234,10 @@ def test_non_finite_numeric_metric_falls_back_only_for_its_lane():
         _assert_structural_reports_match(reference, accelerated)
         assert accelerated["provenance"]["execution"]["fallback_lanes"] == [1]
         assert accelerated["provenance"]["execution"]["fallback_reason"] == "non_finite_metric"
+        assert accelerated["provenance"]["execution"]["physics_equivalence_class"].startswith(
+            "solidpy-unverified-v1:one-non-finite-structural-metric:"
+        )
+        assert "parity_certificate" not in accelerated["provenance"]["execution"]
         with pytest.raises(ValueError, match="contains a non-finite metric"):
             _model(lambda: 4.0e6).run(3, backend=OneNonFiniteMetricBackend.name, strict=True)
     finally:
@@ -243,6 +254,8 @@ def test_jax_cpu_structural_monte_carlo_matches_scalar_reference():
     _assert_structural_reports_match(reference, accelerated)
     assert accelerated["provenance"]["execution"]["backend"] == "jax"
     assert accelerated["provenance"]["execution"]["kernel_source_hash"]
+    assert accelerated["provenance"]["execution"]["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+    assert accelerated["provenance"]["execution"]["parity_certificate"]["passed"] is True
 
 
 @pytest.mark.gpu
@@ -258,3 +271,4 @@ def test_jax_gpu_structural_monte_carlo_matches_scalar_reference():
 
     _assert_structural_reports_match(reference, accelerated)
     assert accelerated["provenance"]["execution"]["device"] == "cuda:0"
+    assert accelerated["provenance"]["execution"]["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS

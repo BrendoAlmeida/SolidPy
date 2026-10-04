@@ -1246,6 +1246,8 @@ transient structural/CFD/ignition proxies and detailed-ballistics batching. `geo
 host-side conversion from one object's attributes; the numeric structural batch kernel accepts NumPy or JAX arrays.
 The optional GPU workflow now includes the surrogate feature test. Its eager wrapper and JIT kernel passed on the
 RTX 4060 with float64 device outputs and `1e-12` parity against NumPy.
+W4's `StructuralMonteCarlo` report now carries a physics class and a certificate for approved built-in kernels; reports
+that fell back entirely identify `cpu-reference` as the effective backend. Its JAX GPU parity test passed on the RTX.
 
 Phase 5's executor, inter-chunk refill, W2/W3 overlap, install documentation and optional self-hosted GPU workflow are
 implemented. The remaining multi-GPU criterion is empirical: this host has one RTX 4060, so the two-device test skips.

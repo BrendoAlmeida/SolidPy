@@ -2881,14 +2881,42 @@ class StructuralMonteCarlo:
         provenance["physics_provider_hash"] = hash_digest.hexdigest()
         if chosen.name != "cpu-reference":
             from .batch.assemble import kernel_source_hash
+            from .backends._tolerances import TOLERANCES_VERSION
+            from .provenance import (
+                REFERENCE_PHYSICS_EQUIVALENCE_CLASS,
+                builtin_parity_certificate,
+                unverified_physics_equivalence_class,
+            )
 
+            fallback_lanes = backend_execution["fallback_lanes"] if backend_execution else []
+            fallback_reason = backend_execution["fallback_reason"] if backend_execution else None
+            effective_backend = chosen.name if len(fallback_lanes) < n_iterations else "cpu-reference"
+            if effective_backend == "cpu-reference":
+                execution = backends.get_backend("cpu-reference").provenance()
+            else:
+                source_hash = kernel_source_hash()
+                certificate = builtin_parity_certificate(
+                    effective_backend, source_hash, TOLERANCES_VERSION,
+                )
+                execution = {
+                    **chosen.provenance(),
+                    "kernel_source_hash": source_hash,
+                    "tolerances_version": TOLERANCES_VERSION,
+                }
+                if certificate is None:
+                    execution["physics_equivalence_class"] = unverified_physics_equivalence_class(
+                        effective_backend, source_hash,
+                    )
+                else:
+                    execution["physics_equivalence_class"] = REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+                    execution["parity_certificate"] = certificate
             provenance["execution"] = {
-                **chosen.provenance(),
+                **execution,
+                "backend": effective_backend,
                 "requested_backend": requested_backend,
                 "service": "structural_response",
-                "kernel_source_hash": kernel_source_hash(),
-                "fallback_lanes": backend_execution["fallback_lanes"] if backend_execution else [],
-                "fallback_reason": backend_execution["fallback_reason"] if backend_execution else None,
+                "fallback_lanes": fallback_lanes,
+                "fallback_reason": fallback_reason,
             }
         return {
             "robustness_policy_id": "structural_monte_carlo_v1", "result_role": "ensemble",
