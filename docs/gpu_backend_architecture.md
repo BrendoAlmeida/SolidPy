@@ -1418,8 +1418,11 @@ design outside the established corpus mass-balance envelope: `efficiency-001` me
 reference of `1.2012e-4%`, or 1.47 times `max(2 * reference, 1e-4 percent)`. The same lane run alone is within the
 envelope. With the same corpus padding, setting that lane's `rtol` to `1e-9` reduced the error to `2.5885e-8%`; this
 override was not adopted because it changes the requested solver tolerance. The result remains far below the outer
-1% mass-balance limit. Existing versioned absolute-percentage checks were not changed. The strict plan requirement
-that the mass-balance residual be no worse than the scalar reference remains open for this lane. Exact multi-GPU
+1% mass-balance limit. A JAX/CUDA run of `efficiency-001` with the same padded shape measured `0.000120516%` versus
+`0.000120120%` in the scalar reference, a difference of `3.97e-7` percentage points inside the versioned absolute
+tolerance of `1e-6`. Existing versioned tolerances were not changed. The strict plan requirement that the
+mass-balance residual be no worse than the scalar reference remains open across the corpus; this CPU lane is outside
+the established corpus envelope, while the measured JAX lane is within the absolute tolerance. Exact multi-GPU
 validation remains external to this one-GPU host.
 
 ## Appendix A. State vector and padded batch schema

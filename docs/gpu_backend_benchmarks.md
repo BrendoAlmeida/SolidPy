@@ -708,8 +708,9 @@ The additional CPU full-corpus dense-peak sweep was stopped after 29 minutes bef
 complementary to the GPU release gate. Current-source CPU whole-corpus parity passed all pre-existing assertions, and
 the new CPU diagnostic path passes its focused tests. The full CPU run showed `efficiency-001` outside the existing
 mass-balance envelope: `3.5276e-4%` versus `1.2012e-4%` scalar, while remaining below the outer 1% limit. A
-raw-residual ratio comparison was discarded because it is ill-conditioned near zero; details are in architecture
-section 14.24.
+matching JAX/CUDA probe with the same padded shape returned `0.000120516%` versus `0.000120120%` scalar, inside the
+versioned absolute difference limit of `1e-6` percentage points. A raw-residual ratio comparison was discarded
+because it is ill-conditioned near zero; details are in architecture section 14.24.
 
 The report took 1,301.0 s on an NVIDIA GeForce RTX 4060 (8,188 MiB, driver 610.57.04), Python 3.12.13, NumPy 2.4.4,
 SciPy 1.17.1, JAX/JAXlib 0.11.2. Its row-level results, solver status and exact worst-case deltas are in
