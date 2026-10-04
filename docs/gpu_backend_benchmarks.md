@@ -455,7 +455,7 @@ python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 
 
 ### W4 after vectorizing numeric result validation
 
-Profiled on 2026-10-03 on the Ryzen 5 3600 / RTX 4060 host. The previous implementation checked Python types and
+Profiled on 2026-10-04 on the Ryzen 5 3600 / RTX 4060 host. The previous implementation checked Python types and
 finiteness metric by metric for every sample. Standard numeric arrays now validate finiteness in a NumPy array pass;
 unusual output dtypes retain per-lane conversion and fallback handling. In a warm cProfile run for 100,000 samples,
 the instrumented call time fell from 13.10 s to 1.89 s. The benchmark below measures unprofiled calls.
