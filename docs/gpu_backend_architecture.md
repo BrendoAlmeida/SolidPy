@@ -1356,9 +1356,12 @@ call `evaluate_numerical_acceptance` on every record; the Acceptance API is cove
 | Maximum generated mass flow | 8.52e-3 | 7.9e-3 | 1.5e-2 | Fails on both |
 
 The complete-corpus CPU and GPU parity tests pass their versioned limits; the GPU test covers 323 supported designs.
-The peak-pressure/thrust GPU errors are within the version-5 tolerance but exceed the 2e-4 margin threshold. The
-generated-flow tolerance is especially broad because the stored scalar peak is itself grid-sensitive and differs
-from a refined solution by up to 1.4e-2. Do not treat the passing corpus tests as proof of the 100x criterion.
+After the endpoint-RHS change, the full non-GPU suite passed with 1,139 passed, 2 skipped and 12 GPU tests
+deselected (1,060.60 s); the focused endpoint/source/event test passed on the RTX 4060. The two-real-GPU executor
+test skipped because this host exposes only one device. The peak-pressure/thrust GPU errors are within the version-5
+tolerance but exceed the 2e-4 margin threshold. The generated-flow tolerance is especially broad because the stored
+scalar peak is itself grid-sensitive and differs from a refined solution by up to 1.4e-2. Do not treat the passing
+corpus tests as proof of the 100x criterion.
 
 The release decision is still open: keep the 100x criterion and improve the peak definition/reference comparison,
 or revise that criterion explicitly for grid-sensitive peaks while retaining it for integrals. No tolerance or
