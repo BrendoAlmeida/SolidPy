@@ -64,8 +64,11 @@ class NumpyBackend:
             raise unsupported_lane_error(self.name, refused)
         history_kind, _ = parse_history_policy(options.history)
         stores_history = history_kind != "metrics"
-        config = solver.SolveConfig(keep_history=stores_history,
-                                    max_steps=options.max_steps or DEFAULT_MAX_STEPS[history_kind])
+        config = solver.SolveConfig(
+            keep_history=stores_history,
+            max_steps=options.max_steps or DEFAULT_MAX_STEPS[history_kind],
+            continuous_peak_diagnostics=options.continuous_peak_diagnostics,
+        )
         # Output policies need accepted points; capped tiers would allocate and discard those buffers.
         tiers = options.tiers if options.tiers is not None else (() if stores_history else DEFAULT_TIERS)
 

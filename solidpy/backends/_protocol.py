@@ -100,14 +100,16 @@ class SolveOptions:
     ``workers`` the number of processes a CPU backend may use and ``max_steps`` the accepted points a batched lane may store before it is failed
     (``None``: the backend's default) and ``tiers`` the iteration caps of the capped tiers a batched backend runs
     before its uncapped one (``None``: ``batch.tiers.DEFAULT_TIERS``; ``()``: a single uncapped solve). A backend
-    ignores an option that does not apply to it and says so in its docstring. CPU process pools use ``spawn``; scripts
-    that call an API with ``workers > 1`` must do so under ``if __name__ == "__main__":``.
+    may compute dense-step peak diagnostics when ``continuous_peak_diagnostics`` is true. A backend ignores an option
+    that does not apply to it and says so in its docstring. CPU process pools use ``spawn``; scripts that call an API
+    with ``workers > 1`` must do so under ``if __name__ == "__main__":``.
     """
 
     history: str = "metrics"
     workers: Optional[int] = None
     max_steps: Optional[int] = None
     tiers: Optional[Tuple[int, ...]] = None
+    continuous_peak_diagnostics: bool = False
 
     def __post_init__(self):
         if self.tiers is not None and (
@@ -125,6 +127,11 @@ class SolveOptions:
             isinstance(self.workers, bool) or not isinstance(self.workers, int) or self.workers < 1
         ):
             raise ValueError(f"workers must be a positive integer or None, got {self.workers!r}")
+        if not isinstance(self.continuous_peak_diagnostics, bool):
+            raise ValueError(
+                "continuous_peak_diagnostics must be a bool, "
+                f"got {type(self.continuous_peak_diagnostics).__name__}"
+            )
 
 
 class Backend(Protocol):

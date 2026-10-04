@@ -92,6 +92,7 @@ class SolveConfig:
 
     keep_history: bool = False
     max_steps: int = 100000  # accepted points per lane across both stages; a lane past it is failed
+    continuous_peak_diagnostics: bool = False
 
 
 def _next_boundary(xp, P, t, stop):
@@ -175,6 +176,11 @@ def _record(driver, c, P, cfg, write, t_point, y_point, cached_values=None, reus
     out["tmax"] = xp.where(write, xp.maximum(c["tmax"], thrust), c["tmax"])
     out["gmax"] = xp.where(write, xp.maximum(c["gmax"], generated), c["gmax"])
     out["nmax"] = xp.where(write, xp.maximum(c["nmax"], nozzle), c["nmax"])
+    if cfg.continuous_peak_diagnostics:
+        out["last_pressure"] = xp.where(write, pressure, c["last_pressure"])
+        out["last_thrust"] = xp.where(write, thrust, c["last_thrust"])
+        out["last_generated"] = xp.where(write, generated, c["last_generated"])
+        out["last_nozzle"] = xp.where(write, nozzle, c["last_nozzle"])
     _track_flow(xp, out, "gen", generated, t_point, write)
     _track_flow(xp, out, "noz", nozzle, t_point, write)
     out["prev_time"] = xp.where(write, t_point, c["prev_time"])
@@ -185,6 +191,77 @@ def _record(driver, c, P, cfg, write, t_point, y_point, cached_values=None, reus
         out["hy"] = driver.store(c["hy"], rows, cols, y_point)
     out["hn"] = c["hn"] + write.astype(c["hn"].dtype)
     out["overflow"] = c["overflow"] | full
+    return out
+
+
+def _parabolic_peak(xp, left, center, right):
+    """Estimate a local maximum from three equally spaced samples."""
+    denominator = left - 2.0 * center + right
+    safe_denominator = xp.where(denominator < 0.0, denominator, -1.0)
+    offset = 0.5 * (left - right) / safe_denominator
+    value = center - 0.125 * (left - right) ** 2 / safe_denominator
+    valid = (denominator < 0.0) & (center >= left) & (center >= right) & (xp.abs(offset) <= 1.0)
+    return xp.where(valid, value, center)
+
+
+def _continuous_peak_candidates(driver, P, F, y_start, t_start, h, t_seg, active, x_limit,
+                                left_values, right_values):
+    """Sample a DOP853 dense step and refine local maxima with a parabolic vertex.
+
+    The nodes are uniformly spaced over the physically valid part of the step. For a terminal event,
+    ``x_limit`` ends at the localized event; ordinary steps use the whole interval. The endpoint recorder
+    handles exact source-breakpoint values separately from the left-limit value used by the interpolant.
+    """
+    xp = driver.xp
+    sampled = []
+    for fraction in (0.25, 0.5, 0.75):
+        x = x_limit * fraction
+        y = dop853.dense_eval(xp, F, y_start, x)
+        t = t_start + x * h
+        q = rhs.state_quantities(xp, y, active, P, time=_source_time(xp, t, t_seg))
+        sampled.append((q["pressure"], q["thrust"], q["generated"], q["nozzle"]))
+
+    candidates = []
+    for index, (left, right) in enumerate(zip(left_values, right_values)):
+        q1, q2, q3 = (values[index] for values in sampled)
+        nodes = (left, q1, q2, q3, right)
+        second_differences = tuple(
+            nodes[i] - 2.0 * nodes[i + 1] + nodes[i + 2] for i in range(3)
+        )
+        peaks = [xp.maximum(xp.maximum(left, right), xp.maximum(q1, xp.maximum(q2, q3)))]
+        for i in range(3):
+            nearby_curvature = xp.maximum(
+                xp.abs(second_differences[(i + 1) % 3]), xp.abs(second_differences[(i + 2) % 3])
+            )
+            signal_scale = xp.maximum(
+                xp.maximum(xp.abs(nodes[i]), xp.abs(nodes[i + 1])), xp.abs(nodes[i + 2])
+            )
+            smooth_curvature = xp.abs(second_differences[i]) <= xp.maximum(
+                100.0 * nearby_curvature, 1e-12 * xp.maximum(signal_scale, 1.0)
+            )
+            estimate = _parabolic_peak(xp, nodes[i], nodes[i + 1], nodes[i + 2])
+            peaks.append(xp.where(smooth_curvature, estimate, nodes[i + 1]))
+        peak = peaks[0]
+        for candidate in peaks[1:]:
+            peak = xp.maximum(peak, candidate)
+        candidates.append(peak)
+    return tuple(candidates)
+
+
+def _update_continuous_peaks(xp, out, candidates, write):
+    """Fold dense-step peak candidates into the per-lane running maxima."""
+    out["continuous_pmax"] = xp.where(
+        write, xp.maximum(out["continuous_pmax"], candidates[0]), out["continuous_pmax"]
+    )
+    out["continuous_tmax"] = xp.where(
+        write, xp.maximum(out["continuous_tmax"], candidates[1]), out["continuous_tmax"]
+    )
+    out["continuous_gmax"] = xp.where(
+        write, xp.maximum(out["continuous_gmax"], candidates[2]), out["continuous_gmax"]
+    )
+    out["continuous_nmax"] = xp.where(
+        write, xp.maximum(out["continuous_nmax"], candidates[3]), out["continuous_nmax"]
+    )
     return out
 
 
@@ -208,6 +285,13 @@ def initial_carry(driver, P, y0, cfg):
         prev_time=zeros, pmax=q0["pressure"], tmax=q0["thrust"], gmax=q0["generated"], nmax=q0["nozzle"],
         ht=ht, hy=hy, iterations=xp.zeros((), dtype=int),
     )
+    if cfg.continuous_peak_diagnostics:
+        carry.update(
+            last_pressure=q0["pressure"], last_thrust=q0["thrust"],
+            last_generated=q0["generated"], last_nozzle=q0["nozzle"],
+            continuous_pmax=q0["pressure"], continuous_tmax=q0["thrust"],
+            continuous_gmax=q0["generated"], continuous_nmax=q0["nozzle"],
+        )
     for name in ("gen", "noz"):
         carry.update({name + "_start": zeros, name + "_end": zeros, name + "_seen": flag, name + "_want": flag})
     all_points = ~flag
@@ -274,21 +358,32 @@ def burn_body(driver, c, P, cfg):
     g_new = a["y_new"][:, 2 : 2 + g] - depth
     trigger = active & (c["g_prev"] <= 0.0) & (g_new >= 0.0) & accept[:, None]
 
+    def dense_output(_):
+        return dop853.dense_coefficients(
+            xp, fun, c["t"], c["y"], a["y_new"], c["f"], a["f_new"], a["K"], a["h"]
+        )
+
+    def no_dense_output(_):
+        return xp.zeros((len(c["t"]), 7, c["y"].shape[-1]), dtype=c["y"].dtype)
+
+    F = driver.branch(xp.any(accept), dense_output, no_dense_output, None) if cfg.continuous_peak_diagnostics else None
+
     def with_events(_):
-        F = dop853.dense_coefficients(xp, fun, c["t"], c["y"], a["y_new"], c["f"], a["f_new"], a["K"], a["h"])
-        Fg, y_old_g = F[:, :, 2 : 2 + g], c["y"][:, 2 : 2 + g]
+        dense = F if cfg.continuous_peak_diagnostics else dense_output(None)
+        Fg, y_old_g = dense[:, :, 2 : 2 + g], c["y"][:, 2 : 2 + g]
         root = _bisect(
             driver, lambda x: dop853.dense_eval(xp, Fg, y_old_g, x) - depth, (len(c["t"]), g), lambda v: v < 0.0
         )
         x_event = xp.min(xp.where(trigger, root, xp.inf), axis=1)
         lane = xp.isfinite(x_event)
-        return lane, x_event, dop853.dense_eval(xp, F, c["y"], xp.where(lane, x_event, 1.0))
+        return lane, x_event, dop853.dense_eval(xp, dense, c["y"], xp.where(lane, x_event, 1.0))
 
     def no_events(_):
         return xp.zeros_like(accept), xp.zeros_like(c["t"]), a["y_new"]
 
     event_lane, x_event, y_event = driver.branch(xp.any(trigger), with_events, no_events, None)
     t_event = c["t"] + x_event * a["h"]
+    dense_y_event = y_event
     snap = event_lane[:, None] & active & (y_event[:, 2 : 2 + g] >= depth * (1.0 - SNAP_TOLERANCE))
     y_event = xp.concatenate(
         [y_event[:, :2], xp.where(snap, depth, y_event[:, 2 : 2 + g]), y_event[:, 2 + g :]], axis=1
@@ -302,6 +397,31 @@ def burn_body(driver, c, P, cfg):
     y_point = xp.where(event_lane[:, None], y_event, a["y_new"])
     reuse = _record_reuse_mask(xp, P, active, a["y_new"], a["t_new"], c["t_seg"], plain)
     out = _record(driver, c, P, cfg, accept, t_point, y_point, a["endpoint_auxiliary"], reuse)
+    if cfg.continuous_peak_diagnostics:
+        write_peaks = accept & ~out["overflow"]
+        event_q = rhs.state_quantities(
+            xp, dense_y_event, active, P, time=_source_time(xp, t_event, c["t_seg"])
+        )
+        event_values = (event_q["pressure"], event_q["thrust"], event_q["generated"], event_q["nozzle"])
+        right_values = tuple(
+            xp.where(event_lane, event_values[index], a["endpoint_auxiliary"][index])
+            for index in range(4)
+        )
+
+        def sample_dense_peaks(_):
+            return _continuous_peak_candidates(
+                driver, P, F, c["y"], c["t"], a["h"], c["t_seg"], active,
+                xp.where(event_lane, x_event, 1.0),
+                (c["last_pressure"], c["last_thrust"], c["last_generated"], c["last_nozzle"]),
+                right_values,
+            )
+
+        def no_dense_peaks(_):
+            empty = xp.full_like(c["t"], -xp.inf)
+            return empty, empty, empty, empty
+
+        peak_candidates = driver.branch(xp.any(write_peaks), sample_dense_peaks, no_dense_peaks, None)
+        out = _update_continuous_peaks(xp, out, peak_candidates, write_peaks)
 
     # a burnout that lands on the segment end leaves nothing to integrate there (scalar: ``while start < boundary``
     # is false), so the lane moves to the next segment instead of restarting over an empty interval
@@ -353,23 +473,60 @@ def stage_body(driver, c, P, cfg, cutoff, first_segment_only):
     g_new = rhs.pressure_of(xp, a["y_new"], P) - cutoff
     trigger = accept & (c["g_prev"] >= 0.0) & (g_new <= 0.0)
 
+    def dense_output(_):
+        return dop853.dense_coefficients(
+            xp, fun, c["t"], c["y"], a["y_new"], c["f"], a["f_new"], a["K"], a["h"]
+        )
+
+    def no_dense_output(_):
+        return xp.zeros((len(c["t"]), 7, c["y"].shape[-1]), dtype=c["y"].dtype)
+
+    F = driver.branch(xp.any(accept), dense_output, no_dense_output, None) if cfg.continuous_peak_diagnostics else None
+
     def with_events(_):
-        F = dop853.dense_coefficients(xp, fun, c["t"], c["y"], a["y_new"], c["f"], a["f_new"], a["K"], a["h"])
+        dense = F if cfg.continuous_peak_diagnostics else dense_output(None)
         x = _bisect(
-            driver, lambda s: rhs.pressure_of(xp, dop853.dense_eval(xp, F, c["y"], s), P) - cutoff,
+            driver, lambda s: rhs.pressure_of(xp, dop853.dense_eval(xp, dense, c["y"], s), P) - cutoff,
             (len(c["t"]),), lambda v: v > 0.0,
         )
-        return x, dop853.dense_eval(xp, F, c["y"], x)
+        return x, dop853.dense_eval(xp, dense, c["y"], x)
 
     def no_events(_):
         return xp.zeros_like(c["t"]), a["y_new"]
 
     x_event, y_event = driver.branch(xp.any(trigger), with_events, no_events, None)
+    dense_y_event = y_event
     t_point = xp.where(trigger, c["t"] + x_event * a["h"], a["t_new"])
     y_point = xp.where(trigger[:, None], y_event, a["y_new"])
     plain = accept & ~trigger
     reuse = _record_reuse_mask(xp, P, active, a["y_new"], a["t_new"], c["t_seg"], plain)
     out = _record(driver, c, P, cfg, accept, t_point, y_point, a["endpoint_auxiliary"], reuse)
+    if cfg.continuous_peak_diagnostics:
+        write_peaks = accept & ~out["overflow"]
+        event_q = rhs.state_quantities(
+            xp, dense_y_event, active, P,
+            time=_source_time(xp, c["t"] + x_event * a["h"], c["t_seg"]),
+        )
+        event_values = (event_q["pressure"], event_q["thrust"], event_q["generated"], event_q["nozzle"])
+        right_values = tuple(
+            xp.where(trigger, event_values[index], a["endpoint_auxiliary"][index])
+            for index in range(4)
+        )
+
+        def sample_dense_peaks(_):
+            return _continuous_peak_candidates(
+                driver, P, F, c["y"], c["t"], a["h"], c["t_seg"], active,
+                xp.where(trigger, x_event, 1.0),
+                (c["last_pressure"], c["last_thrust"], c["last_generated"], c["last_nozzle"]),
+                right_values,
+            )
+
+        def no_dense_peaks(_):
+            empty = xp.full_like(c["t"], -xp.inf)
+            return empty, empty, empty, empty
+
+        peak_candidates = driver.branch(xp.any(write_peaks), sample_dense_peaks, no_dense_peaks, None)
+        out = _update_continuous_peaks(xp, out, peak_candidates, write_peaks)
 
     at_segment_end = plain & (a["t_new"] >= c["t_seg"])
     at_stop = at_segment_end & (c["t_seg"] >= c["t_stop"])
@@ -449,7 +606,7 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
         lambda c: ~xp.all(c["done"]) & (c["iterations"] < cap),
         lambda c: stage_body(driver, c, P, cfg, cutoff, True), tail,
     )
-    return {
+    result = {
         "t": tail["t"], "y": tail["y"], "y0": y0, "n_points": tail["hn"], "ht": tail["ht"], "hy": tail["hy"],
         "pmax": tail["pmax"], "tmax": tail["tmax"], "gmax": tail["gmax"], "nmax": tail["nmax"],
         "gen_start": tail["gen_start"], "gen_end": tail["gen_end"], "noz_start": tail["noz_start"],
@@ -459,3 +616,9 @@ def solve_burn_and_blowdown(driver, P, y0, cfg=SolveConfig(), max_iterations=Non
         "tail_iterations": tail["iterations"], "source_iterations": sources["iterations"],
         "unfinished": ~burn["done"] | ~sources["done"] | ~tail["done"],
     }
+    if cfg.continuous_peak_diagnostics:
+        result.update(
+            continuous_pmax=tail["continuous_pmax"], continuous_tmax=tail["continuous_tmax"],
+            continuous_gmax=tail["continuous_gmax"], continuous_nmax=tail["continuous_nmax"],
+        )
+    return result

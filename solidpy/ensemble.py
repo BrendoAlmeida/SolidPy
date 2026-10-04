@@ -516,6 +516,7 @@ def simulate_burn(
     reserved_cores: Optional[int] = None,
     max_steps: Optional[int] = None,
     tiers: Optional[tuple] = None,
+    continuous_peak_diagnostics: bool = False,
     chunk_size: Optional[int] = None,
     sort: bool = True,
 ) -> BatchResult:
@@ -528,6 +529,10 @@ def simulate_burn(
     ``"metrics"``, ``"full"``,
     ``"decimated:N"`` (up to N native accepted points) or ``"uniform:N"`` (N points on a uniform time grid),
     where N is an integer of at least 2.
+    ``continuous_peak_diagnostics=True`` estimates maxima from each accepted DOP853 dense step on the
+    ``cpu-vectorized`` and ``jax`` backends and records them under
+    ``provenance["execution"]["continuous_peaks"]``. It is an opt-in diagnostic; canonical peak metrics remain
+    the accepted-point values. ``cpu-reference`` results, including fallback lanes, omit this diagnostic.
     ``chunk_size`` bounds how many lanes one solve holds (memory); ``sort`` groups lanes of similar estimated
     cost into the same chunk, which matters when lanes need very different numbers of steps (and is skipped when
     one chunk holds every lane). A lane that exhausts the step budget of a batched backend is rerun on the
@@ -551,7 +556,10 @@ def simulate_burn(
             isinstance(reserved_cores, bool) or not isinstance(reserved_cores, numbers.Integral) or reserved_cores < 0
         ):
             raise ValueError(f"reserved_cores must be a non-negative integer or None, got {reserved_cores!r}")
-        options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
+        options = SolveOptions(
+            history=history, workers=workers, max_steps=max_steps, tiers=tiers,
+            continuous_peak_diagnostics=continuous_peak_diagnostics,
+        )
         return HeterogeneousExecutor(backend, default_workers=workers, reserved_cores=reserved_cores).solve_burn(
             batch, options, requested=backend, device=device, chunk_size=chunk_size, sort=sort, strict=strict
         )
@@ -567,7 +575,10 @@ def simulate_burn(
         requested = backend
         device = device if device is not None else selected_device
     chosen = backends.get_backend(backend, device)
-    options = SolveOptions(history=history, workers=workers, max_steps=max_steps, tiers=tiers)
+    options = SolveOptions(
+        history=history, workers=workers, max_steps=max_steps, tiers=tiers,
+        continuous_peak_diagnostics=continuous_peak_diagnostics,
+    )
 
     refused = refused_lanes(batch, chosen.capabilities())
     if refused and strict:

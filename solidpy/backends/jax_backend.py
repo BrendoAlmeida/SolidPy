@@ -124,14 +124,17 @@ def _compiled_detailed_ballistics():
 
 
 @functools.lru_cache(maxsize=None)
-def _compiled(keep_history: bool, max_steps: int):
+def _compiled(keep_history: bool, max_steps: int, continuous_peak_diagnostics: bool = False):
     """The jitted solve for one history policy and step budget (jax caches per input shape)."""
     import jax
 
     from ..batch.integrators import solver
 
     driver = _driver()
-    config = solver.SolveConfig(keep_history=keep_history, max_steps=max_steps)
+    config = solver.SolveConfig(
+        keep_history=keep_history, max_steps=max_steps,
+        continuous_peak_diagnostics=continuous_peak_diagnostics,
+    )
     # the iteration cap is an argument, not a static value, so the tiers of a batch share one compiled program
     return jax.jit(lambda P, y0, cap: solver.solve_burn_and_blowdown(driver, P, y0, config, cap))
 
@@ -214,7 +217,7 @@ class JaxBackend:
 
     def _run(
         self, sub, full: bool, max_steps: int, cap: Optional[int], floor: int = MIN_LANE_BUCKET,
-        axial_metrics: bool = False,
+        axial_metrics: bool = False, continuous_peak_diagnostics: bool = False,
     ):
         """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
 
@@ -231,7 +234,7 @@ class JaxBackend:
             P = {name: jax.device_put(jnp.asarray(array), self._device) for name, array in padded.arrays.items()}
             y0 = jax.device_put(jnp.asarray(padded.initial_state()), self._device)
             limit = jnp.asarray(np.iinfo(np.int64).max if cap is None else cap)
-            device_out = _compiled(full, max_steps)(P, y0, limit)
+            device_out = _compiled(full, max_steps, continuous_peak_diagnostics)(P, y0, limit)
             if axial_metrics:
                 from ..batch.assemble import _axial_flow_layout
 
@@ -283,6 +286,7 @@ class JaxBackend:
             out, info = solve_in_tiers(
                 chunk, lambda sub, cap: self._run(
                     sub, stores_history, max_steps, cap, floor, axial_metrics=axial_metrics,
+                    continuous_peak_diagnostics=options.continuous_peak_diagnostics,
                 ), tiers
             )
             begin = time.perf_counter()

@@ -465,6 +465,15 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
         }
         applied = {"eta_c": float(a["eta_c"][lane]), "eta_Cf": float(a["eta_cf"][lane]),
                    "discharge_coefficient": float(a["discharge_coefficient"][lane])}
+        execution_lane = copy.deepcopy(execution)
+        if "continuous_gmax" in out:
+            execution_lane["continuous_peaks"] = {
+                "max_generated_mass_flow_kg_s": float(out["continuous_gmax"][lane]),
+                "peak_chamber_pressure_pa": float(out["continuous_pmax"][lane]),
+                "peak_thrust_n": float(out["continuous_tmax"][lane]),
+                "max_nozzle_mass_flow_kg_s": float(out["continuous_nmax"][lane]),
+                "estimator": "dop853_dense_five_node_parabolic_v1",
+            }
         provenance = {
             "eta_c_applied": applied["eta_c"], "eta_cf_applied": applied["eta_Cf"],
             "discharge_coefficient_applied": applied["discharge_coefficient"],
@@ -482,7 +491,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
                                 "tail_off_timeout_s": settings["tail_off_timeout_s"],
                                 "tail_off_method": settings["tail_off_method"]},
             "execution": {
-                **copy.deepcopy(execution),  # nested mappings (library versions) must not be shared between lanes
+                **execution_lane,  # nested mappings (library versions) must not be shared between lanes
                 "integrator": {"name": "dop853_batched", "rtol": settings["rtol"], "atol": settings["atol"],
                                "max_step_s": settings["max_step_size"]},
                 "history": history, "fallback": None, "kernel_source_hash": kernel_hash,
