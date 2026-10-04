@@ -31,7 +31,8 @@ REQUIRED_OUTCOMES = {
 }
 
 REPRODUCED_FAMILIES = ("tubular", "star", "mixed", "erosive", "efficiency", "ratetable", "igniter-table",
-                       "activation-table", "ramp", "quirk", "timeout-burn", "solver-failure")
+                       "activation-table", "ramp", "quirk", "timeout-burn", "simultaneous-burnout",
+                       "solver-failure")
 
 
 @pytest.fixture(scope="module")

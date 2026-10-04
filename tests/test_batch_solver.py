@@ -53,13 +53,6 @@ def test_the_corpus_subset_covers_the_stage_outcomes(solved):
     assert (batch.n_grains > 4).any() and (batch.n_grains == 1).any()
 
 
-#: Designs whose reference outcome is decided by rounding, not by physics. An absurd erosive coefficient makes
-#: identical grains burn out together; scipy then snaps only one of them (the root of the second event lands a
-#: few ulps away), the other event fires at ``t_old`` and ``BurnSimulation`` declares a solver failure. The
-#: batched solver snaps every grain within ``64 eps`` of its burnout depth at the first event and completes.
-ROUNDING_DECIDED = ("solver-failure",)
-
-
 def test_every_lane_ends_the_way_the_reference_ends(solved):
     cases, reference, batch, out = solved
 
@@ -67,21 +60,20 @@ def test_every_lane_ends_the_way_the_reference_ends(solved):
         c["id"]: (reason(out, i), reference[c["id"]]["status"]["termination_reason"])
         for i, c in enumerate(cases)
         if reason(out, i) != reference[c["id"]]["status"]["termination_reason"]
-        and c["family"] not in ROUNDING_DECIDED
     }
 
     assert wrong == {}
     assert not out["overflow"].any()
 
 
-def test_rounding_decided_failures_end_with_a_defined_outcome_and_a_finite_state(solved):
+def test_solver_failures_match_the_reference_and_leave_a_finite_state(solved):
     cases, reference, batch, out = solved
-    lanes = [i for i, c in enumerate(cases) if c["family"] in ROUNDING_DECIDED]
+    lanes = [i for i, c in enumerate(cases) if reference[c["id"]]["status"]["termination_reason"] == "solver_failure"]
 
     assert len(lanes) == 3
     for i in lanes:
         assert reference[cases[i]["id"]]["status"]["termination_reason"] == "solver_failure"
-        assert reason(out, i) in ("completed", "solver_failure")
+        assert reason(out, i) == "solver_failure"
         assert np.isfinite(out["y"][i]).all() and not out["overflow"][i]
 
 

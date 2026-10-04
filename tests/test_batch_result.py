@@ -17,8 +17,6 @@ from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS, builtin_pari
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 LIVE_FAMILIES = ("tubular", "star", "ends-star", "mixed", "erosive", "efficiency", "lowkn", "replicated")
-ROUNDING_DECIDED = ("solver-failure",)  # see tests/test_batch_solver.py
-
 
 def pack(cases):
     built = [gc.build_objects(c) for c in cases]
@@ -283,8 +281,6 @@ def test_the_corpus_subset_matches_the_stored_reference(corpus_cases):
 
     bad = []
     for case, got in zip(cases, results):
-        if case["family"] in ROUNDING_DECIDED:
-            continue
         stored = reference[case["id"]]
         if got["status"]["termination_reason"] != stored["status"]["termination_reason"]:
             bad.append((case["id"], "reason"))

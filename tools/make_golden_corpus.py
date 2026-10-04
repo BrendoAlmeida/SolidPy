@@ -310,6 +310,13 @@ def derived(rng, cases, records):
     def times(count, burn_end, upper=0.7):
         return sorted(_r(t, 5) for t in rng.uniform(0.03 * burn_end, upper * burn_end, count))
 
+    # Preserve the event-root regressions after fixing the scalar solver's false failures.
+    by_id = {case["id"]: case for case in cases}
+    for base_id, coefficient in (("star-010", 5.0), ("star-020", 50.0), ("tubular-004", 5000.0)):
+        add("simultaneous-burnout", by_id[base_id], propellant_update={
+            "erosive_burning_coefficient": coefficient, "erosive_alpha": 35.0,
+        }, expect="completed")
+
     for i in range(6):
         base, burn_end, _ = next_base()
         add("igniter-scalar", base, {
@@ -379,17 +386,20 @@ def derived(rng, cases, records):
         base, burn_end, _ = next_base()
         add("igniter-unknown", base, {"igniter_mass_flow": {"callable": "igniter_decay"}, "igniter_burn_time": 0.0},
             expect="unknown_igniter_duration")
-    # An absurd erosive coefficient makes the pressure runaway fatal for the solver, but whether it fails
+    # An absurd erosive coefficient can make the pressure runaway fatal for the solver, but whether it fails
     # depends on the design, so try increasing coefficients per base and keep the first that really fails.
     found = 0
     while found < 3:
         base, _, _ = next_base()
-        for coefficient in (5.0, 50.0, 500.0, 5000.0):
+        for coefficient in (5.0, 50.0, 500.0, 5000.0, 1e16, 1e20):
             update = {"erosive_burning_coefficient": coefficient, "erosive_alpha": 35.0}
             candidate = {**base, "propellant": {**base["propellant"], **update}}
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                reason = gc.simulate(candidate).result["status"]["termination_reason"]
+                try:
+                    reason = gc.simulate(candidate).result["status"]["termination_reason"]
+                except (FloatingPointError, OverflowError, ValueError):
+                    continue
             if reason == "solver_failure":
                 add("solver-failure", base, propellant_update=update, expect="solver_failure")
                 found += 1

@@ -11,8 +11,6 @@ from solidpy.batch import ProblemBatch
 from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
-ROUNDING_DECIDED = ("solver-failure",)  # see tests/test_batch_solver.py
-
 
 jax = pytest.importorskip("jax")
 
@@ -33,7 +31,7 @@ def subset():
     cases = [
         c for c in corpus
         if PLAIN_TAGS <= set(c["tags"]) and not {"tail_off_omitted", "tail_off_analytical"} & set(c["tags"])
-        and reference[c["id"]]["history_points"] <= 150 and c["family"] not in ROUNDING_DECIDED
+        and reference[c["id"]]["history_points"] <= 150
     ]
     return cases, reference, pack(cases)
 

@@ -5,7 +5,7 @@ import golden_corpus as gc
 from solidpy import BurnSimulation
 
 
-CASE_IDS = ("solver-failure-000", "solver-failure-001", "solver-failure-002")
+CASE_IDS = ("simultaneous-burnout-000", "simultaneous-burnout-001", "simultaneous-burnout-002")
 
 
 @pytest.mark.parametrize("case_id", CASE_IDS)

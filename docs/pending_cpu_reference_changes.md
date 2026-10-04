@@ -37,18 +37,18 @@ as `blowdown_timeout` (`Burn.py`, where `_termination_reason` is set after the b
 * Likely fix: do not apply the "no active grain" break to segments of a stage that was entered with no active grain,
   or only break on `cutoff is None`.
 
-## 2. Simultaneous grain burnout can be reported as `solver_failure` by rounding
+## 2. Simultaneous grain burnout can be reported as `solver_failure` by rounding — resolved
 
-Identical grains (an absurd erosive coefficient makes it easy) burn out together. scipy locates the first event and
-the root of the second lands a few ulps away; the scalar code snaps only the grains whose event fired, the other
-event fires again at the old time and the run ends as `solver_failure`. Three `solver-failure` designs of the corpus
-are decided by this, not by physics (`tests/test_batch_solver.py`, `ROUNDING_DECIDED`). The batched solver snaps every
-grain within `64 * eps` of its depth at the first event and completes them, so the parity tests skip that family.
+SciPy can report a terminal burnout event while returning a state slightly below the grain's burnout depth. The old
+scalar path only snapped grains that passed a fixed state-space threshold, so it could ignore the reported event and
+restart at the same time. `_integrate_stage` now trusts the indexed terminal event, snaps that grain to the exact
+depth, and coalesces additional grains only when both their burnout depth and regression state exactly match the
+reported event. This avoids broadening the numerical threshold.
 
-* Likely fix: snap every grain within the tolerance at the first event in `_integrate_stage`, as the batch does.
-  The corpus would then keep these designs but their reference outcome would change from failure to `completed`, and
-  `ROUNDING_DECIDED` in `tests/test_batch_result.py`, `tests/test_batch_parity.py` and `tests/test_batch_solver.py`
-  could go.
+The three affected designs now complete, have dedicated coverage in `tests/test_simultaneous_burnout_events.py`,
+and are retained in the golden corpus under `simultaneous-burnout`. The corpus generator now finds three separate
+genuine solver-failure designs at extreme erosive coefficients. The `ROUNDING_DECIDED` exclusions were removed from
+CPU, JAX and whole-corpus parity tests. Current whole-corpus NumPy and JAX parity tests pass.
 
 ## 3. The provider hash does not see a burn-rate override on the instance
 

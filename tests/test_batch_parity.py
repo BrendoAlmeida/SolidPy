@@ -12,9 +12,6 @@ from solidpy import backends
 from solidpy.backends import _tolerances as tol
 from solidpy.ensemble import ProblemBatch, simulate_burn
 
-#: Designs whose reference outcome is decided by rounding, see tests/test_batch_solver.py
-ROUNDING_DECIDED = ("solver-failure",)
-
 pytestmark = pytest.mark.slow
 
 INTEGRALS = ("total_impulse_ns", "generated_mass_integral_kg", "nozzle_mass_integral_kg", "igniter_mass_injected_kg")
@@ -46,8 +43,6 @@ def compare(cases, results):
     wrong, failures = [], []
     for case, got in zip(cases, results):
         stored = reference[case["id"]]
-        if case["family"] in ROUNDING_DECIDED:
-            continue
         if got["status"]["termination_reason"] != stored["status"]["termination_reason"]:
             wrong.append((case["id"], got["status"]["termination_reason"], stored["status"]["termination_reason"]))
             continue
