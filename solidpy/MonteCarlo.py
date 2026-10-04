@@ -15,6 +15,8 @@ from typing import Mapping, Optional
 import numpy as np
 from scipy.stats import chi2
 
+from ._parallel import safe_process_context
+
 
 def _validate_iterations(n_iterations):
     n_iterations = int(n_iterations)
@@ -123,24 +125,19 @@ def _run_single_simulation(simulation, sample):
 
 @dataclass
 class DispersionAnalysis:
-    """Coordinate Monte Carlo runs around an existing simulation object.
+    """Run Monte Carlo dispersion analysis for simulation impact points.
 
-    The production implementation will perturb a nominal simulation according
-    to normally distributed input uncertainties, run ``N`` samples, and reduce
-    the impact points into a statistical dispersion summary.
+    ``parameter_sigmas`` maps parameter names to either a standard deviation
+    or a mapping. For mappings, the standard deviation may use ``sigma``,
+    ``std``, or ``stddev`` (in that precedence order), and the mean may use
+    ``mean`` or ``nominal`` (in that precedence order); both default to zero.
+    ``random_seed`` controls reproducible input sampling. The simulation may be
+    a callable that accepts a sample, or an object with a ``run()`` or
+    ``simulate()`` method. Object simulations are deep-copied for each sample
+    before parameter perturbations are applied.
 
-    Planned responsibilities:
-        * Accept a prepared SolidPy simulation object or callable scenario
-          runner as the nominal model.
-        * Apply normally distributed variations to parameters such as dry mass,
-          burn-rate coefficient, thrust scale, launch angle, and wind.
-        * Preserve reproducibility through an explicit random seed.
-        * Return raw sample outputs plus aggregate metrics including covariance,
-          confidence ellipse axes, ellipse orientation, and impact bias.
-
-    The class is currently an architectural skeleton. Methods raise
-    ``NotImplementedError`` to avoid presenting placeholder dispersion numbers
-    as validated flight-analysis results.
+    :meth:`run` evaluates the samples in a process pool and returns their raw
+    results, impact points, summary statistics, and a confidence ellipse.
     """
 
     simulation: object
@@ -148,18 +145,23 @@ class DispersionAnalysis:
     random_seed: Optional[int] = None
 
     def sample_inputs(self, n_iterations):
-        """Generate perturbed input dictionaries for a Monte Carlo campaign.
+        """Generate normally distributed input samples.
 
         Args:
             n_iterations (int): Number of normally distributed samples to
                 generate.
 
         Returns:
-            list[dict]: Planned list of sampled input overrides.
+            list[dict]: One sampled parameter dictionary per iteration. A
+            scalar ``parameter_sigmas`` value is treated as a zero-mean
+            standard deviation. Mapping values may specify standard deviation
+            using ``sigma``, ``std``, or ``stddev``, and mean using ``mean`` or
+            ``nominal``; aliases are read in the order listed and default to
+            zero.
 
         Raises:
-            NotImplementedError: Until the parameter binding and sampling
-                policy is implemented.
+            ValueError: If the iteration count or a distribution parameter
+                is invalid.
         """
         n_iterations = _validate_iterations(n_iterations)
         rng = np.random.default_rng(self.random_seed)
@@ -184,12 +186,21 @@ class DispersionAnalysis:
             n_iterations (int): Number of simulation samples to execute.
 
         Returns:
-            dict: Planned output with raw impacts, per-sample inputs, summary
-            statistics, and dispersion-ellipse data.
+            dict: Results with ``inputs`` (sampled dictionaries),
+            ``impact_points`` (an ``(N, 2)`` NumPy array), ``results`` (raw
+            simulation outputs), ``summary`` (aggregate metrics), and
+            ``dispersion_ellipse`` (ellipse geometry and covariance).
 
         Raises:
-            NotImplementedError: Until simulation cloning and execution policy
-                is implemented.
+            ValueError: If ``n_iterations`` is less than one or a simulation
+                result does not contain a recognizable impact point.
+            TypeError: If ``simulation`` is not callable and has no callable
+                ``run()`` or ``simulate()`` method.
+
+        Workers use the ``spawn`` process start method, so the simulation and
+        its runner must be pickleable; define callable runners at module scope.
+        Scripts that call this method must protect process-starting code with
+        an ``if __name__ == "__main__":`` guard.
         """
         n_iterations = _validate_iterations(n_iterations)
         samples = self.sample_inputs(n_iterations)
@@ -197,7 +208,10 @@ class DispersionAnalysis:
         ordered_results = [None] * n_iterations
         impact_points = np.zeros((n_iterations, 2), dtype=float)
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=safe_process_context(),
+        ) as executor:
             futures = {
                 executor.submit(_run_single_simulation, self.simulation, sample): index
                 for index, sample in enumerate(samples)
@@ -230,7 +244,7 @@ class DispersionAnalysis:
         }
 
     def dispersion_ellipse(self, impact_points, confidence=0.95):
-        """Reduce impact points into a planar confidence ellipse.
+        """Compute a planar confidence ellipse from impact points.
 
         Args:
             impact_points: Iterable of ``(downrange_m, crossrange_m)`` impact
@@ -239,13 +253,14 @@ class DispersionAnalysis:
                 0.95 or 0.997.
 
         Returns:
-            dict: Planned output with ellipse center, semi-major axis,
-            semi-minor axis, orientation angle, covariance matrix, and
-            confidence level.
+            dict: Ellipse center, semi-major and semi-minor axes, orientation,
+            sample covariance, eigenvalues and eigenvectors, chi-square scale,
+            confidence, and ellipse area. A single point produces zero
+            covariance and zero-length axes.
 
         Raises:
-            NotImplementedError: Until covariance and chi-square scaling are
-                implemented.
+            ValueError: If ``confidence`` is outside ``(0, 1)`` or the input
+                is not a non-empty, finite array with shape ``(N, 2)``.
         """
         confidence = float(confidence)
         if not np.isfinite(confidence) or confidence <= 0.0 or confidence >= 1.0:

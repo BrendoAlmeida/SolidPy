@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import multiprocessing
+import warnings
+
 import numpy as np
 import pytest
 
@@ -73,6 +76,43 @@ def test_monte_carlo_skeleton_public_api():
     assert len(result["inputs"]) == 8
     assert len(result["results"]) == 8
     assert result["dispersion_ellipse"]["semi_major_axis_m"] > 0.0
+
+
+def test_monte_carlo_uses_spawn_after_jax_initialization(monkeypatch):
+    jax = pytest.importorskip("jax", reason="requires the optional solidpy[jax] extra")
+
+    # Initialize the selected JAX runtime before the process pool is created.
+    jax.jit(lambda values: values + 1)(jax.numpy.arange(4)).block_until_ready()
+
+    requested_contexts = []
+    get_context = multiprocessing.get_context
+
+    def record_context(method=None):
+        requested_contexts.append(method)
+        return get_context(method)
+
+    monkeypatch.setattr(multiprocessing, "get_context", record_context)
+    analysis = DispersionAnalysis(
+        simulation=_linear_impact_simulation,
+        parameter_sigmas={"wind_speed_m_s": 1.5},
+        random_seed=42,
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        result = analysis.run(2)
+
+    assert requested_contexts == ["spawn"]
+    assert result["impact_points"].shape == (2, 2)
+    assert len(result["results"]) == 2
+    for sample, impact in zip(result["inputs"], result["impact_points"]):
+        assert impact == pytest.approx(
+            (
+                1000.0 + 12.0 * sample["wind_speed_m_s"],
+                -30.0 + 18.0 * sample["wind_speed_m_s"],
+            )
+        )
+    assert not any("os.fork" in str(warning.message).lower() for warning in caught_warnings)
 
 
 def test_two_phase_flow_skeleton_public_api():
