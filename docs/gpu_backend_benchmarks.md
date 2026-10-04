@@ -134,14 +134,15 @@ profiles are preserved as `benchmarks/results/offloaded_share_post_proxy.json` a
 
 | Workload | Designs | Scalar time | Burn (batched) | Thermal (batched) | Detailed ballistics (batched) | Structural/CFD/ignition proxies (batched) | CPU and other | **Offloaded share** |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| W1 burn only (corpus mix) | 12 | 3.7 s | 97.7 % | - | - | - | 2.3 % | **0.977** |
-| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.5 s | 76.0 % | 22.8 % | 0.4 % | 0.2 % | 0.6 % | **0.994** |
-| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 21.5 s | 99.3 % | - | 0.6 % | - | 0.1 % | **0.999** |
+| W1 burn only (corpus mix) | 12 | 3.7 s | 98.9 % | - | - | - | 1.1 % | **0.989** |
+| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.5 s | 75.8 % | 23.1 % | - | 0.2 % | 0.9 % | **0.990** |
+| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 20.6 s | 99.4 % | - | 0.6 % | - | 0.1 % | **0.999** |
 
 The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with burn batching; W2
-also batches thermal ablation, detailed ballistics and transient structural, CFD and ignition proxies. Flight and other
-host work account for about 0.6 % of W2's scalar time. The measured share can vary with host load; these numbers measure
-available batched coverage, do not establish that a JAX/GPU run completed, and do not predict device throughput.
+also batches thermal ablation and transient structural, CFD and ignition proxies; W2 detailed ballistics is still scalar.
+Detailed ballistics, flight and other host work account for about 0.9 % of W2's scalar time. The measured share can vary
+with host load; these numbers measure available batched coverage, do not establish that a JAX/GPU run completed, and do
+not predict device throughput.
 
 ## Robustness ensembles (W3) on the GPU (Phase 4a)
 

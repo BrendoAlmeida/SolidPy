@@ -14,7 +14,8 @@ Workloads (docs/gpu_backend_architecture.md, section 7.1), all on the scalar cod
 
 The entry points listed in ``tools/tier_map.toml`` are timed with wall-clock wrappers (outermost call only) so that the
 measurement does not inflate Python-heavy code the way a profiler does. ``offloaded_share`` is the time in entry points
-marked ``batched = true`` over the whole workload. Needs Python 3.11 or newer (``tomllib``).
+marked ``batched = true`` for the current workload (or listed in ``batched_workloads``). Needs Python 3.11 or newer
+(``tomllib``).
 """
 
 import argparse
@@ -138,13 +139,17 @@ def measure(name, entries, size):
         started = time.perf_counter()
         run(size or default)
         wall = time.perf_counter() - started
-    batched = sum(timers.seconds[e["path"]] for e in entries if e["batched"])
+    def batched_for_workload(entry):
+        return entry["batched"] and name in entry.get("batched_workloads", (name,))
+
+    batched = sum(timers.seconds[e["path"]] for e in entries if batched_for_workload(e))
     listed = sum(timers.seconds.values())
     return {
         "workload": name, "size": size or default, "wall_s": wall, "offloaded_share": batched / wall,
         "listed_share": listed / wall, "other_s": wall - listed,
         "entries": {e["path"]: {"seconds": timers.seconds[e["path"]], "calls": timers.calls[e["path"]],
-                                "share": timers.seconds[e["path"]] / wall, "tier": e["tier"], "batched": e["batched"]}
+                                "share": timers.seconds[e["path"]] / wall, "tier": e["tier"],
+                                "batched": batched_for_workload(e)}
                     for e in entries},
     }
 

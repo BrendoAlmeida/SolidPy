@@ -1105,8 +1105,9 @@ has no JAX installation or working NVIDIA driver, so device execution and update
 
 The current CPU-vectorized W3 measurement (`benchmarks/results/w3_cpu_vectorized_detail_batch.json`) processes 216 lanes
 in 11.88 s (18.2 lanes/s); all lanes use the batch service, which accounts for 0.36 s. The updated scalar-reference
-coverage profile (`benchmarks/results/offloaded_share_post_detail_batch.json`) measures W1 0.977, W2 0.994 and W3 0.999.
-These CPU measurements pass the coverage gate but do not replace GPU throughput verification.
+coverage profile (`benchmarks/results/offloaded_share_post_detail_batch.json`) measures W1 0.989, W2 0.990 and W3 0.999.
+Detailed ballistics is batched in W3; W2's standalone `build_detailed_ballistics` call remains scalar. All three workloads
+pass the coverage gate, but these CPU measurements do not replace GPU throughput verification.
 
 ## Appendix A. State vector and padded batch schema
 

@@ -10,7 +10,10 @@
       "path": "solidpy.DetailedBallistics.build_detailed_ballistics",
       "tier": "T1",
       "batched": true,
-      "note": "ragged histories and grain geometries use the detailed_ballistics service on NumPy/JAX; callbacks and unsupported grain shapes use the scalar path"
+      "batched_workloads": [
+        "W3"
+      ],
+      "note": "W3 robustness histories use the detailed_ballistics service on NumPy/JAX; W2 build_detailed_ballistics remains scalar"
     },
     {
       "path": "solidpy.Multiphysics.simulate_thermal_ablation",
@@ -53,15 +56,15 @@
     {
       "workload": "W1",
       "size": 12,
-      "wall_s": 3.712556538026547,
-      "offloaded_share": 0.976946859076179,
-      "listed_share": 0.976946859076179,
-      "other_s": 0.08558608905877918,
+      "wall_s": 3.6783884539909195,
+      "offloaded_share": 0.9888783505585912,
+      "listed_share": 0.9888783505585912,
+      "other_s": 0.04090974689461291,
       "entries": {
         "solidpy.Burn.BurnSimulation.__init__": {
-          "seconds": 3.626970448967768,
+          "seconds": 3.6374787070963066,
           "calls": 12,
-          "share": 0.976946859076179,
+          "share": 0.9888783505585912,
           "tier": "T0",
           "batched": true
         },
@@ -70,7 +73,7 @@
           "calls": 0,
           "share": 0.0,
           "tier": "T1",
-          "batched": true
+          "batched": false
         },
         "solidpy.Multiphysics.simulate_thermal_ablation": {
           "seconds": 0.0,
@@ -119,36 +122,36 @@
     {
       "workload": "W2",
       "size": 6,
-      "wall_s": 5.504592101991875,
-      "offloaded_share": 0.9942431131510786,
-      "listed_share": 0.9986540759485212,
-      "other_s": 0.007408762903651223,
+      "wall_s": 5.480354658007855,
+      "offloaded_share": 0.989980727273451,
+      "listed_share": 0.9986410846636045,
+      "other_s": 0.007447337993653491,
       "entries": {
         "solidpy.Burn.BurnSimulation.__init__": {
-          "seconds": 4.185339994030073,
+          "seconds": 4.1523572530422825,
           "calls": 6,
-          "share": 0.7603360823984722,
+          "share": 0.7576803897125323,
           "tier": "T0",
           "batched": true
         },
         "solidpy.DetailedBallistics.build_detailed_ballistics": {
-          "seconds": 0.023104198975488544,
+          "seconds": 0.02308468599221669,
           "calls": 6,
-          "share": 0.004197259042523447,
+          "share": 0.004212261328468134,
           "tier": "T1",
-          "batched": true
+          "batched": false
         },
         "solidpy.Multiphysics.simulate_thermal_ablation": {
-          "seconds": 1.2553662199934479,
+          "seconds": 1.2643619230366312,
           "calls": 6,
-          "share": 0.22805799171553234,
+          "share": 0.23070804755111143,
           "tier": "T1",
           "batched": true
         },
         "solidpy.Multiphysics.simulate_structural_response": {
-          "seconds": 0.005593906040303409,
+          "seconds": 0.0053494500170927495,
           "calls": 6,
-          "share": 0.001016225350880988,
+          "share": 0.0009761138376831455,
           "tier": "T1",
           "batched": true
         },
@@ -160,23 +163,23 @@
           "batched": true
         },
         "solidpy.Multiphysics.simulate_cfd_proxies": {
-          "seconds": 0.003261312027461827,
+          "seconds": 0.0031646079441998154,
           "calls": 6,
-          "share": 0.0005924711526366683,
+          "share": 0.0005774458300022086,
           "tier": "T1",
           "batched": true
         },
         "solidpy.Multiphysics.simulate_ignition_proxy": {
-          "seconds": 0.00023715704446658492,
+          "seconds": 0.00021225601085461676,
           "calls": 6,
-          "share": 4.308349103301732e-05,
+          "share": 3.873034212201391e-05,
           "tier": "T1",
           "batched": true
         },
         "solidpy.Multiphysics.simulate_flight_1d": {
-          "seconds": 0.02428055097698234,
+          "seconds": 0.0243771439709235,
           "calls": 6,
-          "share": 0.004410962797442567,
+          "share": 0.004448096061685313,
           "tier": "T2",
           "batched": false
         }
@@ -185,22 +188,22 @@
     {
       "workload": "W3",
       "size": 2,
-      "wall_s": 21.474800472002244,
-      "offloaded_share": 0.9992773914275886,
-      "listed_share": 0.9992773914275886,
-      "other_s": 0.01551787491189316,
+      "wall_s": 20.56170632899739,
+      "offloaded_share": 0.9992468858985987,
+      "listed_share": 0.9992468858985987,
+      "other_s": 0.015485310985241085,
       "entries": {
         "solidpy.Burn.BurnSimulation.__init__": {
-          "seconds": 21.333434851985658,
+          "seconds": 20.432073931064224,
           "calls": 30,
-          "share": 0.9934171393023702,
+          "share": 0.9936954455112342,
           "tier": "T0",
           "batched": true
         },
         "solidpy.DetailedBallistics.build_detailed_ballistics": {
-          "seconds": 0.12584774510469288,
+          "seconds": 0.11414708694792353,
           "calls": 30,
-          "share": 0.005860252125218429,
+          "share": 0.0055514403873644595,
           "tier": "T1",
           "batched": true
         },

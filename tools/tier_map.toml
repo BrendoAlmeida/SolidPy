@@ -4,7 +4,7 @@
 #     offloaded_share = seconds in entry points with batched = true / total seconds of the workload
 # (docs/gpu_backend_architecture.md, section 7.1). Entry points must not nest inside one another, so that no second
 # is counted twice. Keep this file in step with the code: set ``batched = true`` in the commit that adds the batched
-# implementation, not before.
+# implementation, not before. Set ``batched_workloads`` when the service covers only some profiled workloads.
 #
 # tier: T0 required for the first release, T1 next, T2 later or CPU by design (architecture document, section 7).
 
@@ -18,7 +18,8 @@ note = "burn and tail-off solve and the canonical result (solidpy.ensemble.simul
 path = "solidpy.DetailedBallistics.build_detailed_ballistics"
 tier = "T1"
 batched = true
-note = "ragged histories and grain geometries use the detailed_ballistics service on NumPy/JAX; callbacks and unsupported grain shapes use the scalar path"
+batched_workloads = ["W3"]
+note = "W3 robustness histories use the detailed_ballistics service on NumPy/JAX; W2 build_detailed_ballistics remains scalar"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_thermal_ablation"
