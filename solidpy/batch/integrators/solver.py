@@ -100,14 +100,35 @@ def _next_boundary(xp, P, t, stop):
     return xp.minimum(candidate, stop)
 
 
-def _fun(xp, P, active, t_seg):
+def _source_time(xp, t, t_seg):
+    """At a segment endpoint, evaluate sources at the scalar solver's left-limit time."""
+    return xp.where(t >= t_seg, xp.nextafter(t_seg, -xp.inf), t)
+
+
+def _fun(xp, P, active, t_seg, return_record_values=False):
     """The right-hand side of a segment: sources are evaluated just below the segment end at the end."""
 
     def fun(t, y):
-        source_time = xp.where(t >= t_seg, xp.nextafter(t_seg, -xp.inf), t)
-        return rhs.conservative_rhs(xp, y, active, P, time=source_time)
+        source_time = _source_time(xp, t, t_seg)
+        return rhs.conservative_rhs(
+            xp, y, active, P, time=source_time, return_record_values=return_record_values
+        )
 
     return fun
+
+
+def _record_reuse_mask(xp, P, active, y_endpoint, t_endpoint, t_seg, ordinary_endpoint):
+    """Mark endpoints whose final RHS values match ``_record``'s inferred activity and source time.
+
+    Segment endpoints use a left-limit source time in the RHS, whereas ``_record`` evaluates the exact endpoint.
+    Event points also have an interpolated (and for burnout, snapped) state, so callers pass only ordinary
+    accepted endpoints here.
+    """
+    g = P["grain_valid"].shape[-1]
+    inferred_active = (y_endpoint[:, 2 : 2 + g] < P["burnout_depth"]) & P["grain_valid"]
+    same_activity = xp.all(active == inferred_active, axis=1)
+    same_source_time = t_endpoint < t_seg
+    return ordinary_endpoint & same_activity & same_source_time
 
 
 def _track_flow(xp, c, name, flow, t_point, write):
@@ -125,7 +146,7 @@ def _track_flow(xp, c, name, flow, t_point, write):
     c[name + "_want"] = xp.where(write, positive, c[name + "_want"])
 
 
-def _record(driver, c, P, cfg, write, t_point, y_point):
+def _record(driver, c, P, cfg, write, t_point, y_point, cached_values=None, reuse_mask=None):
     """Store accepted points: running reductions always, the history buffers only if requested.
 
     A lane past ``max_steps`` stored points is flagged ``overflow`` and stops storing.
@@ -133,14 +154,29 @@ def _record(driver, c, P, cfg, write, t_point, y_point):
     xp = driver.xp
     full = write & (c["hn"] >= cfg.max_steps)
     write = write & ~full
-    q = rhs.state_quantities(xp, y_point, None, P, time=t_point)
+    if cached_values is None:
+        q = rhs.state_quantities(xp, y_point, None, P, time=t_point)
+        pressure, thrust, generated, nozzle = (
+            q["pressure"], q["thrust"], q["generated"], q["nozzle"]
+        )
+    else:
+        if reuse_mask is None:
+            reuse_mask = xp.zeros_like(write)
+
+        def recompute(_):
+            q = rhs.state_quantities(xp, y_point, None, P, time=t_point)
+            return q["pressure"], q["thrust"], q["generated"], q["nozzle"]
+
+        pressure, thrust, generated, nozzle = driver.branch(
+            xp.any(write & ~reuse_mask), recompute, lambda _: cached_values, None
+        )
     out = dict(c)
-    out["pmax"] = xp.where(write, xp.maximum(c["pmax"], q["pressure"]), c["pmax"])
-    out["tmax"] = xp.where(write, xp.maximum(c["tmax"], q["thrust"]), c["tmax"])
-    out["gmax"] = xp.where(write, xp.maximum(c["gmax"], q["generated"]), c["gmax"])
-    out["nmax"] = xp.where(write, xp.maximum(c["nmax"], q["nozzle"]), c["nmax"])
-    _track_flow(xp, out, "gen", q["generated"], t_point, write)
-    _track_flow(xp, out, "noz", q["nozzle"], t_point, write)
+    out["pmax"] = xp.where(write, xp.maximum(c["pmax"], pressure), c["pmax"])
+    out["tmax"] = xp.where(write, xp.maximum(c["tmax"], thrust), c["tmax"])
+    out["gmax"] = xp.where(write, xp.maximum(c["gmax"], generated), c["gmax"])
+    out["nmax"] = xp.where(write, xp.maximum(c["nmax"], nozzle), c["nmax"])
+    _track_flow(xp, out, "gen", generated, t_point, write)
+    _track_flow(xp, out, "noz", nozzle, t_point, write)
     out["prev_time"] = xp.where(write, t_point, c["prev_time"])
     if cfg.keep_history:
         rows = xp.arange(len(write))
@@ -227,10 +263,11 @@ def burn_body(driver, c, P, cfg):
         xp.any(c["need_init"] & ~c["done"]), lambda cc: _init_block(driver, cc, P, active, "burn"), lambda cc: cc, c
     )
     fun = _fun(xp, P, active, c["t_seg"])
+    endpoint_fun = _fun(xp, P, active, c["t_seg"], return_record_values=True)
     run = ~c["done"] & ~c["need_init"]
     a = dop853.attempt(
         xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_seg"], P["max_step_size"], P["rtol"],
-        P["atol"], run, size,
+        P["atol"], run, size, endpoint_fun=endpoint_fun,
     )
     depth = P["burnout_depth"]
     accept = a["accept"]
@@ -263,7 +300,8 @@ def burn_body(driver, c, P, cfg):
     plain = accept & ~event_lane
     t_point = xp.where(event_lane, t_event, a["t_new"])
     y_point = xp.where(event_lane[:, None], y_event, a["y_new"])
-    out = _record(driver, c, P, cfg, accept, t_point, y_point)
+    reuse = _record_reuse_mask(xp, P, active, a["y_new"], a["t_new"], c["t_seg"], plain)
+    out = _record(driver, c, P, cfg, accept, t_point, y_point, a["endpoint_auxiliary"], reuse)
 
     # a burnout that lands on the segment end leaves nothing to integrate there (scalar: ``while start < boundary``
     # is false), so the lane moves to the next segment instead of restarting over an empty interval
@@ -305,10 +343,11 @@ def stage_body(driver, c, P, cfg, cutoff, first_segment_only):
         c,
     )
     fun = _fun(xp, P, active, c["t_seg"])
+    endpoint_fun = _fun(xp, P, active, c["t_seg"], return_record_values=True)
     run = ~c["done"] & ~c["need_init"]
     a = dop853.attempt(
         xp, fun, c["t"], c["y"], c["f"], c["h_abs"], c["rejected"], c["t_seg"], P["max_step_size"], P["rtol"],
-        P["atol"], run, size,
+        P["atol"], run, size, endpoint_fun=endpoint_fun,
     )
     accept = a["accept"]
     g_new = rhs.pressure_of(xp, a["y_new"], P) - cutoff
@@ -328,9 +367,10 @@ def stage_body(driver, c, P, cfg, cutoff, first_segment_only):
     x_event, y_event = driver.branch(xp.any(trigger), with_events, no_events, None)
     t_point = xp.where(trigger, c["t"] + x_event * a["h"], a["t_new"])
     y_point = xp.where(trigger[:, None], y_event, a["y_new"])
-    out = _record(driver, c, P, cfg, accept, t_point, y_point)
-
     plain = accept & ~trigger
+    reuse = _record_reuse_mask(xp, P, active, a["y_new"], a["t_new"], c["t_seg"], plain)
+    out = _record(driver, c, P, cfg, accept, t_point, y_point, a["endpoint_auxiliary"], reuse)
+
     at_segment_end = plain & (a["t_new"] >= c["t_seg"])
     at_stop = at_segment_end & (c["t_seg"] >= c["t_stop"])
     next_segment = at_segment_end & ~at_stop & (not first_segment_only)

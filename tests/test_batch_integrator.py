@@ -151,6 +151,27 @@ def test_dense_output_matches_scipys_polynomial_inside_a_step():
             np.testing.assert_allclose(got[lane], expected, rtol=1e-9, atol=1e-13, err_msg=f"lane {lane} x={x}")
 
 
+def test_attempt_returns_auxiliary_values_from_the_final_rhs_evaluation():
+    calls = []
+
+    def endpoint_fun(t, y):
+        calls.append((t.copy(), y.copy()))
+        return batched(t, y), y[:, 0] + t
+
+    t = np.zeros(len(Y0))
+    h = np.full(len(Y0), 0.01)
+    out = dop853.attempt(
+        np, batched, t, Y0, batched(t, Y0), h, np.zeros(len(Y0), dtype=bool), np.ones(len(Y0)), MAX_STEP,
+        RTOL, ATOL, np.ones(len(Y0), dtype=bool), endpoint_fun=endpoint_fun,
+    )
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0][0], out["t_new"])
+    np.testing.assert_array_equal(calls[0][1], out["y_new"])
+    np.testing.assert_array_equal(out["f_new"], batched(out["t_new"], out["y_new"]))
+    np.testing.assert_array_equal(out["endpoint_auxiliary"], out["y_new"][:, 0] + out["t_new"])
+
+
 def test_a_nan_state_is_rejected_and_ends_as_a_too_small_step_not_an_infinite_loop():
     def fun(t, y):
         return np.where(np.arange(2)[:, None] == 1, np.nan, -y)

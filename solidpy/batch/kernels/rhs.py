@@ -96,8 +96,13 @@ def state_quantities(xp, y, active, P, detail=False, time=None):
     return quantities
 
 
-def conservative_rhs(xp, y, active, P, time=None):
-    """Time derivative of the conservative state, same shape as ``y``; ``time`` switches the sources on."""
+def conservative_rhs(xp, y, active, P, time=None, return_record_values=False):
+    """Time derivative of the conservative state, same shape as ``y``; ``time`` switches the sources on.
+
+    With ``return_record_values=True``, also return ``(pressure, thrust, generated, nozzle)`` from the same
+    state-quantity evaluation. The integrator uses these values at ordinary accepted endpoints, where their
+    state, active-grain mask and source time exactly match the values needed by its running reductions.
+    """
     q = state_quantities(xp, y, active, P, time=time)
     igniter = q["igniter"]
     mass_rate = q["generated"] + igniter - q["nozzle"]
@@ -114,4 +119,7 @@ def conservative_rhs(xp, y, active, P, time=None):
         ],
         axis=-1,
     )
-    return xp.concatenate([mass_rate[..., None], thermal_rate[..., None], q["regression_rates"], tail], axis=-1)
+    derivative = xp.concatenate([mass_rate[..., None], thermal_rate[..., None], q["regression_rates"], tail], axis=-1)
+    if return_record_values:
+        return derivative, (q["pressure"], q["thrust"], q["generated"], q["nozzle"])
+    return derivative

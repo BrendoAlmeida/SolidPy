@@ -68,16 +68,30 @@ def initial_step(xp, fun, t0, y0, f0, t_bound, max_step, rtol, atol, size=None, 
     return xp.minimum(xp.minimum(100.0 * h0, h1), xp.minimum(interval, max_step))
 
 
-def rk_step(xp, fun, t, y, f, h):
-    """One DOP853 step per lane. Returns ``(y_new, f_new, K)`` with ``K`` of shape ``[B, 13, n]``."""
+def rk_step(xp, fun, t, y, f, h, endpoint_fun=None):
+    """One DOP853 step per lane.
+
+    Returns ``(y_new, f_new, K)`` with ``K`` of shape ``[B, 13, n]``. When ``endpoint_fun`` is provided, it
+    evaluates the same endpoint derivative and may return ``(f_new, auxiliary)``; the auxiliary value is then
+    appended to the return tuple. This lets callers reuse values computed alongside the final RHS evaluation.
+    """
     stages = [f]
     for s in range(1, N_STAGES):
         dy = xp.einsum("k,bkn->bn", xp.asarray(_A[s, :s]), xp.stack(stages, axis=1)) * h[:, None]
         stages.append(fun(t + _C[s] * h, y + dy))
     stacked = xp.stack(stages, axis=1)
     y_new = y + h[:, None] * xp.einsum("k,bkn->bn", xp.asarray(_B), stacked)
-    f_new = fun(t + h, y_new)
-    return y_new, f_new, xp.concatenate([stacked, f_new[:, None, :]], axis=1)
+    endpoint = fun if endpoint_fun is None else endpoint_fun
+    endpoint_result = endpoint(t + h, y_new)
+    if endpoint_fun is None:
+        f_new = endpoint_result
+        auxiliary = None
+    else:
+        f_new, auxiliary = endpoint_result
+    K = xp.concatenate([stacked, f_new[:, None, :]], axis=1)
+    if endpoint_fun is None:
+        return y_new, f_new, K
+    return y_new, f_new, K, auxiliary
 
 
 def error_norm(xp, K, h, scale, size=None):
@@ -108,7 +122,8 @@ def shrink_factor(xp, err):
     return xp.maximum(MIN_FACTOR, xp.where(xp.isnan(err), 0.0, raw))
 
 
-def attempt(xp, fun, t, y, f, h_abs, rejected, t_bound, max_step, rtol, atol, run, size=None):
+def attempt(xp, fun, t, y, f, h_abs, rejected, t_bound, max_step, rtol, atol, run, size=None,
+            endpoint_fun=None):
     """One step attempt for every lane in ``run``, with scipy's ``_step_impl`` semantics.
 
     A rejected lane retries with a smaller step on the next call (``rejected`` carries that state), which
@@ -124,7 +139,11 @@ def attempt(xp, fun, t, y, f, h_abs, rejected, t_bound, max_step, rtol, atol, ru
     h = t_new - t
     h_effective = xp.abs(h)
 
-    y_new, f_new, K = rk_step(xp, fun, t, y, f, h)
+    if endpoint_fun is None:
+        y_new, f_new, K = rk_step(xp, fun, t, y, f, h)
+        endpoint_auxiliary = None
+    else:
+        y_new, f_new, K, endpoint_auxiliary = rk_step(xp, fun, t, y, f, h, endpoint_fun=endpoint_fun)
     scale = atol[:, None] + xp.maximum(xp.abs(y), xp.abs(y_new)) * rtol[:, None]
     err = error_norm(xp, K, h, scale, size)
     accept = run & ~too_small & (err < 1.0)
@@ -142,6 +161,7 @@ def attempt(xp, fun, t, y, f, h_abs, rejected, t_bound, max_step, rtol, atol, ru
         "h": h,
         "y_new": y_new,
         "f_new": f_new,
+        "endpoint_auxiliary": endpoint_auxiliary,
         "K": K,
         "h_next": h_next,
         "rejected_next": rejected_next,

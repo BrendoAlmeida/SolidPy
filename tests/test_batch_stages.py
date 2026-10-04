@@ -8,6 +8,7 @@ from solidpy import backends
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch
 from solidpy.batch.integrators import solver
+from solidpy.batch.kernels import rhs
 
 SOURCE_FAMILIES = ("igniter-scalar", "igniter-table", "igniter-after", "activation-scalar", "activation-table",
                    "ramp", "combo-ramp", "combo-table", "quirk")
@@ -137,6 +138,71 @@ def test_sources_are_evaluated_just_below_the_end_of_a_segment(solved):
 
     assert inside_segment[0, offset + 1] > 0.0 and raw[0, offset + 1] == 0.0
     assert inside_segment[0, offset + 1] == sub.arrays["igniter_value"][0]
+
+
+def test_record_reuses_only_endpoint_values_with_matching_state_mask_and_source_time(solved, monkeypatch):
+    cases, _, batch, _ = solved
+    lane = next(i for i, case in enumerate(cases) if case["family"] == "activation-table")
+    sub = batch.select([lane])
+    P = sub.namespace(np)
+    y = sub.initial_state()
+    active = P["grain_valid"]
+    config = solver.SolveConfig(keep_history=True, max_steps=4)
+    carry = solver.initial_carry(solver.numpy_driver(), P, y, config)
+    t_seg = solver._next_boundary(np, P, np.zeros(1), P["burn_timeout_s"])
+    y_endpoint = y.copy()
+    y_endpoint[:, 1] *= 1.1
+    endpoint_fun = solver._fun(np, P, active, t_seg, return_record_values=True)
+    derivative, cached = endpoint_fun(t_seg * 0.5, y_endpoint)
+    ordinary = np.ones(1, dtype=bool)
+    reuse = solver._record_reuse_mask(np, P, active, y_endpoint, t_seg * 0.5, t_seg, ordinary)
+    expected = rhs.state_quantities(np, y_endpoint, None, P, time=t_seg * 0.5)
+
+    np.testing.assert_array_equal(derivative, solver._fun(np, P, active, t_seg)(t_seg * 0.5, y_endpoint))
+    assert reuse.tolist() == [True]
+    for actual, key in zip(cached, ("pressure", "thrust", "generated", "nozzle")):
+        np.testing.assert_array_equal(actual, expected[key])
+
+    original_state_quantities = rhs.state_quantities
+
+    def unexpected_recompute(*args, **kwargs):
+        raise AssertionError("an exactly matching endpoint should reuse its final RHS values")
+
+    monkeypatch.setattr(rhs, "state_quantities", unexpected_recompute)
+    recorded = solver._record(
+        solver.numpy_driver(), carry, P, config, ordinary, t_seg * 0.5, y_endpoint, cached, reuse
+    )
+    assert recorded["pmax"][0] == expected["pressure"][0]
+    assert recorded["tmax"][0] == expected["thrust"][0]
+    assert recorded["gmax"][0] == expected["generated"][0]
+    assert recorded["nmax"][0] == expected["nozzle"][0]
+    assert recorded["ht"][0, 1] == (t_seg * 0.5)[0]
+    np.testing.assert_array_equal(recorded["hy"][0, 1], y_endpoint[0])
+
+    monkeypatch.setattr(rhs, "state_quantities", original_state_quantities)
+    _, boundary_cached = endpoint_fun(t_seg, y_endpoint)
+    boundary_expected = original_state_quantities(np, y_endpoint, None, P, time=t_seg)
+    boundary_reuse = solver._record_reuse_mask(np, P, active, y_endpoint, t_seg, t_seg, ordinary)
+    assert boundary_reuse.tolist() == [False]
+
+    calls = []
+
+    def count_recompute(*args, **kwargs):
+        calls.append(np.asarray(kwargs["time"]).copy())
+        return original_state_quantities(*args, **kwargs)
+
+    monkeypatch.setattr(rhs, "state_quantities", count_recompute)
+    at_boundary = solver._record(
+        solver.numpy_driver(), carry, P, config, ordinary, t_seg, y_endpoint, boundary_cached, boundary_reuse
+    )
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0], t_seg)
+    assert at_boundary["gmax"][0] == boundary_expected["generated"][0]
+    assert at_boundary["nmax"][0] == boundary_expected["nozzle"][0]
+
+    event = solver._record_reuse_mask(np, P, active, y_endpoint, t_seg * 0.5, t_seg, np.zeros(1, dtype=bool))
+    wrong_activity = solver._record_reuse_mask(np, P, ~active, y_endpoint, t_seg * 0.5, t_seg, ordinary)
+    assert event.tolist() == [False] and wrong_activity.tolist() == [False]
 
 
 def _two_grains_with_a_node(case, node, max_iterations):
