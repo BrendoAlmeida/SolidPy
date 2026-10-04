@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.20). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.22). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. The stricter 100x numerical-margin release gate in section 8.1 remains open: the current corpus passes the versioned tolerances, but not every measured peak is 100x inside the outer acceptance limits (section 14.22). Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -578,15 +578,16 @@ Features outside the capability matrix (4.6) are not silent degradations: they f
    combinations are amplified through the error estimate and the ignition transient (Appendix D).
 3. **Whole-simulation parity.** Batched backend vs `BurnSimulation` on the golden corpus (8.3) and on
    large random ensembles. Compare the policy metrics through `solidpy.Acceptance.evaluate_numerical_acceptance`
-   (reference as `refined`, backend as `coarse`) **and** with internal limits 100x tighter than the
-   policy: **integrals** (impulse, generated and nozzle mass) <= 1e-5 relative (measured max 4.8e-6),
-   **quantities sampled on the accepted-step grid** (peak pressure, peak thrust, peak flows) <= 2e-3
-   relative (measured max 8e-4; this is the same order as the variation of the reference path between
-   two CPU environments with different NumPy versions, so it is a property of grid-sampled maxima, not
-   of the backend), mass-balance residual no worse than the reference, identical `termination_reason`
-   classification, and `burnout_times` within 1e-6 relative. An optional improvement is to define peaks
-   on the continuous solution (refine the maximum on the dense output or by parabolic refinement) so
-   they stop depending on the step grid on every backend.
+   (reference as `refined`, backend as `coarse`) and report the measured margin to the outer policy limits.
+   The versioned corpus tolerances are **integrals** (impulse, generated and nozzle mass) <= 1e-5 relative,
+   **quantities sampled on the accepted-step grid** (peak pressure, peak thrust, peak flows) <= 5e-3, and
+   maximum generated mass flow <= 1.5e-2. The outer acceptance policy allows 1% on integrals and 2% on peaks.
+   The original 100x margin criterion therefore requires measured errors <= 1e-4 on integrals and <= 2e-4
+   on peaks; corpus results are summarized in section 14.22. Passing the versioned tolerances alone does not
+   satisfy that release gate. Also require mass-balance residual no worse than the reference, identical
+   `termination_reason` classification, and `burnout_times` within 1e-6 relative. An optional improvement
+   is to define peaks on the continuous solution (refine the maximum on the dense output or by parabolic
+   refinement) so they stop depending on the step grid on every backend.
 4. **Statistical parity** on 10^4-10^5 random lanes per release: report the distribution (max, 99.9th
    percentile, median) of each relative delta; fail on any lane above the limit, and require that
    failures (solver failure, timeout) occur for the same lanes in both paths.
@@ -600,8 +601,9 @@ Features outside the capability matrix (4.6) are not silent degradations: they f
 
 Parity limits are versioned constants next to the code (`solidpy/backends/_tolerances.py`), never edited
 to make a failing test pass. Any change needs a written cause. The existing numerical acceptance limits
-(peaks 2%, integrals 1%, mass balance 1%) are the *outer* contract; the internal limits above are what
-CI enforces.
+(peaks 2%, integrals 1%, mass balance 1%) are the *outer* contract. Version 5 enforces 5e-3 for grid-sampled
+peaks, 1.5e-2 for maximum generated flow and 1e-5 for integrals. The 100x margin is a separate release
+criterion on observed error, not a description of these versioned test tolerances.
 
 ### 8.3 Golden corpus
 
@@ -1325,6 +1327,43 @@ on JAX CPU and the RTX 4060. The GPU test completed in 79.15 s. Pressure-rise de
 resampling still run on the host. The test and implementation are in `tests/test_axial_flow.py` and
 `solidpy/batch/kernels/axial_flow.py`.
 
+### 14.21 Reuse the final RHS values in running reductions (2026-10-04)
+
+At an ordinary accepted DOP853 endpoint, the solver now reuses pressure, thrust and flow values returned by that
+endpoint's RHS evaluation for the running reductions. It recomputes them at source-segment boundaries, event points,
+and whenever the accepted state's inferred active-grain mask differs from the integrator's mask. This preserves the
+scalar recorder's endpoint time and state while avoiding a second state-quantity evaluation on the common path.
+
+On the RTX 4060, a three-repeat W1-typical run of 4,096 attempted lanes improved from 246.17 to 259.74 lanes/s
+(best warm time 16.639 s to 15.770 s). Compilation time was unchanged within run variation (129.424 s and 130.352 s),
+and device memory fell from 542,212,352 to 524,878,080 bytes. Both runs reported 364 lanes not completed, so this
+comparison measures the change to the same attempted workload and is not a new Phase 3 completion-throughput gate.
+Raw results and the exact command are in `docs/gpu_backend_benchmarks.md`.
+
+### 14.22 Corpus parity against the 100x release margin (2026-10-04)
+
+The full supported corpus passes the current version-5 parity tolerances on NumPy and JAX on the RTX 4060.
+Those tolerances and the original 100x margin requirement are different gates. The outer acceptance policy allows
+1% relative error on integrals and 2% on peaks; 100x tighter observed errors therefore means at most 1e-4 on
+integrals and 2e-4 on peaks. The full-corpus tests compare results directly with the stored reference and do not
+call `evaluate_numerical_acceptance` on every record; the Acceptance API is covered separately on its live test set.
+
+| Metric group | NumPy maximum relative difference | RTX 4060 JAX maximum relative difference | Version-5 tolerance | 100x margin |
+|---|---:|---:|---:|---|
+| Integrals (impulse, generated/nozzle mass) | 3.79e-6 | 2.5e-6 | 1e-5 | Pass |
+| Grid-sampled pressure, thrust and nozzle-flow peaks | 1.85e-4 | 4.4e-4 | 5e-3 | CPU passes; GPU fails |
+| Maximum generated mass flow | 8.52e-3 | 7.9e-3 | 1.5e-2 | Fails on both |
+
+The complete-corpus CPU and GPU parity tests pass their versioned limits; the GPU test covers 323 supported designs.
+The peak-pressure/thrust GPU errors are within the version-5 tolerance but exceed the 2e-4 margin threshold. The
+generated-flow tolerance is especially broad because the stored scalar peak is itself grid-sensitive and differs
+from a refined solution by up to 1.4e-2. Do not treat the passing corpus tests as proof of the 100x criterion.
+
+The release decision is still open: keep the 100x criterion and improve the peak definition/reference comparison,
+or revise that criterion explicitly for grid-sensitive peaks while retaining it for integrals. No tolerance or
+acceptance limit was changed for this review. Full-corpus test details and reproduction commands are in
+`docs/gpu_backend_benchmarks.md`.
+
 ## Appendix A. State vector and padded batch schema
 
 State per lane (size `G + 7`):
@@ -1358,8 +1397,9 @@ State per lane (size `G + 7`):
 |---|---|---|---|
 | Kernel unit | scalar methods | every kernel output | 1e-12 (NumPy) / 1e-10 (GPU) relative |
 | Integrator | `solve_ivp` on the same right-hand side | initial step, first accepted steps, event times | initial step identical; event times 1e-6 relative; step-for-step identity not required (Appendix D) |
-| Golden corpus, integrals | stored reference results | impulse, generated and nozzle mass, mass-balance residual | 1e-5 relative (measured max 4.8e-6), times 1e-6 relative |
-| Golden corpus, grid-sampled maxima | stored reference results | peak pressure, peak thrust, peak mass flows | 2e-3 relative (measured max 8e-4), or tighter once peaks are defined on the continuous solution |
+| Golden corpus, integrals | stored reference results | impulse, generated and nozzle mass, mass-balance residual | 1e-5 relative (current maxima in section 14.22), times 1e-6 relative |
+| Golden corpus, grid-sampled maxima | stored reference results | peak pressure, peak thrust, maximum nozzle flow | 5e-3 relative (version 5); measured maxima are in section 14.22 |
+| Golden corpus, generated-flow peak | stored reference results | maximum generated mass flow | 1.5e-2 relative (version 5); measured maxima are in section 14.22 |
 | Grid-sensitive diagnostics | `BurnSimulation` result | time of the thrust maximum, maximum pressure-rise rate on the native grid, axial-flux maximum, time and grain | 2e-3 relative on the value; the time of the maximum within one accepted step |
 | Uniform-grid curves | linear interpolation of the reference accepted-step grid | each resampled channel | 1e-9 relative where the grid is identical |
 | Acceptance policy | `evaluate_numerical_acceptance` | policy metrics and mass balance | policy limits (outer contract) |

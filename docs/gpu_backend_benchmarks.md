@@ -125,6 +125,30 @@ The largest differences sit in the stored reference, not in the kernels: the ref
 run is of the same size (comments in `solidpy/backends/_tolerances.py`, version 3). The NumPy backend passed the same
 test on 2026-10-03 (892 s).
 
+### Full-corpus rerun and 100x margin review (2026-10-04)
+
+After the latest kernel changes, the complete supported corpus passed on both NumPy and JAX/RTX 4060. The GPU run
+used `XLA_PYTHON_CLIENT_PREALLOCATE=false SOLIDPY_REQUIRE_GPU=1 .venv/bin/python -m pytest --runslow -q
+tests/test_batch_parity.py::test_jax_matches_the_stored_reference_on_the_whole_supported_corpus` and took 257.68 s.
+The NumPy run used `.venv/bin/python -m pytest --runslow -s -q
+tests/test_batch_parity.py::test_the_numpy_backend_matches_the_stored_reference_on_the_whole_supported_corpus`
+and took 757.10 s. Both compare each output directly to the stored reference under the version-5 tolerances; they
+do not call `evaluate_numerical_acceptance` for every corpus record.
+
+The largest relative differences in the rerun were:
+
+| Metric group | NumPy | RTX 4060 JAX | Version-5 tolerance |
+|---|---:|---:|---:|
+| Integrals (impulse, generated/nozzle mass) | 3.79e-6 | 2.5e-6 | 1e-5 |
+| Grid-sampled pressure, thrust and nozzle-flow peaks | 1.85e-4 | 4.4e-4 | 5e-3 |
+| Maximum generated mass flow | 8.52e-3 | 7.9e-3 | 1.5e-2 |
+
+These results pass the current parity tests. They do not all meet the architecture's separate 100x margin against
+the outer Acceptance policy (1% on integrals and 2% on peaks): the GPU grid-sampled peak maximum is above 2e-4,
+and the generated-flow maximum is above that margin on both backends. The complete-corpus suite is a direct parity
+comparison, not an Acceptance API evaluation on each record. See section 14.22 of the architecture document for
+the open release decision. No tolerance was changed by this rerun.
+
 ## Offloaded share of the scalar reference (Phase 4)
 
 `python tools/profile_workloads.py` times the entry points listed in `tools/tier_map.toml` on the scalar path of three
@@ -607,3 +631,32 @@ python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced
 JAX comes from `pip install "solidpy[jax-cuda12]"`. The CPU measurements need no extra package. The
 `w1_jax_cuda0_untiered.json` file was written from the console log of an earlier run (its 16,384-lane point was
 not completed); the others are written by the script.
+
+## W1 typical endpoint-RHS reuse check (2026-10-04)
+
+This before/after check isolates the solver change in section 14.21 of the architecture document. It used the same
+RTX 4060, `.venv` (Python 3.12.13, NumPy 2.4.4, SciPy 1.17.1, JAX 0.11.2), 312 supported designs with at most
+1,000 accepted points in the stored scalar result, tiled to 4,096 lanes, default tiers, and three warm repeats.
+The figures count attempted lanes: both runs reported 364 lanes not completed, so read this as a same-workload
+relative timing comparison, not a completion-throughput result or a Phase 3 gate rerun.
+
+| Measure | Before reuse | After reuse |
+|---|---:|---:|
+| First call including compilation | 129.424 s | 130.352 s |
+| Warm runs | 17.282 / 16.727 / 16.639 s | 16.282 / 15.917 / 15.770 s |
+| Best warm throughput | 246.17 attempted lanes/s | 259.74 attempted lanes/s |
+| Backend/device time for best repeat | 15.225 s | 14.568 s |
+| Peak device memory | 542,212,352 B | 524,878,080 B |
+| Lanes not completed | 364 | 364 |
+
+The best warm throughput increased 5.5%; the number of lanes not completed was unchanged. Raw outputs are
+`benchmarks/results/w1_typical_jax_cuda0_rhs_reuse_before.json` and
+`benchmarks/results/w1_typical_jax_cuda0_rhs_reuse_after.json`.
+
+Reproduce either side with:
+
+```
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_burn.py --backend jax --device cuda:0 --sizes 4096 --max-points 1000 --repeat 3 --out benchmarks/results/w1_typical_jax_cuda0_rhs_reuse_after.json
+```
+
+Use the corresponding `..._before.json` path while checking out the parent revision to reproduce the baseline.
