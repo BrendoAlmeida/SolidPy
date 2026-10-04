@@ -444,12 +444,41 @@ assembly; all samples were evaluated, with no fallback:
 
 The end-to-end JAX result is 1.03x the NumPy throughput. Host sampling and report assembly dominate enough that this
 measurement does not show a material GPU advantage over vectorized CPU; it does not isolate the structural kernel.
-Raw result: `benchmarks/results/w4_jax_cuda0_100k_4designs.json`.
+This result predates the host-side result-validation optimization below. Raw result:
+`benchmarks/results/w4_jax_cuda0_100k_4designs.json`.
 
 Reproduce with:
 
 ```
 python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 1 --out benchmarks/results/w4_jax_cuda0_100k_4designs.json
+```
+
+### W4 after vectorizing numeric result validation
+
+Profiled on 2026-10-03 on the Ryzen 5 3600 / RTX 4060 host. The previous implementation checked Python types and
+finiteness metric by metric for every sample. Standard numeric arrays now validate finiteness in a NumPy array pass;
+unusual output dtypes retain per-lane conversion and fallback handling. In a warm cProfile run for 100,000 samples,
+the instrumented call time fell from 13.10 s to 1.89 s. The benchmark below measures unprofiled calls.
+
+Four designs each ran 100,000 samples, with three warm repetitions. Aggregate time is the sum of each design's median
+warm time; all 400,000 samples were evaluated without fallback:
+
+| Path | Total samples | Aggregate median warm (s) | Samples/s | Relative to CPU vectorized |
+|---|---:|---:|---:|---:|
+| CPU vectorized | 400,000 | 3.91 | 102,207 | 1.00x |
+| JAX, RTX 4060 | 400,000 | 4.08 | 98,098 | 0.96x |
+
+The CPU and GPU paths both improved substantially from the earlier 17.98 s and 17.48 s single-warm measurements because
+both use the shared host-side validation. The W4 end-to-end path is now near parity, with NumPy slightly faster on this
+machine; the GPU kernel itself is not the host-side bottleneck. Raw results:
+`benchmarks/results/w4_cpu_vectorized_100k_4designs_post_validation.json` and
+`benchmarks/results/w4_jax_cuda0_100k_4designs_post_validation.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_structural_monte_carlo.py --backend cpu-vectorized --iterations 100000 --designs 4 --repeat 3 --out benchmarks/results/w4_cpu_vectorized_100k_4designs_post_validation.json
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 3 --out benchmarks/results/w4_jax_cuda0_100k_4designs_post_validation.json
 ```
 
 ## Reproducing

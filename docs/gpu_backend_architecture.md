@@ -1188,6 +1188,27 @@ The measured end-to-end JAX path is only 1.03x the NumPy path on W4; host sampli
 that this run does not show a material GPU advantage over vectorized CPU. This is the plan-shaped four-design result,
 not a general claim about the structural kernel alone. Result: `benchmarks/results/w4_jax_cuda0_100k_4designs.json`.
 
+#### W4 host-side result validation after profiling
+
+A hot-run profile found that `_run_structural_batch` spent most of its time rechecking every numeric metric in Python
+for every lane. Standard numeric result arrays now use a vectorized finiteness mask; unusual object/string dtypes keep
+the original per-lane validation path, and invalid values still fall back lane by lane. The structural-backend tests
+cover scalar parity, non-finite lane fallback, malformed object values, and strict mode.
+
+The updated four-design benchmark used 100,000 samples per design and three warm repetitions. The table sums the
+per-design median warm times:
+
+| Path | Samples | Aggregate median warm (s) | Samples/s | Fallbacks |
+|---|---:|---:|---:|---:|
+| CPU vectorized | 400,000 | 3.91 | 102,207 | 0 |
+| JAX, RTX 4060 | 400,000 | 4.08 | 98,098 | 0 |
+
+Both paths are substantially faster than the earlier one-repeat measurements (17.98 s CPU and 17.48 s JAX), which
+included the Python validation overhead. The updated end-to-end JAX result is 0.96x the CPU-vectorized throughput, so
+this W4 workload still does not demonstrate a GPU speedup. Raw results:
+`benchmarks/results/w4_cpu_vectorized_100k_4designs_post_validation.json` and
+`benchmarks/results/w4_jax_cuda0_100k_4designs_post_validation.json`.
+
 The GPU parity suite and updated W2/W3/W4 benchmarks now run on one real accelerator. The host has only one GPU, so
 real multi-GPU executor verification remains pending. Intra-launch refill stays deferred: JAX launches have fixed lane
 shapes, and the current measurements do not establish that chunk-boundary refill leaves material capacity unused.

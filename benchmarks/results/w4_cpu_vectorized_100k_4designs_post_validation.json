@@ -1,0 +1,92 @@
+{
+  "backend": "cpu-vectorized",
+  "device": null,
+  "backend_provenance": {
+    "backend": "cpu-vectorized",
+    "backend_api_version": 1,
+    "device": "cpu",
+    "dtype": "float64",
+    "library_versions": {
+      "python": "3.12.13",
+      "numpy": "2.4.4",
+      "scipy": "1.17.1"
+    }
+  },
+  "service": "structural_response",
+  "workload": "W4",
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": null,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "iterations_per_design": 100000,
+  "designs": 4,
+  "repeat": 3,
+  "results": [
+    {
+      "design": 0,
+      "iterations": 100000,
+      "first_call_s": 1.0504434570029844,
+      "first_samples_per_s": 95197.88936123184,
+      "warm_times_s": [
+        0.9836711729876697,
+        0.9791972170060035,
+        0.975460813002428
+      ],
+      "best_warm_s": 0.975460813002428,
+      "warm_samples_per_s": 102515.65072327625,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 1,
+      "iterations": 100000,
+      "first_call_s": 0.9828993210103363,
+      "first_samples_per_s": 101739.82000232594,
+      "warm_times_s": [
+        0.9829358889837749,
+        0.9737399459991138,
+        0.9840250719862524
+      ],
+      "best_warm_s": 0.9737399459991138,
+      "warm_samples_per_s": 102696.82414784183,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 2,
+      "iterations": 100000,
+      "first_call_s": 0.9760332820005715,
+      "first_samples_per_s": 102455.52261807138,
+      "warm_times_s": [
+        0.9730499569850508,
+        0.9772371569997631,
+        0.9782115400012117
+      ],
+      "best_warm_s": 0.9730499569850508,
+      "warm_samples_per_s": 102769.64639086493,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 3,
+      "iterations": 100000,
+      "first_call_s": 0.9755560149787925,
+      "first_samples_per_s": 102505.64648732537,
+      "warm_times_s": [
+        0.9742885670275427,
+        0.9742708520207088,
+        0.9711592840030789
+      ],
+      "best_warm_s": 0.9711592840030789,
+      "warm_samples_per_s": 102969.72046419006,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    }
+  ]
+}

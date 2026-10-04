@@ -207,6 +207,32 @@ def test_invalid_metric_value_falls_back_only_for_its_lane():
         backends.unregister_backend("one-bad-structural-metric")
 
 
+def test_non_finite_numeric_metric_falls_back_only_for_its_lane():
+    class OneNonFiniteMetricBackend(NumpyBackend):
+        name = "one-non-finite-structural-metric"
+
+        def structural_response(self, *args, **kwargs):
+            output = super().structural_response(*args, **kwargs)
+            key = "simulation.advanced.structural.burst_safety_factor"
+            values = np.asarray(output[key]).copy()
+            values[1] = np.nan
+            output[key] = values
+            return output
+
+    backends.register_backend(OneNonFiniteMetricBackend.name, OneNonFiniteMetricBackend)
+    try:
+        reference = _model(lambda: 4.0e6).run(3, backend="cpu-reference")
+        accelerated = _model(lambda: 4.0e6).run(3, backend=OneNonFiniteMetricBackend.name)
+
+        _assert_structural_reports_match(reference, accelerated)
+        assert accelerated["provenance"]["execution"]["fallback_lanes"] == [1]
+        assert accelerated["provenance"]["execution"]["fallback_reason"] == "non_finite_metric"
+        with pytest.raises(ValueError, match="contains a non-finite metric"):
+            _model(lambda: 4.0e6).run(3, backend=OneNonFiniteMetricBackend.name, strict=True)
+    finally:
+        backends.unregister_backend(OneNonFiniteMetricBackend.name)
+
+
 def test_jax_cpu_structural_monte_carlo_matches_scalar_reference():
     pytest.importorskip("jax")
     reference = _model(lambda: 8.0e6, bolt_count=4, bolt_diameter_m=0.006,

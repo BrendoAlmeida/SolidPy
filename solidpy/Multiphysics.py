@@ -2685,10 +2685,36 @@ class StructuralMonteCarlo:
                 fallback_reason = f"{type(exc).__name__}: {exc}"
 
         if service_result is not None:
+            # Schema constants and array shapes are checked above; these dtypes can be converted to float, so only
+            # finiteness needs lane-wise validation on the common numeric path.
+            python_float_size = np.dtype(float).itemsize
+            numeric_fast_path = all(
+                array.dtype.kind in "biu"
+                or (array.dtype.kind == "f" and array.dtype.itemsize <= python_float_size)
+                for array in arrays.values()
+            )
+            finite_rows = np.ones(count, dtype=bool) if numeric_fast_path else None
+            if finite_rows is not None:
+                for values in arrays.values():
+                    finite_rows &= np.isfinite(values)
+
             for local, (index, pressure) in enumerate(zip(lane_indices, pressures)):
                 row = dict(constants)
                 try:
                     row.update({name: float(values[local]) for name, values in arrays.items()})
+                    if finite_rows is not None:
+                        if not finite_rows[local]:
+                            if strict:
+                                raise ValueError(
+                                    f"backend {backend.name!r} returned a structural response that "
+                                    "contains a non-finite metric"
+                                )
+                            fallback_lanes.append(index)
+                            fallback_reason = fallback_reason or "non_finite_metric"
+                            continue
+                        outcomes[index] = (pressure, row)
+                        continue
+
                     mismatch = any(
                         (isinstance(schema[name], Real) and not isinstance(row[name], Real))
                         or (isinstance(schema[name], str) and row[name] != schema[name])
