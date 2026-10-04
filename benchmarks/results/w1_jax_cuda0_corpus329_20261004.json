@@ -1,0 +1,56 @@
+{
+  "workload": "W1: supported golden-corpus designs, tiled",
+  "base_lanes": 329,
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "backend": "jax",
+  "device": "cuda:0",
+  "tiers": "default",
+  "results": [
+    {
+      "lanes": 4096,
+      "first_call_s": 437.12,
+      "warm_s": [
+        79.817,
+        77.657
+      ],
+      "best_warm_s": 77.657,
+      "lanes_per_s": 52.74,
+      "split_s": {
+        "device_s": 75.815,
+        "assemble_s": 0.559
+      },
+      "peak_device_bytes": 322347776,
+      "lanes_not_completed": 372,
+      "tiers": [
+        [
+          [
+            [
+              2048,
+              4096,
+              108
+            ],
+            [
+              16384,
+              108,
+              24
+            ],
+            [
+              null,
+              24,
+              0
+            ]
+          ]
+        ]
+      ]
+    }
+  ]
+}

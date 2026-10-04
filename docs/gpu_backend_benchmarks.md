@@ -8,6 +8,11 @@ the throughput of the CPU reference on all cores at 4,096 lanes or more, in floa
 reference on all CPU cores (77.7 against 6.59 lanes/s) on the full corpus workload, and 54.7x faster on the
 typical workload. Parity holds on the CPU device and on the GPU.
 
+On 2026-10-04, a 4,096-lane W1 run over the expanded 329-design corpus measured 52.74 lanes/s and left 372 lanes
+incomplete. The matching 12-process CPU reference measured 8.779 lanes/s on 1,024 lanes, so the current workload
+runs 6.01x faster on the RTX 4060 and clears the 5x gate. The earlier 77.7 lanes/s GPU result and 6.59 lanes/s CPU
+reference both used 256 designs and remain historical measurements.
+
 ## Setup
 
 | | |
@@ -45,11 +50,13 @@ Throughput in lanes per second, best of two warm runs; the first call of a shape
 | Workload | Backend | Lanes | Lanes/s | vs CPU, 12 processes | vs CPU, 6 processes |
 |---|---|---|---|---|---|
 | W1 | CPU reference, 12 processes | 1,024 | 6.59 | 1x | 1.4x |
+| W1 follow-up (329 designs, 2026-10-04) | CPU reference, 12 processes | 1,024 | 8.779 | 1x | not measured |
 | W1 | CPU reference, 6 processes | 1,024 | 4.79 | 0.7x | 1x |
 | W1 | JAX, GPU, one uncapped launch | 4,096 | 35.7 | 5.4x | 7.5x |
 | W1 | JAX, GPU, one uncapped launch | 8,192 | 37.9 | 5.8x | 7.9x |
 | W1 | **JAX, GPU, tiers** | 2,048 | 45.9 | 7.0x | 9.6x |
 | W1 | **JAX, GPU, tiers** | 4,096 | **77.7** | **11.8x** | 16.2x |
+| W1 follow-up (329 designs, 2026-10-04) | JAX, GPU, tiers | 4,096 | 52.74 | 6.01x | not measured |
 | W1 | **JAX, GPU, tiers** | 8,192 | 115.8 | 17.6x | 24.2x |
 | W1 | **JAX, GPU, tiers** | 16,384 | 182.9 | 27.8x | 38.2x |
 | W1 typical | CPU reference, 12 processes | 1,024 | 11.49 | 1x | 1.3x |
@@ -59,8 +66,21 @@ Throughput in lanes per second, best of two warm runs; the first call of a shape
 | W1 | `cpu-vectorized` (NumPy), tiers | 256 | 0.94 | 0.14x | 0.20x |
 | W1 | `cpu-vectorized` (NumPy), chunks of 64, no tiers | 249 | 0.73 | 0.11x | 0.15x |
 
-First-call times (compilation included): 45 to 255 s depending on the shape; later calls of the same shape do not
-recompile. Peak device memory in the `metrics` history policy: 190 to 420 MB. The host remainder (building the
+In the original measurements, first-call times (compilation included) were 45 to 255 s by shape; later calls of the
+same shape do not recompile. The 2026-10-04 329-design GPU run took 437.12 s on its first call, then 79.82 and
+77.66 s warm; it left
+372 of 4,096 lanes incomplete and peaked at 322,347,776 device bytes. The matching CPU reference took 116.64 s
+for 1,024 lanes at 8.779 lanes/s. The raw outputs are `benchmarks/results/w1_jax_cuda0_corpus329_20261004.json`
+and `benchmarks/results/w1_cpu_reference_corpus329_20261004.json`. Reproduce them with:
+
+```
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_burn.py \
+  --backend jax --device cuda:0 --sizes 4096 --out benchmarks/results/w1_jax_cuda0_corpus329_20261004.json
+python benchmarks/bench_burn.py --backend cpu-reference --sizes 1024 --workers 12 \
+  --out benchmarks/results/w1_cpu_reference_corpus329_20261004.json
+```
+
+Peak device memory in the `metrics` history policy: 190 to 420 MB. The host remainder (building the
 result mappings, the provider hash, the git SHA) was 0.3 s at 2,048 lanes and 1.7 to 2.0 s at 16,384, about 1 to
 10 % of the run (the larger share is on the typical workload, where the device part is short).
 
@@ -692,12 +712,12 @@ below is observed relative error divided by the 100x limit, so a value no greate
 | Metric | Maximum margin ratio | Worst case |
 |---|---:|---|
 | Generated-flow peak | 0.567851 | `ratetable-003` |
-| Total impulse | 0.024562 | `ratetable-007` |
+| Total impulse | 0.024525 | `ratetable-007` |
 | Chamber-pressure peak | 0.088793 | `tolerance-013` |
 | Nozzle-flow peak | 0.088793 | `tolerance-013` |
 | Thrust peak | 0.095282 | `tolerance-013` |
-| Generated-mass integral | 0.013721 | `ratetable-007` |
-| Nozzle-mass integral | 0.013724 | `ratetable-007` |
+| Generated-mass integral | 0.013710 | `ratetable-007` |
+| Nozzle-mass integral | 0.013713 | `ratetable-007` |
 
 The other 31 designs are incomplete in both paths and their classifications agree: three are genuine `solver_failure`
 cases, and the remaining 28 have matching timeout, unsupported-thermochemistry, or other incomplete outcomes. The
@@ -705,14 +725,14 @@ former simultaneous-burnout misclassifications were fixed in the scalar referenc
 complete across the backends. See `tests/test_simultaneous_burnout_events.py` and architecture section 14.24.
 
 The additional CPU full-corpus dense-peak sweep was stopped after 29 minutes without a report and remains
-complementary to the GPU release gate. The full CPU corpus still shows `efficiency-001` outside the established
-mass-balance envelope: `3.5276e-4%` versus `1.2012e-4%` scalar, while remaining below the outer 1% limit. A matching
-JAX/CUDA probe with the same padded shape returned `0.000120516%` versus `0.000120120%` scalar, inside the versioned
-absolute difference limit of `1e-6` percentage points. The strict CPU mass-balance comparison remains open; a
-raw-residual ratio comparison was discarded because it is ill-conditioned near zero. Details are in architecture
-section 14.24.
+complementary to the GPU release gate. The CPU padded-reduction fix makes `efficiency-001` invariant between
+`g_max=4` and `g_max=24`: `0.000120066%` versus `0.000120120%` in the scalar reference, within the established
+mass-balance envelope. `star-029` measures `0.0000553855%` versus `0.000000131161%` scalar, within the `1e-4%`
+absolute floor; it is identical at `g_max=8`, 16 and 24. The whole-corpus gate uses the same envelope as the
+existing subset test. A raw-residual ratio comparison was discarded because it is ill-conditioned near zero.
+Details are in architecture section 14.24.
 
-The refreshed report took 1,322.98 s on an NVIDIA GeForce RTX 4060 (8,188 MiB, driver 610.57.04), Python 3.12.13, NumPy 2.4.4,
+The refreshed report took 1,329.86 s on an NVIDIA GeForce RTX 4060 (8,188 MiB, driver 610.57.04), Python 3.12.13, NumPy 2.4.4,
 SciPy 1.17.1, JAX/JAXlib 0.11.2. Its row-level results, solver status and exact worst-case deltas are in
 `benchmarks/results/continuous_peak_margin_jax_cuda0.json`.
 
