@@ -13,6 +13,7 @@ from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch, assemble
 from solidpy.batch.integrators import solver
 from solidpy.ensemble import simulate_burn
+from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS, builtin_parity_certificate
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 LIVE_FAMILIES = ("tubular", "star", "ends-star", "mixed", "erosive", "efficiency", "lowkn", "replicated")
@@ -110,6 +111,10 @@ def test_every_backend_returns_the_canonical_top_level_structure(backend, corpus
     assert set(result) == {"history", "metrics", "status", "efficiencies", "provenance"}
     assert result["history"] is not None
     assert result["status"]["completed"] is True
+    if backend in {"cpu-vectorized", "jax"}:
+        execution = result["provenance"]["execution"]
+        assert execution["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+        assert execution["parity_certificate"]["kernel_source_hash"] == execution["kernel_source_hash"]
 
 
 def test_the_mappings_have_the_scalar_keys_in_the_scalar_order(live):
@@ -145,6 +150,12 @@ def test_the_execution_block_records_how_the_result_was_produced(live):
     assert execution["integrator"]["name"] == "dop853_batched" and execution["fallback"] is None
     assert execution["tolerances_version"] == tol.TOLERANCES_VERSION
     assert re.fullmatch(r"[0-9a-f]{64}", execution["kernel_source_hash"]) and execution["step_overflow"] is False
+    assert execution["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+    certificate = execution["parity_certificate"]
+    assert certificate["suite"] == "solidpy-backend-parity" and certificate["suite_version"] == "1"
+    assert certificate["physics_equivalence_class"] == execution["physics_equivalence_class"]
+    assert certificate["kernel_source_hash"] == execution["kernel_source_hash"]
+    assert certificate["tolerances_version"] == execution["tolerances_version"] and certificate["passed"] is True
     assert {"python", "numpy", "scipy"} <= set(execution["library_versions"])
 
 
@@ -167,6 +178,15 @@ def test_the_kernel_source_hash_covers_the_kernel_and_integrator_files():
 
     assert assemble.kernel_source_hash() == digest.hexdigest()
     assert any(p.name == "rhs.py" for p in (root / "kernels").glob("*.py"))
+
+
+def test_builtin_parity_certificates_require_a_validated_kernel_and_tolerance_version():
+    kernel_hash = assemble.kernel_source_hash()
+
+    assert builtin_parity_certificate("jax", kernel_hash, tol.TOLERANCES_VERSION)["passed"] is True
+    assert builtin_parity_certificate("jax", "0" * 64, tol.TOLERANCES_VERSION) is None
+    assert builtin_parity_certificate("jax", kernel_hash, "unvalidated") is None
+    assert builtin_parity_certificate("third-party", kernel_hash, tol.TOLERANCES_VERSION) is None
 
 
 def test_status_and_metrics_agree_with_the_live_scalar_results(live):
@@ -206,6 +226,8 @@ def test_numerical_acceptance_passes_for_the_batched_result_against_the_referenc
         assert report["incomplete_reasons"] == []
         assert report["provenance"]["coarse"]["physics_provider_hash"] == report["provenance"]["refined"][
             "physics_provider_hash"]
+        assert report["provenance"]["coarse"]["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+        assert report["provenance"]["refined"]["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
 
 
 def test_history_channels_are_the_scalar_functions_of_the_stored_points(live):

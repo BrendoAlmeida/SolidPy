@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.14). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.15). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -623,18 +623,22 @@ provenance["execution"] = {
                    "rtol": 1e-8, "atol": 1e-10, "max_step_s": 0.01},
     "fallback": None,                      # or {"lane_reason": "callable_igniter", "ran_on": "cpu-reference"}
     "history": "metrics",
-    "kernel_source_hash": "sha256:...",    # hash of the kernel and integrator sources actually used
-    "parity_certificate": {"suite_version": "...", "tolerances_version": "...", "passed": True},
+    "kernel_source_hash": "...",    # hash of the kernel and integrator sources actually used
+    "physics_equivalence_class": "solidpy-reference-v1",
+    "parity_certificate": {"suite": "solidpy-backend-parity", "suite_version": "1",
+                           "kernel_source_hash": "...", "tolerances_version": "5", "passed": True},
 }
 ```
 
-* `physics_provider_hash` must change whenever the code that defines the physics changes. For
-  accelerated results it covers the kernel and integrator sources; the reference hash keeps its current
-  definition so existing stored results remain comparable.
-* A shared **`physics_equivalence_class`** field is added: identical for the reference backend and for a
-  backend that carries a valid parity certificate against it, different otherwise. Consumers that persist
-  results (studies, archives) can then decide programmatically whether results from different backends
-  may be mixed, instead of guessing.
+* `physics_provider_hash` retains its reference definition for every backend: resolved inputs plus the bytes
+  of `Burn.py`, `Grain.py` and `Propellant.py`. The accelerated implementation is recorded separately by
+  `execution.kernel_source_hash`; acceptance requires both hashes and compatible physics classes.
+* Accelerated results carry `physics_equivalence_class` in `execution`. Built-in backends use
+  `solidpy-reference-v1` only when their kernel hash and tolerance version are on the parity-certified list;
+  the certificate binds those values to the parity suite. Uncertified implementations receive a
+  backend-specific class. Legacy scalar
+  results without an `execution` block imply `solidpy-reference-v1`, preserving old result mappings and
+  provider hashes. `evaluate_numerical_acceptance` rejects missing, uncertified or different classes.
 * Results record the *requested* and the *effective* backend per lane when routing or fallback occurred.
 
 ### 9.3 Known sources of cross-device variation (documented, tested)
@@ -804,13 +808,11 @@ localization and exact dense output) and Phase 3 decides the future of the rest.
 
 1. **Typical batch sizes** in real use (decides how much of the heterogeneous executor is needed and
    whether refill batching in 6.3 is Phase 5 or earlier).
-2. **Provenance policy.** Should results from different backends ever be stored together? This decides
-   whether `physics_equivalence_class` must be strict or may be informational.
-3. **Differentiability.** Is gradient access (calibration, sensitivity) a goal? It favours JAX and
+2. **Differentiability.** Is gradient access (calibration, sensitivity) a goal? It favours JAX and
    affects how the integrator is written (adjoint vs unrolled).
-4. **CI and licensing.** Is GPU CI available (self-hosted or on demand), and are there constraints on
+3. **CI and licensing.** Is GPU CI available (self-hosted or on demand), and are there constraints on
    optional dependencies for a public package?
-5. **Cloud-notebook GPU model(s)** to record for the benchmark baseline.
+4. **Cloud-notebook GPU model(s)** to record for the benchmark baseline.
 
 ### 14.3 Decisions taken at implementation start (2026-10-02)
 
@@ -1212,6 +1214,18 @@ this W4 workload still does not demonstrate a GPU speedup. Raw results:
 The GPU parity suite and updated W2/W3/W4 benchmarks now run on one real accelerator. The host has only one GPU, so
 real multi-GPU executor verification remains pending. Intra-launch refill stays deferred: JAX launches have fixed lane
 shapes, and the current measurements do not establish that chunk-boundary refill leaves material capacity unused.
+
+### 14.15 Certified physics equivalence classes (2026-10-04)
+
+The provenance policy is strict: acceptance requires matching `physics_provider_hash` values and the same
+certified `physics_equivalence_class`. `cpu-vectorized` and JAX results are certified as
+`solidpy-reference-v1` only for explicitly certified kernel hashes at the active tolerance version; the
+certificate records suite version 1, the kernel source hash and that tolerance version. A changed kernel or
+tolerance requires parity validation and an updated certification entry before results share the reference
+class. An accelerated result without a valid certificate cannot pass acceptance. Legacy scalar
+results continue to imply the reference class from the absence of an execution block, so `Burn.py` and its
+historical provider hashes remain unchanged. Uncertified assembled backends receive a distinct class keyed
+by backend and kernel source hash.
 
 ## Appendix A. State vector and padded batch schema
 

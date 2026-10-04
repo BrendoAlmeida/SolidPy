@@ -7,6 +7,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+from .provenance import result_physics_equivalence_class
+
 
 V12_NUMERICAL_ACCEPTANCE_POLICY = "v12_numerical_acceptance_v1"
 
@@ -128,6 +130,23 @@ def evaluate_numerical_acceptance(
     elif provider_hashes[0] != provider_hashes[1]:
         incomplete_reasons.append("physical_inputs_or_provider_mismatch")
 
+    equivalence_classes = tuple(
+        result_physics_equivalence_class(provenance)
+        for provenance in (coarse_provenance, refined_provenance)
+    )
+    for provenance, equivalence_class in zip((coarse_provenance, refined_provenance), equivalence_classes):
+        if equivalence_class is not None:
+            continue
+        execution = provenance.get("execution")
+        if not isinstance(execution, Mapping) or not execution.get("physics_equivalence_class"):
+            reason = "physics_equivalence_class_missing"
+        else:
+            reason = "physics_equivalence_class_uncertified"
+        if reason not in incomplete_reasons:
+            incomplete_reasons.append(reason)
+    if all(value is not None for value in equivalence_classes) and equivalence_classes[0] != equivalence_classes[1]:
+        incomplete_reasons.append("physics_equivalence_class_mismatch")
+
     required_provenance = (
         "eta_c_applied",
         "eta_cf_applied",
@@ -179,10 +198,12 @@ def evaluate_numerical_acceptance(
         "provenance": {
             "coarse": {
                 "physics_provider_hash": coarse_provenance.get("physics_provider_hash"),
+                "physics_equivalence_class": equivalence_classes[0],
                 "solidpy_git_sha": coarse_provenance.get("solidpy_git_sha"),
             },
             "refined": {
                 "physics_provider_hash": refined_provenance.get("physics_provider_hash"),
+                "physics_equivalence_class": equivalence_classes[1],
                 "solidpy_git_sha": refined_provenance.get("solidpy_git_sha"),
             },
         },

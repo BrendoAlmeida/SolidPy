@@ -27,6 +27,11 @@ import numpy as np
 
 from ..backends import _tolerances
 from ..backends._protocol import parse_history_policy
+from ..provenance import (
+    REFERENCE_PHYSICS_EQUIVALENCE_CLASS,
+    builtin_parity_certificate,
+    unverified_physics_equivalence_class,
+)
 from . import problem as pb
 from .kernels import geometry, rhs
 
@@ -328,6 +333,18 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
     kernel_hash = kernel_source_hash()
     sources = _scalar_source_bytes()
     execution = dict(execution or {})
+    execution_backend = execution.get("backend")
+    certificate = builtin_parity_certificate(
+        execution_backend, kernel_hash, _tolerances.TOLERANCES_VERSION,
+    )
+    if certificate is not None:
+        execution["physics_equivalence_class"] = REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+        execution["parity_certificate"] = certificate
+    elif execution_backend != "cpu-reference":
+        execution.setdefault(
+            "physics_equivalence_class",
+            unverified_physics_equivalence_class(execution_backend, kernel_hash),
+        )
     results = []
     for lane in range(len(batch)):
         n_grains = int(batch.n_grains[lane])
