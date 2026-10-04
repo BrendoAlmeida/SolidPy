@@ -1,0 +1,91 @@
+{
+  "backend": "jax",
+  "device": "cuda:0",
+  "backend_provenance": {
+    "backend": "jax",
+    "backend_api_version": 1,
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 4060",
+    "dtype": "float64",
+    "library_versions": {
+      "python": "3.12.13",
+      "numpy": "2.4.4",
+      "scipy": "1.17.1",
+      "jax": "0.11.2",
+      "jaxlib": "0.11.2"
+    }
+  },
+  "service": "structural_response",
+  "workload": "W4",
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "iterations_per_design": 1000000,
+  "designs": 4,
+  "repeat": 2,
+  "results": [
+    {
+      "design": 0,
+      "iterations": 1000000,
+      "first_call_s": 10.485623012995347,
+      "first_samples_per_s": 95368.67754645107,
+      "warm_times_s": [
+        10.228107019996969,
+        10.092798808007501
+      ],
+      "best_warm_s": 10.092798808007501,
+      "warm_samples_per_s": 99080.54435867803,
+      "n_evaluated": 1000000,
+      "n_fallback": 0
+    },
+    {
+      "design": 1,
+      "iterations": 1000000,
+      "first_call_s": 10.329637797025498,
+      "first_samples_per_s": 96808.8155315531,
+      "warm_times_s": [
+        10.284362779988442,
+        10.12338129300042
+      ],
+      "best_warm_s": 10.12338129300042,
+      "warm_samples_per_s": 98781.2244799499,
+      "n_evaluated": 1000000,
+      "n_fallback": 0
+    },
+    {
+      "design": 2,
+      "iterations": 1000000,
+      "first_call_s": 10.165972985996632,
+      "first_samples_per_s": 98367.36743029658,
+      "warm_times_s": [
+        9.731379452015972,
+        9.708284341992112
+      ],
+      "best_warm_s": 9.708284341992112,
+      "warm_samples_per_s": 103004.81164057077,
+      "n_evaluated": 1000000,
+      "n_fallback": 0
+    },
+    {
+      "design": 3,
+      "iterations": 1000000,
+      "first_call_s": 9.824923379987013,
+      "first_samples_per_s": 101781.96422752377,
+      "warm_times_s": [
+        9.842541860998608,
+        9.685982727998635
+      ],
+      "best_warm_s": 9.685982727998635,
+      "warm_samples_per_s": 103241.97637781921,
+      "n_evaluated": 1000000,
+      "n_fallback": 0
+    }
+  ]
+}

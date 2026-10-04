@@ -481,6 +481,31 @@ python benchmarks/bench_structural_monte_carlo.py --backend cpu-vectorized --ite
 XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 3 --out benchmarks/results/w4_jax_cuda0_100k_4designs_post_validation.json
 ```
 
+### W4 scale check at one million samples per design
+
+Measured on 2026-10-04 on the same Ryzen 5 3600 / RTX 4060 host. Four designs each ran one million samples, with
+two warm repetitions per design. Aggregate time is the sum of each design's median warm time; the medians were
+calculated from the recorded `warm_times_s` arrays. All four million samples completed without fallback on both paths.
+
+| Path | Total samples | Aggregate median warm (s) | Samples/s | Relative to CPU vectorized |
+|---|---:|---:|---:|---:|
+| CPU vectorized | 4,000,000 | 38.36 | 104,275 | 1.00x |
+| JAX, RTX 4060 | 4,000,000 | 39.85 | 100,380 | 0.96x |
+
+Increasing the batch from 100,000 to one million samples per design does not produce an end-to-end GPU throughput
+advantage. These timings include host sampling, backend dispatch, device transfers and construction of the complete
+Python report; they do not isolate kernel time. A stage-level profile is needed before attributing the remaining gap
+to transfer, compute or report assembly. Raw results:
+`benchmarks/results/w4_cpu_vectorized_1m_4designs.json` and
+`benchmarks/results/w4_jax_cuda0_1m_4designs.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_structural_monte_carlo.py --backend cpu-vectorized --iterations 1000000 --designs 4 --repeat 2 --out benchmarks/results/w4_cpu_vectorized_1m_4designs.json
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 1000000 --designs 4 --repeat 2 --out benchmarks/results/w4_jax_cuda0_1m_4designs.json
+```
+
 ## Flight dispersion (W5; CPU reference, reported and non-gating)
 
 Measured on 2026-10-04 with `benchmarks/bench_flight_dispersion.py`. The benchmark exercises the public

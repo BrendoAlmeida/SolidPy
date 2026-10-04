@@ -1272,8 +1272,8 @@ chunk.
 
 The non-gating W5 CPU-reference flight-dispersion benchmark is now measured: 16 flights with 12 process workers took a
 median 2.22 s, or 7.20 flights/s. The campaign timing includes process-pool startup and report assembly; shared burn
-preparation is reported separately in `docs/gpu_backend_benchmarks.md`. W4 still shows no GPU throughput gain over
-NumPy: CPU-vectorized achieved 102,207 samples/s and JAX on the RTX 4060 achieved 98,098 samples/s (0.96x).
+preparation is reported separately in `docs/gpu_backend_benchmarks.md`. The one-million-sample-per-design W4 follow-up
+in section 14.18 likewise shows no end-to-end GPU advantage over NumPy.
 
 The remaining external inputs are representative production batch sizes; confirmation that the configured self-hosted
 GPU runner is available and has executed the workflow; and any external licensing or optional-dependency constraints
@@ -1284,6 +1284,15 @@ builds from importing there; this requires resolving CPU ISA exposure to the VM 
 can execute on that host. The PyTorch RHS microbenchmark in Appendix D measures only the right-hand side, without an
 integrator or event handling, and is not an integrated simulation result. Differentiability remains an optional Phase
 6 decision. Real multi-GPU validation remains open under section 6.2 because this host has one RTX 4060.
+
+### 14.18 W4 scale check at one million samples per design (2026-10-04)
+
+Four designs each ran one million samples, with two warm repetitions per design. Aggregate time is the sum of per-design
+median warm times. CPU-vectorized completed four million samples in 38.36 s (104,275 samples/s); JAX on the RTX 4060
+took 39.85 s (100,380 samples/s, 0.96x CPU), with no fallback lanes on either path. Increasing W4 to one million
+samples per design does not reveal a GPU throughput advantage. The measurement includes host sampling, device transfers
+and full report assembly; it does not isolate kernel performance. Raw results and reproduction commands are in
+`docs/gpu_backend_benchmarks.md`.
 
 ## Appendix A. State vector and padded batch schema
 
