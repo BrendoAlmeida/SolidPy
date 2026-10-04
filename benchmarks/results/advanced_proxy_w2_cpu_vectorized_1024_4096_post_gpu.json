@@ -1,0 +1,78 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "results": [
+    {
+      "backend": "cpu-vectorized",
+      "device": null,
+      "kind": "advanced",
+      "lanes": 1024,
+      "workers": 1,
+      "chunk_size": null,
+      "first_call_s": 6.306365301978076,
+      "seconds": 6.252796120999847,
+      "lanes_per_s": 163.7667341432937,
+      "timings": {
+        "pack_s": 0.3576400599849876,
+        "thermal_s": 1.8664701860107016,
+        "proxy_s": 0.09250350401271135,
+        "models_s": 3.929117588122608
+      },
+      "execution": {
+        "schedule": null,
+        "chunks": 1,
+        "overlap": null,
+        "advanced_proxies": {
+          "service": "advanced_physics_proxies",
+          "lanes": 1024,
+          "accelerated_lanes": 1024,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "cpu-vectorized": 1024
+          },
+          "fallback_errors": {}
+        }
+      }
+    },
+    {
+      "backend": "cpu-vectorized",
+      "device": null,
+      "kind": "advanced",
+      "lanes": 4096,
+      "workers": 1,
+      "chunk_size": null,
+      "first_call_s": 24.30755400698399,
+      "seconds": 24.05723654999747,
+      "lanes_per_s": 170.26061956398857,
+      "timings": {
+        "pack_s": 1.4218488699989393,
+        "thermal_s": 6.401208708994091,
+        "proxy_s": 0.3444702429987956,
+        "models_s": 15.857363771880046
+      },
+      "execution": {
+        "schedule": null,
+        "chunks": 1,
+        "overlap": null,
+        "advanced_proxies": {
+          "service": "advanced_physics_proxies",
+          "lanes": 4096,
+          "accelerated_lanes": 4096,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "cpu-vectorized": 4096
+          },
+          "fallback_errors": {}
+        }
+      }
+    }
+  ]
+}

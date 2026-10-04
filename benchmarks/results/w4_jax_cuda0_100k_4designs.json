@@ -1,0 +1,87 @@
+{
+  "backend": "jax",
+  "device": "cuda:0",
+  "backend_provenance": {
+    "backend": "jax",
+    "backend_api_version": 1,
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 4060",
+    "dtype": "float64",
+    "library_versions": {
+      "python": "3.12.13",
+      "numpy": "2.4.4",
+      "scipy": "1.17.1",
+      "jax": "0.11.2",
+      "jaxlib": "0.11.2"
+    }
+  },
+  "service": "structural_response",
+  "workload": "W4",
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "iterations_per_design": 100000,
+  "designs": 4,
+  "repeat": 1,
+  "results": [
+    {
+      "design": 0,
+      "iterations": 100000,
+      "first_call_s": 4.6569552890141495,
+      "first_samples_per_s": 21473.257481320896,
+      "warm_times_s": [
+        4.385134206007933
+      ],
+      "best_warm_s": 4.385134206007933,
+      "warm_samples_per_s": 22804.319161542004,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 1,
+      "iterations": 100000,
+      "first_call_s": 4.545900943980087,
+      "first_samples_per_s": 21997.83964329999,
+      "warm_times_s": [
+        4.36348163097864
+      ],
+      "best_warm_s": 4.36348163097864,
+      "warm_samples_per_s": 22917.479310568804,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 2,
+      "iterations": 100000,
+      "first_call_s": 4.5102814190031495,
+      "first_samples_per_s": 22171.565521093744,
+      "warm_times_s": [
+        4.370287947996985
+      ],
+      "best_warm_s": 4.370287947996985,
+      "warm_samples_per_s": 22881.7874679934,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 3,
+      "iterations": 100000,
+      "first_call_s": 4.672920281009283,
+      "first_samples_per_s": 21399.894281612153,
+      "warm_times_s": [
+        4.359156912018079
+      ],
+      "best_warm_s": 4.359156912018079,
+      "warm_samples_per_s": 22940.215738576117,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.13). The W1-W3 CPU-reference coverage gate passes; updated GPU throughput and real multi-GPU verification remain pending on a compatible accelerator host. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.14). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -977,8 +977,8 @@ kernel source hash without changing `physics_provider_hash` across backends.
 
 Parity tests cover steel and composite cases, configured/unavailable bolts, optional thermal service metrics, callback
 failures, backend fallback and the scalar reference. Optional JAX CPU and GPU tests are present. The W4 harness is
-`benchmarks/bench_structural_monte_carlo.py` (100,000 samples per design by default); a 100,000-sample GPU result is
-still pending because the current verification host has no working NVIDIA driver or installed JAX package.
+`benchmarks/bench_structural_monte_carlo.py` (100,000 samples per design by default). Its RTX 4060 measurement is
+recorded in section 14.14.
 
 This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `StructuralMonteCarlo`. General transient
 structural, CFD and ignition proxies are now batched as described in section 14.12. Flight remains CPU work.
@@ -1033,8 +1033,8 @@ the result ordering and burn mass mapping were checked through the CPU-vectorize
 was checked against the CPU-vectorized batch result.
 
 The focused review suite passed (`69 passed, 1 skipped` across executor, ensemble, registry and batch-result tests).
-This host has no JAX installation or GPU driver, so a real JAX multi-device run is still required before relying on
-concurrent accelerator launches in production.
+The later RTX 4060 run in section 14.14 validates single-device JAX execution. Concurrent real multi-GPU launches are
+still unverified because this host has one accelerator; executor concurrency remains covered by the fake-device tests.
 
 W2/W3 now use a bounded pipeline when `workers > 1`. Reference pools persist across chunks, worker native-threading is
 limited, and configurable `reserved_cores` leaves capacity for device feeders. The scheduler dynamically shares queued
@@ -1057,14 +1057,14 @@ assigned lanes per second from actual chunks. This completion-based feedback nat
 work without a separate calibration batch.
 
 Fake multi-device CPU backends cover concurrency and ordering. The focused regression suite passed (`88 passed, 1
-skipped`), followed by the full suite (`1089 passed, 8 skipped` in 8m29s). The current host has no JAX installation or
-working GPU driver, so concurrent accelerator launches and the W2/W3 pipeline throughput on a real GPU remain
-unverified.
+skipped`), followed by the full suite (`1089 passed, 8 skipped` in 8m29s). At the time of those runs, the test process
+did not have JAX or a working GPU driver. Subsequent single-GPU checks and updated W2/W3 throughput are recorded in
+section 14.14; real multi-GPU execution remains unverified.
 
 Inter-chunk refill and the W2/W3 process pipeline are implemented. Intra-launch lane replacement is deferred because
 the compiled JAX batch has a fixed lane shape. An optional manually dispatched GPU workflow is in
-`.github/workflows/gpu-backend.yml`; it requires a self-hosted Linux runner labelled `gpu`. Real multi-GPU verification
-and the W4 GPU benchmark remain hardware-dependent.
+`.github/workflows/gpu-backend.yml`; it requires a self-hosted Linux runner labelled `gpu`. The W4 GPU benchmark is now
+recorded in section 14.14. Real multi-GPU verification remains hardware-dependent.
 
 ### 14.12 Batched transient structural, CFD and ignition proxies (2026-10-03)
 
@@ -1081,13 +1081,12 @@ post-processing path. Flight simulation remains on the CPU. The public per-desig
 
 Parity tests compare every numeric proxy field and the optional/category fields against the scalar functions for steel and
 composite casings, varying curve lengths (including a one-point curve), thermal-wall metrics and the reference backend.
-An optional JAX CPU parity test is included. This verification host has no JAX package or working NVIDIA driver, so neither
-JAX execution nor GPU throughput has been verified here. Detailed-ballistics batching follows in section 14.13; flight
-simulation remains CPU work.
+JAX CPU parity and RTX 4060 GPU parity both pass; the GPU test and W2 throughput results are recorded in section 14.14.
+Detailed-ballistics batching follows in section 14.13; flight simulation remains CPU work.
 
 The updated scalar-reference profile (`benchmarks/results/offloaded_share_post_proxy.json`) reports offloaded shares of
 0.987 for W1, 0.990 for W2 and 0.993 for W3, all above the 0.8 coverage gate. These measurements validate the coverage
-map only; JAX/GPU execution and throughput still require the configured accelerator runner.
+map only; actual single-GPU parity and W2/W3 throughput are recorded in section 14.14.
 
 ### 14.13 Batched detailed-ballistics post-processing (2026-10-03)
 
@@ -1100,14 +1099,74 @@ status, canonical result and provenance references.
 `run_robustness_ensemble` sends each solved lane through the service provided by its burn backend, including
 heterogeneous schedules. Each service batch is capped at 512 histories; lanes with callback activation, unsupported grain
 geometry, service errors or scalar burn fallbacks use `build_detailed_ballistics` on the CPU. Execution records report
-service counts and fallback errors; timings add `detail_s`. Optional JAX CPU parity coverage is included, but this host
-has no JAX installation or working NVIDIA driver, so device execution and updated W3 GPU throughput remain unverified.
+service counts and fallback errors; timings add `detail_s`. JAX CPU and RTX 4060 GPU parity pass. Updated W3 GPU
+throughput after batching detailed ballistics is recorded in section 14.14.
 
 The current CPU-vectorized W3 measurement (`benchmarks/results/w3_cpu_vectorized_detail_batch.json`) processes 216 lanes
 in 11.88 s (18.2 lanes/s); all lanes use the batch service, which accounts for 0.36 s. The updated scalar-reference
 coverage profile (`benchmarks/results/offloaded_share_post_detail_batch.json`) measures W1 0.989, W2 0.990 and W3 0.999.
 Detailed ballistics is batched in W3; W2's standalone `build_detailed_ballistics` call remains scalar. All three workloads
-pass the coverage gate, but these CPU measurements do not replace GPU throughput verification.
+pass the coverage gate; updated GPU throughput is recorded in section 14.14.
+
+### 14.14 RTX 4060 validation and updated W2-W4 measurements (2026-10-03)
+
+JAX 0.11.2 / jaxlib 0.11.2 with the project's CUDA 12 extra was installed in the project environment (Python 3.12.13,
+NumPy 2.4.4, SciPy 1.17.1). The RTX 4060 (8 GiB, driver 610.57.04) ran the GPU-marked backend tests with
+`SOLIDPY_REQUIRE_GPU=1` and JAX preallocation disabled:
+
+| Test group | Result |
+|---|---:|
+| `tests/test_backend_jax.py` (`-m gpu`) | 5 passed |
+| `tests/test_structural_monte_carlo_backend.py` (`-m gpu`) | 1 passed |
+| `tests/test_batch_advanced_physics.py` (`-m gpu`) | 1 passed |
+| `tests/test_batch_detailed_ballistics.py` (`-m gpu`) | 1 passed |
+
+The corresponding JAX CPU service checks for advanced proxies, detailed ballistics and StructuralMonteCarlo passed
+(`3 passed`). The GPU service tests were added to `.github/workflows/gpu-backend.yml`; the workflow now covers those
+services along with burn, robustness, thermal and StructuralMonteCarlo parity.
+
+**W2 advanced physics** was measured at 1,024 and 4,096 lanes with one warm repeat. NumPy and JAX ran the same workload
+on this host. Every proxy lane used the selected service and there were no scalar proxy fallbacks.
+
+| Lanes | NumPy warm (s) | JAX warm (s) | JAX lanes/s | JAX speedup |
+|---:|---:|---:|---:|---:|
+| 1,024 | 6.25 | 5.17 | 198.0 | 1.21x |
+| 4,096 | 24.06 | 18.67 | 219.4 | 1.29x |
+
+The JAX 4,096-lane stages were 1.44 s packing, 1.01 s thermal, 0.25 s batched proxies and 15.94 s CPU models/flight.
+The remaining host work limits the end-to-end gain. First calls, including compilation, took 9.38 s and 22.59 s for the
+two shapes. Results: `benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_4096_post_gpu.json` and
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_1024_4096.json`.
+
+**W3 robustness** was rerun after detailed-ballistics batching with one warm repeat and `keep_series=False`:
+
+| Designs | Lanes | First call (s) | Warm (s) | Lanes/s | Fallback lanes |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 432 | 69.96 | 3.24 | 133.2 | 0 |
+| 64 | 1,728 | 86.60 | 9.47 | 182.4 | 0 |
+| 152 | 4,104 | 188.07 | 21.52 | 190.7 | 0 |
+| 304 | 8,208 | 135.11 | 47.93 | 171.2 | 0 |
+
+All designs completed. At 4,104 lanes, the warm run improved from the previous 30.0 s / 136.8 lanes/s measurement to
+21.52 s / 190.7 lanes/s after detailed-ballistics batching (1.39x). The service took 3.20 s of that run. First-call
+times include shape-specific compilation. Result: `benchmarks/results/w3_jax_cuda0_post_detail_batch.json`.
+
+**W4 StructuralMonteCarlo** ran 100,000 samples on each of four designs, including host sampling and report assembly.
+The JAX result evaluated all 400,000 samples with no fallback. Its aggregate warm time is 17.48 s (22,886 samples/s):
+
+| Path | Samples | Warm elapsed (s) | Samples/s | Relative to JAX |
+|---|---:|---:|---:|---:|
+| CPU scalar reference | 400,000 | 53.56 | 7,468 | 0.33x |
+| CPU vectorized | 400,000 | 17.98 | 22,248 | 0.97x |
+| JAX, RTX 4060 | 400,000 | 17.48 | 22,886 | 1.00x |
+
+The measured end-to-end JAX path is only 1.03x the NumPy path on W4; host sampling and report assembly dominate enough
+that this run does not show a material GPU advantage over vectorized CPU. This is the plan-shaped four-design result,
+not a general claim about the structural kernel alone. Result: `benchmarks/results/w4_jax_cuda0_100k_4designs.json`.
+
+The GPU parity suite and updated W2/W3/W4 benchmarks now run on one real accelerator. The host has only one GPU, so
+real multi-GPU executor verification remains pending. Intra-launch refill stays deferred: JAX launches have fixed lane
+shapes, and the current measurements do not establish that chunk-boundary refill leaves material capacity unused.
 
 ## Appendix A. State vector and padded batch schema
 

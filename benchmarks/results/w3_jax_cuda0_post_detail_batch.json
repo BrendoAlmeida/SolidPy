@@ -1,0 +1,172 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04",
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": "0.11.2"
+  },
+  "monte_carlo_samples": 16,
+  "max_step_size": 0.01,
+  "results": [
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 16,
+      "lanes": 432,
+      "workers": 1,
+      "chunk_lanes": 4096,
+      "first_call_s": 69.95515707699815,
+      "seconds": 3.2436900549801067,
+      "lanes_per_s": 133.18165196971924,
+      "timings": {
+        "pack_s": 0.14279293600702658,
+        "solve_s": 2.751364912983263,
+        "detail_s": 0.31283712599542923,
+        "postprocess_s": 0.0,
+        "report_s": 0.008421094971708953
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 16,
+      "max_steps": 2000,
+      "keep_series": false,
+      "execution": {
+        "schedule": "burn_postprocess_pipeline",
+        "lanes": 432,
+        "chunks": 1,
+        "process_batches": 0,
+        "overlap": false,
+        "detailed_ballistics": {
+          "service": "detailed_ballistics",
+          "lanes": 432,
+          "accelerated_lanes": 432,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "jax": 432
+          },
+          "fallback_errors": {}
+        }
+      }
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 64,
+      "lanes": 1728,
+      "workers": 1,
+      "chunk_lanes": 4096,
+      "first_call_s": 86.59673531597946,
+      "seconds": 9.47209620900685,
+      "lanes_per_s": 182.43057944838813,
+      "timings": {
+        "pack_s": 0.5807644479791634,
+        "solve_s": 7.417159248987446,
+        "detail_s": 1.342213823023485,
+        "postprocess_s": 0.0,
+        "report_s": 0.03374387213261798
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 64,
+      "max_steps": 2000,
+      "keep_series": false,
+      "execution": {
+        "schedule": "burn_postprocess_pipeline",
+        "lanes": 1728,
+        "chunks": 1,
+        "process_batches": 0,
+        "overlap": false,
+        "detailed_ballistics": {
+          "service": "detailed_ballistics",
+          "lanes": 1728,
+          "accelerated_lanes": 1728,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "jax": 1728
+          },
+          "fallback_errors": {}
+        }
+      }
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 152,
+      "lanes": 4104,
+      "workers": 1,
+      "chunk_lanes": 4096,
+      "first_call_s": 188.06863702600822,
+      "seconds": 21.52453812098247,
+      "lanes_per_s": 190.66611218009618,
+      "timings": {
+        "pack_s": 1.9085011490096804,
+        "solve_s": 16.153887273016153,
+        "detail_s": 3.203127029031748,
+        "postprocess_s": 0.0,
+        "report_s": 0.08084244819474407
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 152,
+      "max_steps": 2000,
+      "keep_series": false,
+      "execution": {
+        "schedule": "burn_postprocess_pipeline",
+        "lanes": 4104,
+        "chunks": 2,
+        "process_batches": 0,
+        "overlap": false,
+        "detailed_ballistics": {
+          "service": "detailed_ballistics",
+          "lanes": 4104,
+          "accelerated_lanes": 4104,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "jax": 4104
+          },
+          "fallback_errors": {}
+        }
+      }
+    },
+    {
+      "backend": "jax",
+      "device": "cuda:0",
+      "designs": 304,
+      "lanes": 8208,
+      "workers": 1,
+      "chunk_lanes": 4096,
+      "first_call_s": 135.10613867398934,
+      "seconds": 47.93297033201088,
+      "lanes_per_s": 171.23912712161894,
+      "timings": {
+        "pack_s": 2.6876948839926627,
+        "solve_s": 38.156981044012355,
+        "detail_s": 6.553826958028367,
+        "postprocess_s": 0.0,
+        "report_s": 0.16198813283699565
+      },
+      "fallback_lanes": 0,
+      "completed_designs": 304,
+      "max_steps": 2000,
+      "keep_series": false,
+      "execution": {
+        "schedule": "burn_postprocess_pipeline",
+        "lanes": 8208,
+        "chunks": 3,
+        "process_batches": 0,
+        "overlap": false,
+        "detailed_ballistics": {
+          "service": "detailed_ballistics",
+          "lanes": 8208,
+          "accelerated_lanes": 8208,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "jax": 8208
+          },
+          "fallback_errors": {}
+        }
+      }
+    }
+  ]
+}

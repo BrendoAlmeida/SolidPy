@@ -17,6 +17,9 @@ typical workload. Parity holds on the CPU device and on the GPU.
 | Software | Python 3.12.13, NumPy 2.5.3, SciPy 1.18.1, JAX 0.11.2 with the CUDA 12 plugin |
 | Precision | float64 everywhere (`jax_enable_x64` scoped to each solve) |
 
+The table records the original Phase 3 gate environment. The updated W2-W4 runs below used the project `.venv` with
+Python 3.12.13, NumPy 2.4.4, SciPy 1.17.1 and JAX 0.11.2; each raw JSON file records its exact environment metadata.
+
 ## Workloads
 
 Both are the 256 golden-corpus designs that the batched kernels supported when the gate was measured (no igniter,
@@ -141,8 +144,7 @@ profiles are preserved as `benchmarks/results/offloaded_share_post_proxy.json` a
 The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with burn batching; W2
 also batches thermal ablation and transient structural, CFD and ignition proxies; W2 detailed ballistics is still scalar.
 Detailed ballistics, flight and other host work account for about 0.9 % of W2's scalar time. The measured share can vary
-with host load; these numbers measure available batched coverage, do not establish that a JAX/GPU run completed, and do
-not predict device throughput.
+with host load; these numbers measure available batched coverage. Actual JAX/GPU measurements are recorded below.
 
 ## Robustness ensembles (W3) on the GPU (Phase 4a)
 
@@ -169,7 +171,7 @@ backend (`fallback_lanes = 0`) and every design completed.
 Before the `detailed_ballistics` service was added, the 4,104-lane warm run spent 1.4 s packing, 16.7 s on device burns
 (246 lanes/s on their own), 11.8 s building detailed histories on one CPU core (2.9 ms per lane, 39 % of the run), and
 0.08 s assembling reports. Those historical numbers met the 5x gate but were capped near 137 lanes/s by the serial
-post-processing loop. The CPU-only rerun after batching is recorded below; GPU throughput must be remeasured on a GPU host.
+post-processing loop. CPU and updated GPU reruns after batching are recorded below.
 
 Two things to know when using it:
 
@@ -193,8 +195,8 @@ lanes), so the comparison is of equal work. Lane sets (`--kind`): `typical`, 13 
 11 wall cells, 50 to 200 time steps) tiled with the gas and start temperature varied; `wide`, random designs (4 to 18 cells, 30
 to 400 steps); `advanced`, the whole advanced physics of designs with real burn curves (344 points) through
 `run_advanced_physics_ensemble`, against `simulate_advanced_physics` in a pool. The `advanced` rows below predate the
-`advanced_physics_proxies` service; its updated CPU-only whole-W2 results are recorded later in this document. The GPU
-whole-W2 result needs to be rerun with the new proxy kernels.
+`advanced_physics_proxies` service; updated whole-W2 CPU and GPU results after adding those proxies are recorded later in
+this document.
 
 | Lane set | Path | Lanes | Warm time | Lanes/s | vs CPU, 12 processes |
 |---|---|---|---|---|---|
@@ -235,11 +237,11 @@ What the numbers say:
 
 Replacing finished lanes inside an active accelerator launch remains unimplemented. Detailed-ballistics, general
 transient structural, CFD and ignition proxy kernels are implemented; W4's synthetic peak-pressure path is a separate
-kernel. Completion rates are reported from real chunks, so a separate
-throughput-calibration solve is not used. The heterogeneous executor and bounded W2/W3 post-processing pipeline are
-implemented, but this host has no JAX or working GPU driver, so concurrent device execution has only been checked with
-fake backends. W4's 100,000-sample harness is `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain
-pending. All measured numbers are for one machine; they say nothing about other devices.
+kernel. Completion rates are reported from real chunks, so a separate throughput-calibration solve is not used. The
+heterogeneous executor and bounded W2/W3 post-processing pipeline are implemented. Single-GPU parity and updated W2,
+W3 and W4 throughput have now been measured on the RTX 4060 below; concurrent real multi-GPU execution remains pending
+because this host has one GPU. The intra-launch refill follow-up remains conditional on evidence of unused capacity.
+All measured numbers are for one machine; they say nothing about other devices.
 
 ## CPU post-processing workers (W2 and W3)
 
@@ -260,10 +262,9 @@ design and `keep_series=False`.
 
 Six workers were slower on all three tested shapes: the W2 model stage took 3.29x as long at 256 lanes and 2.84x as long
 at 1,024 lanes; the W3 detailed-ballistics stage took 2.77x as long. Pool startup and job serialization outweigh the
-parallel work on this host, so the pool is opt-in and serial is the default. A GPU run could change the total W3 balance,
-but that is an inference and remains unmeasured; these CPU-model timings still apply. The rows above were measured before
-the producer-consumer pipeline was added and do not include its overlap. A CPU-only post-pipeline sample follows; GPU
-end-to-end W2/W3 throughput is still pending. The benchmark CLIs expose `--chunk-size` for W2 and `--chunk-lanes` for W3,
+parallel work on this host, so the pool is opt-in and serial is the default. The rows above were measured before the
+producer-consumer pipeline was added and do not include its overlap. A CPU-only post-pipeline sample follows; updated
+GPU end-to-end W2/W3 throughput is recorded below. The benchmark CLIs expose `--chunk-size` for W2 and `--chunk-lanes` for W3,
 and their JSON records whether multiple solve chunks overlapped process work. Raw pre-pipeline benchmark output is in
 `benchmarks/results/postprocess_w2_numpy_workers{1,6}.json`,
 `benchmarks/results/postprocess_w2_numpy_1024_workers{1,6}.json` and
@@ -316,13 +317,36 @@ python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --wo
 python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --chunk-size 256 --repeat 1
 ```
 
+## W2 on the RTX 4060 after batching transient proxies
+
+Measured with one warm repeat on the Ryzen 5 3600 / RTX 4060 host, JAX 0.11.2, float64 and no scalar proxy fallbacks.
+The NumPy and JAX runs used the same W2 advanced-physics workload, including thermal ablation, transient proxies and
+CPU flight models:
+
+| Lanes | NumPy warm (s) | JAX warm (s) | JAX lanes/s | JAX speedup |
+|---:|---:|---:|---:|---:|
+| 1,024 | 6.25 | 5.17 | 198.0 | 1.21x |
+| 4,096 | 24.06 | 18.67 | 219.4 | 1.29x |
+
+At 4,096 lanes, the JAX run spent 1.44 s packing, 1.01 s on thermal, 0.25 s on the batched proxies and 15.94 s on
+CPU models/flight. The remaining host work limits the end-to-end gain. First calls including compilation were 9.38 s and
+22.59 s. Raw results: `benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_4096_post_gpu.json` and
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_1024_4096.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --lanes 1024,4096 --repeat 1 --out benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_4096_post_gpu.json
+python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced --lanes 1024,4096 --repeat 1 --out benchmarks/results/advanced_proxy_w2_jax_cuda0_1024_4096.json
+```
+
 ## W3 detailed-ballistics service after batching (CPU-only)
 
 Measured on 2026-10-03 on the same Ryzen 5 3600 host with eight designs and 216 lanes (27 per design), using
 `cpu-vectorized`, one solve chunk, and `keep_series=False`. The warm call took 11.88 s (18.2 lanes/s): 0.069 s to pack,
 11.422 s to solve burns, 0.363 s in the detailed-ballistics service, and 0.005 s to assemble reports. All 216 histories
-used the batch service; there were no scalar fallbacks. This CPU run checks the updated stage accounting and does not
-predict the W3 GPU throughput. It is not directly comparable to the older six-worker, four-chunk pipeline sample above.
+used the batch service; there were no scalar fallbacks. This CPU run checks the updated stage accounting; updated GPU
+throughput is recorded below. It is not directly comparable to the older six-worker, four-chunk pipeline sample above.
 
 Raw result: `benchmarks/results/w3_cpu_vectorized_detail_batch.json`.
 
@@ -332,11 +356,33 @@ Reproduce with:
 python benchmarks/bench_robustness.py --backend cpu-vectorized --designs 8 --workers 1 --repeat 1 --out benchmarks/results/w3_cpu_vectorized_detail_batch.json
 ```
 
+## W3 on the RTX 4060 after batching detailed ballistics
+
+Measured with one warm repeat, `keep_series=False`, 2,000 maximum history points and 4,096-lane burn chunks. All designs
+completed, every lane used JAX for burn and detailed-ballistics services, and there were no scalar fallbacks:
+
+| Designs | Lanes | First call (s) | Warm (s) | Lanes/s | Fallback lanes |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 432 | 69.96 | 3.24 | 133.2 | 0 |
+| 64 | 1,728 | 86.60 | 9.47 | 182.4 | 0 |
+| 152 | 4,104 | 188.07 | 21.52 | 190.7 | 0 |
+| 304 | 8,208 | 135.11 | 47.93 | 171.2 | 0 |
+
+At 4,104 lanes, throughput increased from 136.8 to 190.7 lanes/s (1.39x) after detailed-ballistics batching; its service
+took 3.20 s. First-call time includes compilation of the launch shapes. Raw result:
+`benchmarks/results/w3_jax_cuda0_post_detail_batch.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0_post_detail_batch.json
+```
+
 ## Structural Monte Carlo (W4)
 
 Measured on 2026-10-03 on the Ryzen 5 3600 host above, with one design and 100,000 peak-pressure samples. The numbers
-include host sampling and assembly of the full `StructuralMonteCarlo` report. This host has no working NVIDIA driver or
-JAX installation, so the comparison is the scalar reference and NumPy vectorization on one process:
+include host sampling and assembly of the full `StructuralMonteCarlo` report. These CPU baselines were collected before
+the JAX/RTX 4060 run below:
 
 | Path | Samples | First call | Samples/s | Fallback lanes |
 |---|---:|---:|---:|---:|
@@ -357,8 +403,26 @@ designs sequentially and includes report assembly; throughput below uses total e
 
 The vectorized CPU run is 2.98x faster for this workload. Raw results are in
 `benchmarks/results/w4_cpu_reference_100k_4designs.json` and
-`benchmarks/results/w4_cpu_vectorized_100k_4designs.json`. The four-design GPU run remains pending on a compatible JAX
-CUDA host.
+`benchmarks/results/w4_cpu_vectorized_100k_4designs.json`.
+
+The RTX 4060 ran the same four designs, each with 100,000 samples. Warm time includes host sampling and full report
+assembly; all samples were evaluated, with no fallback:
+
+| Path | Total samples | Warm elapsed (s) | Aggregate samples/s | Relative to JAX |
+|---|---:|---:|---:|---:|
+| CPU scalar reference | 400,000 | 53.56 | 7,468 | 0.33x |
+| CPU vectorized | 400,000 | 17.98 | 22,248 | 0.97x |
+| JAX, RTX 4060 | 400,000 | 17.48 | 22,886 | 1.00x |
+
+The end-to-end JAX result is 1.03x the NumPy throughput. Host sampling and report assembly dominate enough that this
+measurement does not show a material GPU advantage over vectorized CPU; it does not isolate the structural kernel.
+Raw result: `benchmarks/results/w4_jax_cuda0_100k_4designs.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 1 --out benchmarks/results/w4_jax_cuda0_100k_4designs.json
+```
 
 ## Reproducing
 
@@ -373,7 +437,7 @@ Robustness ensembles (W3):
 
 ```
 python benchmarks/bench_robustness.py --backend cpu-scalar --workers 12,6 --designs 36 --out benchmarks/results/w3_cpu_scalar.json
-python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0.json
+python benchmarks/bench_robustness.py --backend jax --device cuda:0 --designs 16,64,152,304 --repeat 1 --out benchmarks/results/w3_jax_cuda0_post_detail_batch.json
 python tools/profile_workloads.py --out benchmarks/results/offloaded_share.json
 ```
 
@@ -381,7 +445,7 @@ Structural Monte Carlo (W4):
 
 ```
 python benchmarks/bench_structural_monte_carlo.py --backend cpu-reference --iterations 100000 --designs 4 --out benchmarks/results/w4_cpu_reference.json
-python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --out benchmarks/results/w4_jax_cuda0.json
+python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 4 --repeat 1 --out benchmarks/results/w4_jax_cuda0_100k_4designs.json
 ```
 
 Thermal ablation (phase 4b):
