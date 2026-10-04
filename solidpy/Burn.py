@@ -868,9 +868,25 @@ class BurnSimulation(Burn):
                         reached_cutoff = True
                         break
                     tolerance = 64 * np.finfo(float).eps
+                    reported_events = {
+                        index
+                        for event_position, index in enumerate(grain_event_indices)
+                        if len(raw.t_events[event_position])
+                    }
+                    # Trust the localized terminal event even when its returned state undershoots the depth.
+                    # Coalesce exact same-depth, same-state grains; those events are simultaneous by construction.
+                    simultaneous = set(reported_events)
+                    for event_index in reported_events:
+                        event_depth = self.motor.grains[event_index].burnout_regression_m
+                        event_regression = state[2 + event_index]
+                        simultaneous.update(
+                            index for index in grain_event_indices
+                            if self.motor.grains[index].burnout_regression_m == event_depth
+                            and state[2 + index] == event_regression
+                        )
                     for index in grain_event_indices:
                         depth = self.motor.grains[index].burnout_regression_m
-                        if state[2 + index] >= depth * (1 - tolerance):
+                        if index in simultaneous or state[2 + index] >= depth * (1 - tolerance):
                             state[2 + index] = depth
                             active[index] = False
                             self._burnout_times[index] = start
