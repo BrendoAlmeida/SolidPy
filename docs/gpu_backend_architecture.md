@@ -885,8 +885,9 @@ Parity is checked per kernel at 1e-12 and per simulation with the versioned limi
 was verified against a refined run; each limit carries the cause in a comment. The whole-corpus test
 (`pytest tests/test_batch_parity.py --runslow`) takes minutes and is skipped by default.
 
-Known cost, not yet removed: the running reductions re-evaluate the model at every accepted point, about one in
-fourteen of the evaluations a step makes; the derivative evaluation at the end of the step could be reused.
+Cost identified in this first round and removed in section 14.21: the running reductions used to re-evaluate the
+model at every accepted point, about one in fourteen evaluations per step. They now reuse the final RHS values at
+ordinary accepted endpoints and recompute only when the endpoint semantics differ.
 
 Not implemented, in the order they matter: the `uniform:N` and `decimated:N` history policies; the
 heterogeneous CPU+GPU executor (the last tier is latency bound and suits spare CPU cores, benchmarks section
