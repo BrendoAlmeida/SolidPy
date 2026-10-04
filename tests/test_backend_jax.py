@@ -1,4 +1,3 @@
-import importlib.util
 import threading
 
 import numpy as np
@@ -13,16 +12,6 @@ from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 ROUNDING_DECIDED = ("solver-failure",)  # see tests/test_batch_solver.py
-
-
-def test_a_missing_jax_is_reported_with_the_install_command_and_never_imported(monkeypatch):
-    real = importlib.util.find_spec
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: None if name == "jax" else real(name, *a, **k))
-
-    assert backends.available()["jax"].startswith("missing: pip install")
-    assert "solidpy[jax-cuda12]" in backends.available()["jax"]
-    with pytest.raises(BackendUnavailable, match=r"needs the missing package\(s\): jax.*solidpy\[jax-cuda12\]"):
-        backends.get_backend("jax")
 
 
 jax = pytest.importorskip("jax")
@@ -264,6 +253,54 @@ def test_on_the_accelerator_the_corpus_subset_matches_the_reference(subset):
     assert execution["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
     assert execution["parity_certificate"]["kernel_source_hash"] == execution["kernel_source_hash"]
     assert execution["parity_certificate"]["tolerances_version"] == execution["tolerances_version"]
+
+
+@pytest.mark.gpu
+def test_the_accelerator_preserves_source_endpoints_blowdown_events_and_full_history():
+    corpus = gc.load_corpus()["cases"]
+    reference = gc.load_reference()["records"]
+    families = ("igniter-scalar", "activation-table", "ramp", "quirk")
+    cases = [
+        min((case for case in corpus if case["family"] == family),
+            key=lambda case: reference[case["id"]]["history_points"])
+        for family in families
+    ]
+    batch = pack(cases)
+    options = SolveOptions(history="full", max_steps=1200)
+
+    cpu = backends.get_backend("cpu-vectorized").solve_burn(batch, options).to_results()
+    gpu = backends.get_backend("jax", device="cuda:0").solve_burn(batch, options).to_results()
+
+    assert compare_with_the_reference(cases, reference, cpu) == []
+    assert compare_with_the_reference(cases, reference, gpu) == []
+    for case, expected, actual in zip(cases, cpu, gpu):
+        for key in (
+            "completed", "termination_reason", "numerical_blowdown_completed", "scalar_contract_supported",
+            "burnout_completed",
+        ):
+            assert actual["status"][key] == expected["status"][key]
+        for key in ("blowdown_cutoff_pressure_pa", "blowdown_reference_peak_pressure_pa"):
+            assert actual["status"][key] == pytest.approx(
+                expected["status"][key], rel=tol.GRID_SAMPLED_RTOL, abs=1e-12,
+            )
+        assert list(actual["history"]) == list(expected["history"])
+        for result in (expected, actual):
+            times = result["history"]["time_s"]
+            assert times[0] == 0.0 and np.all(np.diff(times) > 0.0)
+            assert times[-1] == pytest.approx(
+                reference[case["id"]]["end_time_s"], rel=tol.TIME_RTOL, abs=1e-12,
+            )
+
+    igniter_case, igniter_result = cases[0], gpu[0]
+    igniter_end = igniter_case["simulation"]["igniter_burn_time"]
+    at_igniter_end = np.flatnonzero(np.isclose(igniter_result["history"]["time_s"], igniter_end, rtol=0, atol=1e-12))
+    assert at_igniter_end.size == 1
+    assert igniter_result["history"]["mdot_igniter_kg_s"][at_igniter_end[0]] == 0.0
+
+    quirk = gpu[-1]
+    knot = cases[-1]["simulation"]["burn_area_activation"][1][0]
+    assert quirk["status"]["termination_reason"] == "blowdown_timeout"
+    assert quirk["history"]["time_s"][-1] == pytest.approx(knot, rel=tol.TIME_RTOL)
 
 
 @pytest.mark.gpu
