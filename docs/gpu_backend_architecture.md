@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.16). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.17). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -524,7 +524,7 @@ workloads; **T2** later or CPU-only by design.
 | `Multiphysics.StructuralMonteCarlo` | many independent samples | T1 | W4 peak-pressure scenarios run as lanes on NumPy or JAX; callback sampling and report assembly stay on the host |
 | `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | **done (4b)**: batched Radau IIA(5) with the scipy controller, tridiagonal factorizations, ragged node counts padded (section 14.6) |
 | `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies over curve histories | T1 | `advanced_physics_proxies` lane service |
-| `Multiphysics.geometry_from_components` (mass, CG, bulkheads) | vector algebra (vectorized variants exist) | T1 | `xp=` |
+| `Multiphysics.geometry_from_components` | per-motor object validation and metadata | T1 | stays on the host; vectorized structural calculations use `compute_structural_features_vectorized(..., xp=...)` |
 | `DetailedBallistics` (`build_detailed_ballistics`, stability, nozzle ablation rate) | post-processing of histories | T1 | `detailed_ballistics` service batches ragged histories and grain geometry on NumPy/JAX; display-grid construction stays on the host |
 | `TwoPhaseFlow` | profile algebra | T1 | vectorized |
 | `Acceptance.evaluate_numerical_acceptance` | compares two result mappings | T2 | stays on CPU (operates on results) |
@@ -1237,6 +1237,20 @@ one-repeat W4 timing in section 14.14. After vectorizing numeric result validati
 400,000 samples in 3.91 s (102,207 samples/s); JAX on the RTX 4060 took 4.08 s (98,098 samples/s, 0.96x
 the CPU-vectorized throughput), with no fallbacks. Both paths improved from their earlier 17.98 s and 17.48 s
 measurements; this workload does not show an end-to-end GPU gain over NumPy.
+
+### 14.17 Phase exit review and remaining external inputs (2026-10-04)
+
+Phase 4's `offloaded_share >= 0.8` exit criterion passes for W1, W2 and W3. Its listed implementation work is
+present: `compute_structural_features_vectorized(..., xp=...)`, StructuralMonteCarlo lanes, thermal ablation,
+transient structural/CFD/ignition proxies and detailed-ballistics batching. `geometry_from_components` remains a
+host-side conversion from one object's attributes; the numeric structural batch kernel accepts NumPy or JAX arrays.
+
+Phase 5's executor, inter-chunk refill, W2/W3 overlap, install documentation and optional self-hosted GPU workflow are
+implemented. The remaining multi-GPU criterion is empirical: this host has one RTX 4060, so the two-device test skips.
+Intra-launch lane replacement stays deferred until profiling shows material unused device capacity within a chunk.
+
+The plan's remaining open inputs are representative production batch sizes, availability of the self-hosted GPU runner,
+and a cloud-notebook GPU model if that benchmark is still needed. Differentiability remains an optional Phase 6 decision.
 
 ## Appendix A. State vector and padded batch schema
 
