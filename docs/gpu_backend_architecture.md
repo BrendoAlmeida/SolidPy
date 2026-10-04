@@ -1033,8 +1033,10 @@ the result ordering and burn mass mapping were checked through the CPU-vectorize
 was checked against the CPU-vectorized batch result.
 
 The focused review suite passed (`69 passed, 1 skipped` across executor, ensemble, registry and batch-result tests).
-The later RTX 4060 run in section 14.14 validates single-device JAX execution. Concurrent real multi-GPU launches are
-still unverified because this host has one accelerator; executor concurrency remains covered by the fake-device tests.
+The GPU-marked JAX suite now includes a two-device integration test: it synchronizes the first calls from both feeders,
+then checks lane assignment, result order, and scalar parity. `.github/workflows/gpu-backend.yml` already selects it
+through `tests/test_backend_jax.py -m gpu`. The RTX 4060 host has one accelerator, so the new test reports a skip here;
+concurrent real multi-GPU launches remain unverified, alongside the existing fake-device coverage.
 
 W2/W3 now use a bounded pipeline when `workers > 1`. Reference pools persist across chunks, worker native-threading is
 limited, and configurable `reserved_cores` leaves capacity for device feeders. The scheduler dynamically shares queued

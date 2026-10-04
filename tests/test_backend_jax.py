@@ -1,4 +1,5 @@
 import importlib.util
+import threading
 
 import numpy as np
 import pytest
@@ -443,3 +444,60 @@ def test_on_the_accelerator_auto_sends_a_large_thermal_batch_to_the_device(therm
 
     assert result.execution["effective_backend"] == "jax" and result.execution["fallback_lanes"] == {}
     assert_thermal_close(result.to_results()[:len(scalar)], scalar)
+
+
+@pytest.mark.gpu
+def test_the_heterogeneous_executor_runs_concurrent_jax_work_on_two_real_gpus(subset):
+    from solidpy.ensemble import simulate_burn
+
+    cases, reference, batch = subset
+    available = backends.get_backend("jax", device="cuda:0").devices()
+    devices = [device for device in available if device.startswith("cuda:")]
+    if len(devices) < 2:
+        pytest.skip(f"requires two JAX GPU devices; found {len(devices)}")
+
+    ready = threading.Barrier(2)
+
+    class SynchronizedJaxBackend:
+        name = "test-synchronized-jax"
+        api_version = backends.BACKEND_API_VERSION
+
+        def __init__(self, device=None):
+            self.device = device
+            self.delegate = backends.get_backend("jax", device=device)
+            self._first_call = True
+
+        def capabilities(self):
+            return self.delegate.capabilities()
+
+        def devices(self):
+            return self.delegate.devices()
+
+        def provenance(self):
+            return self.delegate.provenance()
+
+        def solve_burn(self, sub_batch, options):
+            if self._first_call:
+                self._first_call = False
+                ready.wait(timeout=15)
+            return self.delegate.solve_burn(sub_batch, options)
+
+    name = SynchronizedJaxBackend.name
+    backends.register_backend(name, SynchronizedJaxBackend)
+    try:
+        selected = batch.select(np.arange(8))
+        outcome = simulate_burn(
+            selected,
+            backend=[(name, devices[0]), (name, devices[1])],
+            chunk_size=4,
+        )
+    finally:
+        backends.unregister_backend(name)
+
+    engines = outcome.execution["engines"]
+    assert {engine["device"] for engine in engines} == set(devices[:2])
+    assert sum(engine["lanes"] for engine in engines) == len(selected)
+    assert outcome.execution["fallback_lanes"] == []
+    results = outcome.to_results()
+    assert compare_with_the_reference(cases[:8], reference, results) == []
+    assert {result["provenance"]["execution"]["device"] for result in results} == set(devices[:2])
