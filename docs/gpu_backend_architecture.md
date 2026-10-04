@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.15). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.16). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -636,8 +636,8 @@ provenance["execution"] = {
 * Accelerated results carry `physics_equivalence_class` in `execution`. Built-in backends use
   `solidpy-reference-v1` only when their kernel hash and tolerance version are on the parity-certified list;
   the certificate binds those values to the parity suite. Uncertified implementations receive a
-  backend-specific class. Legacy scalar
-  results without an `execution` block imply `solidpy-reference-v1`, preserving old result mappings and
+  backend-specific class. Legacy scalar results without an `execution` block imply
+  `solidpy-reference-v1`, preserving old result mappings and
   provider hashes. `evaluate_numerical_acceptance` rejects missing, uncertified or different classes.
 * Results record the *requested* and the *effective* backend per lane when routing or fallback occurred.
 
@@ -1226,6 +1226,17 @@ class. An accelerated result without a valid certificate cannot pass acceptance.
 results continue to imply the reference class from the absence of an execution block, so `Burn.py` and its
 historical provider hashes remain unchanged. Uncertified assembled backends receive a distinct class keyed
 by backend and kernel source hash.
+
+On 2026-10-04, the focused corpus parity test with the certificate assertions passed on the RTX 4060
+(`1 passed`, 85.03 s). The real multi-GPU executor test skipped because this host exposes only that one GPU.
+
+### 14.16 W4 after host-side validation optimization (2026-10-04)
+
+The four-design, 100,000-sample-per-design follow-up in `docs/gpu_backend_benchmarks.md` supersedes the earlier
+one-repeat W4 timing in section 14.14. After vectorizing numeric result validation, CPU-vectorized completed
+400,000 samples in 3.91 s (102,207 samples/s); JAX on the RTX 4060 took 4.08 s (98,098 samples/s, 0.96x
+the CPU-vectorized throughput), with no fallbacks. Both paths improved from their earlier 17.98 s and 17.48 s
+measurements; this workload does not show an end-to-end GPU gain over NumPy.
 
 ## Appendix A. State vector and padded batch schema
 
