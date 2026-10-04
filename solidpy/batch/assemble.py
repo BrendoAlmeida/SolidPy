@@ -472,7 +472,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
                 "peak_chamber_pressure_pa": float(out["continuous_pmax"][lane]),
                 "peak_thrust_n": float(out["continuous_tmax"][lane]),
                 "max_nozzle_mass_flow_kg_s": float(out["continuous_nmax"][lane]),
-                "estimator": "dop853_dense_five_node_parabolic_v1",
+                "estimator": "dop853_dense_adaptive_peak_refinement_v1",
             }
         provenance = {
             "eta_c_applied": applied["eta_c"], "eta_cf_applied": applied["eta_Cf"],

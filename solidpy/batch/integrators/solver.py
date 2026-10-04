@@ -204,17 +204,90 @@ def _parabolic_peak(xp, left, center, right):
     return xp.where(valid, value, center)
 
 
+def _dense_interval_maximum(driver, P, F, y_start, t_start, h, t_seg, active, x_limit, nodes, channel):
+    """Estimate the maximum from nine dense-step samples and refine uncertain peaks by golden search."""
+    xp = driver.xp
+    values = xp.stack(nodes, axis=0)
+    node_index = xp.argmax(values, axis=0)
+    sample_maximum = xp.take_along_axis(values, node_index[None, :], axis=0)[0]
+    interior = (node_index > 0) & (node_index < len(nodes) - 1)
+    left_index = xp.maximum(node_index - 1, 0)
+    right_index = xp.minimum(node_index + 1, len(nodes) - 1)
+    left_value = xp.take_along_axis(values, left_index[None, :], axis=0)[0]
+    right_value = xp.take_along_axis(values, right_index[None, :], axis=0)[0]
+    fine_estimate = _parabolic_peak(xp, left_value, sample_maximum, right_value)
+    fine_curvature = left_value - 2.0 * sample_maximum + right_value
+    fine_valid = interior & (fine_curvature < 0.0)
+    fine_estimate = xp.where(fine_valid, xp.maximum(sample_maximum, fine_estimate), sample_maximum)
+
+    coarse_left_index = xp.maximum(node_index - 2, 0)
+    coarse_right_index = xp.minimum(node_index + 2, len(nodes) - 1)
+    coarse_left = xp.take_along_axis(values, coarse_left_index[None, :], axis=0)[0]
+    coarse_right = xp.take_along_axis(values, coarse_right_index[None, :], axis=0)[0]
+    coarse_estimate = _parabolic_peak(xp, coarse_left, sample_maximum, coarse_right)
+    coarse_valid = interior & (node_index >= 2) & (node_index <= len(nodes) - 3)
+    scale = xp.maximum(xp.abs(sample_maximum), 1.0)
+    fine_overshoot = (fine_estimate - sample_maximum) / scale
+    scale_disagreement = xp.abs(fine_estimate - coarse_estimate) / scale
+    needs_refine = interior & (
+        ~fine_valid
+        | (fine_overshoot > 5e-5)
+        | (coarse_valid & (scale_disagreement > 5e-5))
+    )
+    fractions = xp.linspace(0.0, 1.0, len(nodes))
+    x_nodes = x_limit[None, :] * fractions[:, None]
+    best_x = xp.take_along_axis(x_nodes, node_index[None, :], axis=0)[0]
+    left = xp.take_along_axis(x_nodes, left_index[None, :], axis=0)[0]
+    right = xp.take_along_axis(x_nodes, right_index[None, :], axis=0)[0]
+    left = xp.where(needs_refine, left, best_x)
+    right = xp.where(needs_refine, right, best_x)
+    golden = 0.6180339887498949
+
+    def evaluate(x):
+        y = dop853.dense_eval(xp, F, y_start, x)
+        t = t_start + x * h
+        q = rhs.state_quantities(xp, y, active, P, time=_source_time(xp, t, t_seg))
+        return (q["pressure"], q["thrust"], q["generated"], q["nozzle"])[channel]
+
+    def search(_):
+        c = right - golden * (right - left)
+        d = left + golden * (right - left)
+        fc, fd = evaluate(c), evaluate(d)
+
+        def refine(_, state):
+            left, right, c, d, fc, fd = state
+            keep_left = fc >= fd
+            next_left = xp.where(keep_left, left, c)
+            next_right = xp.where(keep_left, d, right)
+            next_c = xp.where(keep_left, next_right - golden * (next_right - next_left), d)
+            next_d = xp.where(keep_left, c, next_left + golden * (next_right - next_left))
+            next_x = xp.where(keep_left, next_c, next_d)
+            next_value = evaluate(next_x)
+            next_fc = xp.where(keep_left, next_value, fd)
+            next_fd = xp.where(keep_left, fc, next_value)
+            return next_left, next_right, next_c, next_d, next_fc, next_fd
+
+        left_refined, right_refined, _, _, _, _ = driver.repeat(
+            12, refine, (left, right, c, d, fc, fd),
+        )
+        refined = evaluate(0.5 * (left_refined + right_refined))
+        return xp.where(needs_refine, xp.maximum(sample_maximum, refined), fine_estimate)
+
+    return driver.branch(xp.any(needs_refine), search, lambda _: fine_estimate, None)
+
+
 def _continuous_peak_candidates(driver, P, F, y_start, t_start, h, t_seg, active, x_limit,
                                 left_values, right_values):
-    """Sample a DOP853 dense step and refine local maxima with a parabolic vertex.
+    """Find per-metric maxima inside each accepted DOP853 dense step.
 
-    The nodes are uniformly spaced over the physically valid part of the step. For a terminal event,
-    ``x_limit`` ends at the localized event; ordinary steps use the whole interval. The endpoint recorder
-    handles exact source-breakpoint values separately from the left-limit value used by the interpolant.
+    Nine uniformly spaced values establish a local bracket. A fixed-iteration golden-section search refines its
+    largest sample, which handles smooth peaks and converges to the high side of a discontinuity without fitting
+    a parabola across the jump. For a terminal event, ``x_limit`` ends at the localized event; the endpoint
+    recorder handles exact source-breakpoint values separately from the interpolant's left limit.
     """
     xp = driver.xp
     sampled = []
-    for fraction in (0.25, 0.5, 0.75):
+    for fraction in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875):
         x = x_limit * fraction
         y = dop853.dense_eval(xp, F, y_start, x)
         t = t_start + x * h
@@ -222,29 +295,11 @@ def _continuous_peak_candidates(driver, P, F, y_start, t_start, h, t_seg, active
         sampled.append((q["pressure"], q["thrust"], q["generated"], q["nozzle"]))
 
     candidates = []
-    for index, (left, right) in enumerate(zip(left_values, right_values)):
-        q1, q2, q3 = (values[index] for values in sampled)
-        nodes = (left, q1, q2, q3, right)
-        second_differences = tuple(
-            nodes[i] - 2.0 * nodes[i + 1] + nodes[i + 2] for i in range(3)
-        )
-        peaks = [xp.maximum(xp.maximum(left, right), xp.maximum(q1, xp.maximum(q2, q3)))]
-        for i in range(3):
-            nearby_curvature = xp.maximum(
-                xp.abs(second_differences[(i + 1) % 3]), xp.abs(second_differences[(i + 2) % 3])
-            )
-            signal_scale = xp.maximum(
-                xp.maximum(xp.abs(nodes[i]), xp.abs(nodes[i + 1])), xp.abs(nodes[i + 2])
-            )
-            smooth_curvature = xp.abs(second_differences[i]) <= xp.maximum(
-                100.0 * nearby_curvature, 1e-12 * xp.maximum(signal_scale, 1.0)
-            )
-            estimate = _parabolic_peak(xp, nodes[i], nodes[i + 1], nodes[i + 2])
-            peaks.append(xp.where(smooth_curvature, estimate, nodes[i + 1]))
-        peak = peaks[0]
-        for candidate in peaks[1:]:
-            peak = xp.maximum(peak, candidate)
-        candidates.append(peak)
+    for channel, (left, right) in enumerate(zip(left_values, right_values)):
+        nodes = (left, *(values[channel] for values in sampled), right)
+        candidates.append(_dense_interval_maximum(
+            driver, P, F, y_start, t_start, h, t_seg, active, x_limit, nodes, channel,
+        ))
     return tuple(candidates)
 
 

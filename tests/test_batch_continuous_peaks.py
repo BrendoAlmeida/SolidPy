@@ -118,9 +118,11 @@ def test_continuous_peak_diagnostics_are_opt_in_and_do_not_change_canonical_metr
         ("cpu-vectorized", None, "ratetable-006"),
         ("cpu-vectorized", None, "guard-thinweb-002"),
         ("cpu-vectorized", None, "ends-tubular-005"),
+        ("cpu-vectorized", None, "ratetable-013"),
         pytest.param("jax", "cuda:0", "ratetable-006", marks=pytest.mark.gpu),
         pytest.param("jax", "cuda:0", "guard-thinweb-002", marks=pytest.mark.gpu),
         pytest.param("jax", "cuda:0", "ends-tubular-005", marks=pytest.mark.gpu),
+        pytest.param("jax", "cuda:0", "ratetable-013", marks=pytest.mark.gpu),
     ],
 )
 def test_batched_continuous_peaks_match_the_refined_scalar_solution(monkeypatch, backend_name, device, case_id):
