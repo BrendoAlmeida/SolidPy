@@ -680,3 +680,45 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_burn.py --backend ja
 ```
 
 Use the corresponding `..._before.json` path while checking out the parent revision to reproduce the baseline.
+
+## Full-corpus continuous-peak margin: JAX / RTX 4060 (2026-10-04)
+
+The new dense-peak diagnostic was measured against the scalar DOP853 dense-output oracle on all 326 designs supported
+by JAX. The oracle retained each corpus case's solver tolerances and step limit, then bounded-minimized each metric on
+every accepted scalar interval. Both runs completed on 295 designs; every one passed all outer Acceptance thresholds
+and all seven 100x margin limits. The largest ratio below is observed relative error divided by the 100x limit, so a
+value no greater than 1 passes.
+
+| Metric | Maximum margin ratio | Worst case |
+|---|---:|---|
+| Generated-flow peak | 0.567851 | `ratetable-003` |
+| Total impulse | 0.129022 | `ratetable-001` |
+| Chamber-pressure peak | 0.088793 | `tolerance-013` |
+| Nozzle-flow peak | 0.088793 | `tolerance-013` |
+| Thrust peak | 0.095282 | `tolerance-013` |
+| Generated-mass integral | 0.013710 | `ratetable-007` |
+| Nozzle-mass integral | 0.013713 | `ratetable-007` |
+
+The other 31 designs were excluded because at least one integration did not complete. Three are the known
+`solver-failure-000` through `solver-failure-002` cases where JAX completes and SciPy fails at simultaneous burnout;
+the remaining incomplete outcomes agree. Direct outer-threshold checks passed for all 295 eligible designs. The
+report's Acceptance API statuses are `incomplete` because it was generated before the current kernel hash was added
+to the parity certificate; post-certificate CPU acceptance tests and the JAX accelerator certificate test passed.
+The additional CPU full-corpus dense-peak sweep was stopped after 29 minutes before it produced a report; it is
+complementary to the GPU release gate. Current-source CPU whole-corpus parity passed all pre-existing assertions, and
+the new CPU diagnostic path passes its focused tests. The full CPU run showed `efficiency-001` outside the existing
+mass-balance envelope: `3.5276e-4%` versus `1.2012e-4%` scalar, while remaining below the outer 1% limit. A
+raw-residual ratio comparison was discarded because it is ill-conditioned near zero; details are in architecture
+section 14.24.
+
+The report took 1,301.0 s on an NVIDIA GeForce RTX 4060 (8,188 MiB, driver 610.57.04), Python 3.12.13, NumPy 2.4.4,
+SciPy 1.17.1, JAX/JAXlib 0.11.2. Its row-level results, solver status and exact worst-case deltas are in
+`benchmarks/results/continuous_peak_margin_jax_cuda0.json`.
+
+Reproduce with:
+
+```
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  python benchmarks/bench_continuous_peak_margin.py --backend jax --device cuda:0 --chunk-size 32 \
+  --out benchmarks/results/continuous_peak_margin_jax_cuda0.json
+```

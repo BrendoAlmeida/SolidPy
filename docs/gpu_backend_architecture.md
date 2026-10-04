@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.23). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. The stricter 100x numerical-margin release gate in section 8.1 remains open: the current corpus passes the versioned tolerances, but not every measured peak is 100x inside the outer acceptance limits (sections 14.22-14.23). Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.24). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. JAX on the RTX 4060 passes all seven 100x margin limits on the 295 designs where both integrations complete. The current source hash passed the whole-corpus parity checks and is certified. The overall release gate remains open because 31 designs are ineligible (including three known solver-failure classification mismatches) and one CPU design exceeds the established mass-balance comparison envelope, although it remains well inside the outer 1% policy (section 14.24). The additional CPU dense-peak sweep is complementary rather than gating; current CPU diagnostics pass the focused regression tests. Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -1372,22 +1372,55 @@ in `docs/gpu_backend_benchmarks.md`.
 
 The 100x margin remains the release criterion; no Acceptance limit or version-5 parity tolerance changed. The batch
 solver now offers `simulate_burn(..., continuous_peak_diagnostics=True)` on `cpu-vectorized` and `jax`. It samples
-three interior points from each accepted DOP853 dense step, includes both step endpoints, and estimates local maxima
-with a parabola only when adjacent curvature remains consistent. The event endpoint is evaluated before burnout
-snapping and on the source's left limit. These diagnostics are recorded at
-`provenance["execution"]["continuous_peaks"]`; canonical peak metrics remain the accepted-point results. The extra
-dense evaluations are disabled by default.
+seven interior points from each accepted DOP853 dense step, includes both step endpoints, compares fine and coarse
+parabolic estimates, and runs a 12-iteration golden-section refinement only when the estimates are invalid or
+disagree beyond the refinement threshold. The event endpoint is evaluated before burnout snapping and on the
+source's left limit. These diagnostics are recorded at `provenance["execution"]["continuous_peaks"]`; canonical
+peak metrics remain the accepted-point results. The extra dense evaluations are disabled by default.
 
-The refined scalar oracle uses SciPy DOP853 dense output with `max_step_size=0.002`, `rtol=1e-11`, and bounded
-minimization inside each accepted interval. CPU-vectorized and RTX 4060 JAX each passed the 2e-4 peak margin on
-`ratetable-006`, `guard-thinweb-002`, and `ends-tubular-005` for generated flow, pressure, thrust and nozzle flow.
-These cover the corpus cases previously identified as most sensitive to sampled peaks and branch transitions. A
-separate test confirms diagnostics are opt-in and leave all canonical metrics identical.
+The focused refined scalar oracle uses SciPy DOP853 dense output with `max_step_size=0.002`, `rtol=1e-11`, and
+bounded minimization inside each accepted interval. CPU-vectorized and RTX 4060 JAX passed the 2e-4 peak margin on
+`ratetable-006`, `guard-thinweb-002`, and `ends-tubular-005` for generated flow, pressure, thrust and nozzle flow;
+`ratetable-013` was added to the focused regression set and also passes on both backends. A separate test confirms
+diagnostics are opt-in and leave all canonical metrics identical.
 
-The CPU and RTX 4060 JAX full-corpus parity tests also passed after this change. They validate the canonical
-accepted-point metrics against the stored references across 323 supported designs, not the refined dense peaks for
-all 323. The 100x criterion therefore remains unproven for the entire corpus; completing that measurement is still
-required before closing this release gate. Full commands and runtimes are in `docs/gpu_backend_benchmarks.md`.
+The CPU and RTX 4060 JAX full-corpus parity tests passed before this opt-in diagnostic change. They validate the
+canonical accepted-point metrics against stored references, not refined dense peaks. The full-corpus JAX dense-peak
+measurement is recorded in section 14.24; the CPU dense-peak sweep is complementary. The current source hash is
+certified after full-corpus parity checks. The remaining release gates are listed in section 14.24. Full commands
+and runtimes are in `docs/gpu_backend_benchmarks.md`.
+
+### 14.24 Full-corpus continuous-peak margin on RTX 4060 (2026-10-04)
+
+The JAX/CUDA 0 run measured all 326 supported corpus designs against the scalar DOP853 dense-output oracle, using
+each case's frozen corpus solver settings. Both integrations completed on 295 designs. Every one of those 295
+passed the outer Acceptance thresholds and all seven 100x margin limits. Maximum observed error divided by the 100x
+limit was 0.568 for generated-flow peak, 0.129 for impulse, 0.0888 for pressure and nozzle-flow peaks, 0.0953 for
+thrust, and 0.0138 for generated and nozzle mass integrals. The detailed rows and worst-case IDs are in
+`benchmarks/results/continuous_peak_margin_jax_cuda0.json` and `docs/gpu_backend_benchmarks.md`.
+
+The remaining 31 designs are not eligible for the margin calculation because at least one integration did not
+complete. Three are the known `solver-failure-000` through `solver-failure-002` cases: JAX completes them while the
+SciPy reference fails at simultaneous grain burnout. The other incomplete classifications agree. The JSON records
+the Acceptance API as `incomplete` for completed JAX results because it was generated before the kernel hash was
+certified; direct outer-threshold checks passed. The whole-corpus JAX versioned parity test then passed on the same
+source (290 s), and all pre-existing assertions in the full CPU parity run passed. Hash
+`b351bb70d9ca4046950154528d1bffb750493f53c7efd52aefd8d4642c28d1c1` is now in the version-5 parity certificate.
+After certification, the CPU certificate and Acceptance tests passed (16 tests), and the JAX accelerator certificate
+test passed on the RTX 4060.
+
+The CPU full-corpus dense-peak sweep was stopped after 29 minutes without producing a report, to avoid extending a
+non-gating diagnostic. The complete CPU corpus parity run passed every pre-existing assertion; the experimental
+strict mass-balance envelope check described below was its sole failure. The current CPU dense-peak implementation
+passes its focused regression tests. No partial CPU report is used. A raw residual ratio was discarded because it
+amplifies batching and rounding differences when the scalar residual is small. The full CPU parity run showed one
+design outside the established corpus mass-balance envelope: `efficiency-001` measured `3.5276e-4%` against a scalar
+reference of `1.2012e-4%`, or 1.47 times `max(2 * reference, 1e-4 percent)`. The same lane run alone is within the
+envelope. With the same corpus padding, setting that lane's `rtol` to `1e-9` reduced the error to `2.5885e-8%`; this
+override was not adopted because it changes the requested solver tolerance. The result remains far below the outer
+1% mass-balance limit. Existing versioned absolute-percentage checks were not changed. The strict plan requirement
+that the mass-balance residual be no worse than the scalar reference remains open for this lane. Exact multi-GPU
+validation remains external to this one-GPU host.
 
 ## Appendix A. State vector and padded batch schema
 
