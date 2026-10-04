@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.22). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. The stricter 100x numerical-margin release gate in section 8.1 remains open: the current corpus passes the versioned tolerances, but not every measured peak is 100x inside the outer acceptance limits (section 14.22). Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.23). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. The stricter 100x numerical-margin release gate in section 8.1 remains open: the current corpus passes the versioned tolerances, but not every measured peak is 100x inside the outer acceptance limits (sections 14.22-14.23). Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -1363,10 +1363,10 @@ tolerance but exceed the 2e-4 margin threshold. The generated-flow tolerance is 
 scalar peak is itself grid-sensitive and differs from a refined solution by up to 1.4e-2. Do not treat the passing
 corpus tests as proof of the 100x criterion.
 
-The release decision is still open: keep the 100x criterion and improve the peak definition/reference comparison,
-or revise that criterion explicitly for grid-sensitive peaks while retaining it for integrals. No tolerance or
-acceptance limit was changed for this review. Full-corpus test details and reproduction commands are in
-`docs/gpu_backend_benchmarks.md`.
+The plan's accepted 100x criterion remains in force. The release gate is still open because the full corpus has not
+been compared against refined continuous peaks. The opt-in diagnostic and focused oracle checks are recorded in
+section 14.23. No tolerance or Acceptance limit was changed. Full-corpus test details and reproduction commands are
+in `docs/gpu_backend_benchmarks.md`.
 
 ### 14.23 Dense-step peak diagnostics (2026-10-04)
 

@@ -146,8 +146,8 @@ The largest relative differences in the rerun were:
 These results pass the current parity tests. They do not all meet the architecture's separate 100x margin against
 the outer Acceptance policy (1% on integrals and 2% on peaks): the GPU grid-sampled peak maximum is above 2e-4,
 and the generated-flow maximum is above that margin on both backends. The complete-corpus suite is a direct parity
-comparison, not an Acceptance API evaluation on each record. See section 14.22 of the architecture document for
-the open release decision. No tolerance was changed by this rerun.
+comparison, not an Acceptance API evaluation on each record. See sections 14.22-14.23 of the architecture document
+for the retained 100x release gate and its focused dense-peak validation. No tolerance was changed by this rerun.
 
 After adding opt-in dense-step peak diagnostics, the CPU full-corpus parity test passed again in 762.67 s and the
 RTX 4060 JAX run passed in 262.09 s. Focused refined-oracle tests also passed on both backends for `ratetable-006`,
