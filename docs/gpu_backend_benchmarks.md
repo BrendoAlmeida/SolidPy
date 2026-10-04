@@ -340,6 +340,34 @@ python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --la
 python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced --lanes 1024,4096 --repeat 1 --out benchmarks/results/advanced_proxy_w2_jax_cuda0_1024_4096.json
 ```
 
+## W2 process pipeline after compacting lane jobs
+
+Measured on 2026-10-03 on the Ryzen 5 3600 / RTX 4060 with JAX 0.11.2. The workload used 4,096 advanced-physics lanes,
+four thermal chunks of 1,024 lanes, and the overlapping thermal/post-processing pipeline. Before compaction, each
+accelerated lane's process job carried the full ballistic curve, including unused histories. The bounded-worker path
+now retains only `time_s`, `thrust_n`, optional `propellant_mass_kg` and `scenario_factors` for lanes whose transient
+proxies were computed in a batch. Scalar fallback lanes retain the full curve.
+
+| Workers | Previous wall time (s) | Compact wall time (s) | Compact lanes/s | Improvement |
+|---:|---:|---:|---:|---:|
+| 2 | 63.21 | 12.83 | 319.1 | 4.92x |
+| 6 | 64.15 | 8.03 | 510.1 | 7.99x |
+
+The compact runs processed all 4,096 proxy lanes in JAX and reported no scalar proxy lanes or fallback errors. Stage
+`models_s` is cumulative worker time, whereas `seconds` is end-to-end wall time; worker overlap lets cumulative stage
+time exceed wall time. Raw before/after results:
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_workers2_chunk1024.json`,
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_workers6_chunk1024.json`,
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers2_chunk1024.json` and
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers6_chunk1024.json`.
+
+Reproduce the compact runs with:
+
+```
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced --workers 2 --chunk-size 1024 --lanes 4096 --repeat 1 --out benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers2_chunk1024.json
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_thermal.py --backend jax --device cuda:0 --kind advanced --workers 6 --chunk-size 1024 --lanes 4096 --repeat 1 --out benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers6_chunk1024.json
+```
+
 ## W3 detailed-ballistics service after batching (CPU-only)
 
 Measured on 2026-10-03 on the same Ryzen 5 3600 host with eight designs and 216 lanes (27 per design), using

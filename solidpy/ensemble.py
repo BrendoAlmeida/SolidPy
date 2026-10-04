@@ -271,6 +271,14 @@ def _timed_advanced_after_thermal_batch(jobs):
     return results
 
 
+def _advanced_flight_curve(curve):
+    """Keep only the curve channels used after the advanced proxy batch has run."""
+    if not isinstance(curve, dict):
+        return curve
+    keys = ("time_s", "thrust_n", "propellant_mass_kg", "scenario_factors")
+    return {key: curve[key] for key in keys if key in curve}
+
+
 def _advanced_proxy_batch(
     geometries, curves, thermals, casings, flames, specifics, *, effective_backend, device, execution,
 ):
@@ -836,9 +844,13 @@ def run_advanced_physics_ensemble(
                 proxy_execution_chunks.append(proxy_summary)
                 for local_lane, result in enumerate(thermal):
                     i = start + local_lane
+                    proxies_for_lane = proxies[local_lane]
+                    curve_for_models = curves[i]
+                    if proxies_for_lane is not None:
+                        curve_for_models = _advanced_flight_curve(curves[i])
                     yield (
-                        geometries[i], curves[i], result, casings[i], flames[i], specifics[i], gammas[i],
-                        proxies[local_lane],
+                        geometries[i], curve_for_models, result, casings[i], flames[i], specifics[i], gammas[i],
+                        proxies_for_lane,
                     )
 
         results = []

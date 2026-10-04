@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.14). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 are implemented; Phase 5 is in progress (sections 14.4-14.14). The W1-W3 CPU-reference coverage gate passes. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060; real multi-GPU verification remains pending. W2's bounded CPU pipeline now compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -1137,6 +1137,28 @@ The JAX 4,096-lane stages were 1.44 s packing, 1.01 s thermal, 0.25 s batched pr
 The remaining host work limits the end-to-end gain. First calls, including compilation, took 9.38 s and 22.59 s for the
 two shapes. Results: `benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_4096_post_gpu.json` and
 `benchmarks/results/advanced_proxy_w2_jax_cuda0_1024_4096.json`.
+
+#### W2 bounded process pipeline with compact curve payloads
+
+The post-thermal pipeline sends each lane to a bounded process pool. For lanes whose structural, CFD and ignition
+proxies are already computed by a batch backend, the worker only needs time, thrust, propellant mass and scenario
+factors from the ballistic curve. Keeping the unused histories in each process job made `_pickle_safe` inspect and
+serialize about 319 kB per lane in the benchmark curves. The ensemble now sends only those four channels for accelerated
+proxy lanes; scalar fallback lanes still receive their full curve.
+
+On this RTX 4060 host, a 4,096-lane W2 run with four 1,024-lane chunks improved substantially with the compact jobs:
+
+| Workers | Previous pipeline (s) | Compact pipeline (s) | Compact lanes/s | Improvement |
+|---:|---:|---:|---:|---:|
+| 2 | 63.21 | 12.83 | 319.1 | 4.92x |
+| 6 | 64.15 | 8.03 | 510.1 | 7.99x |
+
+All 4,096 proxy lanes used JAX, with no scalar proxy lanes or fallback errors. Both runs used the overlapping
+`thermal_postprocess_pipeline`. `models_s` is the sum of per-lane worker times, so it can exceed end-to-end wall time
+when workers overlap. The prior and compact measurements are in `benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_workers2_chunk1024.json`,
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_workers6_chunk1024.json`,
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers2_chunk1024.json` and
+`benchmarks/results/advanced_proxy_w2_jax_cuda0_4096_compact_workers6_chunk1024.json`.
 
 **W3 robustness** was rerun after detailed-ballistics batching with one warm repeat and `keep_series=False`:
 
