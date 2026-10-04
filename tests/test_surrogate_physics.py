@@ -1058,6 +1058,47 @@ class TestStructuralFeatures:
         finally:
             jax.config.update("jax_enable_x64", previous_x64)
 
+    @pytest.mark.gpu
+    def test_vectorized_structural_features_jax_runs_eager_and_jit_on_gpu(self):
+        jax = pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        device = next(device for device in jax.devices() if device.platform != "cpu")
+        kwargs = _xp_structural_feature_kwargs()
+        expected = compute_structural_features_vectorized(**kwargs)
+        with jax.default_device(device):
+            eager = compute_structural_features_vectorized(**kwargs, xp=jnp)
+            if hasattr(jax, "enable_x64"):
+                x64_context = jax.enable_x64(True)
+            else:
+                from jax.experimental import enable_x64
+
+                x64_context = enable_x64()
+            with x64_context:
+                kernel_inputs = tuple(
+                    jnp.asarray(kwargs[name], dtype=jnp.float64)
+                    for name in _STRUCTURAL_VECTOR_INPUT_NAMES
+                )
+                compiled_kernel = jax.jit(
+                    lambda values: _structural_features_vectorized_xp_kernel(jnp, values)
+                )
+                compiled = compiled_kernel(kernel_inputs)
+            jax.block_until_ready(compiled)
+
+        outputs = [
+            (field_name, getattr(eager, field_name))
+            for field_name in _STRUCTURAL_FEATURE_NUMERIC_FIELDS
+        ] + list(zip(_STRUCTURAL_FEATURE_NUMERIC_FIELDS, compiled))
+        for field_name, value in outputs:
+            assert value.device.platform == device.platform
+            assert value.dtype == jnp.float64
+            np.testing.assert_allclose(
+                np.asarray(jax.device_get(value)),
+                getattr(expected, field_name),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
     @pytest.mark.parametrize(
         "bad_angle",
         [None, 0.0, math.pi / 2.0, math.nan, math.inf],

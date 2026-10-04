@@ -1244,6 +1244,8 @@ Phase 4's `offloaded_share >= 0.8` exit criterion passes for W1, W2 and W3. Its 
 present: `compute_structural_features_vectorized(..., xp=...)`, StructuralMonteCarlo lanes, thermal ablation,
 transient structural/CFD/ignition proxies and detailed-ballistics batching. `geometry_from_components` remains a
 host-side conversion from one object's attributes; the numeric structural batch kernel accepts NumPy or JAX arrays.
+The optional GPU workflow now includes the surrogate feature test. Its eager wrapper and JIT kernel passed on the
+RTX 4060 with float64 device outputs and `1e-12` parity against NumPy.
 
 Phase 5's executor, inter-chunk refill, W2/W3 overlap, install documentation and optional self-hosted GPU workflow are
 implemented. The remaining multi-GPU criterion is empirical: this host has one RTX 4060, so the two-device test skips.
