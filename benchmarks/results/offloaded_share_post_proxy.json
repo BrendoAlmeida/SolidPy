@@ -1,0 +1,252 @@
+{
+  "entries": [
+    {
+      "path": "solidpy.Burn.BurnSimulation.__init__",
+      "tier": "T0",
+      "batched": true,
+      "note": "burn and tail-off solve and the canonical result (solidpy.ensemble.simulate_burn; scenarios of Robustness are lanes through run_robustness_ensemble)"
+    },
+    {
+      "path": "solidpy.DetailedBallistics.build_detailed_ballistics",
+      "tier": "T1",
+      "batched": false,
+      "note": "post-processing of one history on the CPU (about 7 ms per lane); stays on the host in phase 4a"
+    },
+    {
+      "path": "solidpy.Multiphysics.simulate_thermal_ablation",
+      "tier": "T1",
+      "batched": true,
+      "note": "1-D wall conduction, a Radau IIA(5) solve per time step (solidpy.ensemble.simulate_thermal and run_advanced_physics_ensemble; batched Radau with the scipy controller, step for step)"
+    },
+    {
+      "path": "solidpy.Multiphysics.simulate_structural_response",
+      "tier": "T1",
+      "batched": true,
+      "note": "general transient curves are lanes in the advanced_physics_proxies service; StructuralMonteCarlo peak-pressure histories use their existing lane kernel"
+    },
+    {
+      "path": "solidpy.Multiphysics.StructuralMonteCarlo.run",
+      "tier": "T1",
+      "batched": true,
+      "note": "W4 peak-pressure scenarios are lanes on cpu-vectorized or JAX; callback sampling and report assembly stay on the host"
+    },
+    {
+      "path": "solidpy.Multiphysics.simulate_cfd_proxies",
+      "tier": "T1",
+      "batched": true,
+      "note": "curve histories, geometry and thermal metrics run as lanes in advanced_physics_proxies"
+    },
+    {
+      "path": "solidpy.Multiphysics.simulate_ignition_proxy",
+      "tier": "T1",
+      "batched": true,
+      "note": "curve histories, geometry, thermal metrics and structural summaries run as lanes in advanced_physics_proxies"
+    },
+    {
+      "path": "solidpy.Multiphysics.simulate_flight_1d",
+      "tier": "T2",
+      "batched": false,
+      "note": "separate ODE system; CPU by design for now"
+    }
+  ],
+  "workloads": [
+    {
+      "workload": "W1",
+      "size": 12,
+      "wall_s": 3.5838735300058033,
+      "offloaded_share": 0.9871926688850305,
+      "listed_share": 0.9871926688850305,
+      "other_s": 0.045899854972958565,
+      "entries": {
+        "solidpy.Burn.BurnSimulation.__init__": {
+          "seconds": 3.5379736750328448,
+          "calls": 12,
+          "share": 0.9871926688850305,
+          "tier": "T0",
+          "batched": true
+        },
+        "solidpy.DetailedBallistics.build_detailed_ballistics": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": false
+        },
+        "solidpy.Multiphysics.simulate_thermal_ablation": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_structural_response": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.StructuralMonteCarlo.run": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_cfd_proxies": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_ignition_proxy": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_flight_1d": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T2",
+          "batched": false
+        }
+      }
+    },
+    {
+      "workload": "W2",
+      "size": 6,
+      "wall_s": 5.343467203027103,
+      "offloaded_share": 0.9899626686153731,
+      "listed_share": 0.998575244724659,
+      "other_s": 0.007613133086124435,
+      "entries": {
+        "solidpy.Burn.BurnSimulation.__init__": {
+          "seconds": 4.004914630029816,
+          "calls": 6,
+          "share": 0.7494973727472324,
+          "tier": "T0",
+          "batched": true
+        },
+        "solidpy.DetailedBallistics.build_detailed_ballistics": {
+          "seconds": 0.022416983963921666,
+          "calls": 6,
+          "share": 0.004195213166316867,
+          "tier": "T1",
+          "batched": false
+        },
+        "solidpy.Multiphysics.simulate_thermal_ablation": {
+          "seconds": 1.2761407410143875,
+          "calls": 6,
+          "share": 0.2388226019786267,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_structural_response": {
+          "seconds": 0.005380788934417069,
+          "calls": 6,
+          "share": 0.0010069845532819633,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.StructuralMonteCarlo.run": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_cfd_proxies": {
+          "seconds": 0.0031918360327836126,
+          "calls": 6,
+          "share": 0.0005973342609786058,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_ignition_proxy": {
+          "seconds": 0.0002050559560302645,
+          "calls": 6,
+          "share": 3.837507525340461e-05,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_flight_1d": {
+          "seconds": 0.02360403400962241,
+          "calls": 6,
+          "share": 0.004417362942969051,
+          "tier": "T2",
+          "batched": false
+        }
+      }
+    },
+    {
+      "workload": "W3",
+      "size": 2,
+      "wall_s": 19.620463683007983,
+      "offloaded_share": 0.9933279781682528,
+      "listed_share": 0.9989667974598792,
+      "other_s": 0.02027191291563213,
+      "entries": {
+        "solidpy.Burn.BurnSimulation.__init__": {
+          "seconds": 19.48955552096595,
+          "calls": 30,
+          "share": 0.9933279781682528,
+          "tier": "T0",
+          "batched": true
+        },
+        "solidpy.DetailedBallistics.build_detailed_ballistics": {
+          "seconds": 0.1106362491264008,
+          "calls": 30,
+          "share": 0.005638819291626411,
+          "tier": "T1",
+          "batched": false
+        },
+        "solidpy.Multiphysics.simulate_thermal_ablation": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_structural_response": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.StructuralMonteCarlo.run": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_cfd_proxies": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_ignition_proxy": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T1",
+          "batched": true
+        },
+        "solidpy.Multiphysics.simulate_flight_1d": {
+          "seconds": 0.0,
+          "calls": 0,
+          "share": 0.0,
+          "tier": "T2",
+          "batched": false
+        }
+      }
+    }
+  ]
+}

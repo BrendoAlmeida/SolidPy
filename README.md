@@ -96,8 +96,9 @@ results = simulate_burn(batch, backend=[("jax", "cuda:0"), ("cpu-reference", 6)]
 Each engine pulls chunks from a shared cost-ordered queue; results remain in input order, and unsupported or failed
 accelerator lanes are retried on `cpu-reference` with the reason recorded in their provenance. Pass `strict=True` to
 reject lanes no selected engine supports. `simulate_thermal` and `run_advanced_physics_ensemble` accept the same engine
-list. With `workers > 1`, advanced-physics thermal chunks and CPU models flow through a bounded pipeline; robustness
-does the same for burn and detailed-ballistics chunks. `reserved_cores` can reserve host cores for accelerator feeders.
+list. With `workers > 1`, advanced-physics thermal chunks, batched structural/CFD/ignition proxies and CPU models flow
+through a bounded pipeline; robustness does the same for burn and detailed-ballistics chunks. `reserved_cores` can
+reserve host cores for accelerator feeders.
 CPU worker pools use `spawn`, so applications should call the API under an `if __name__ == "__main__":` guard when
 process workers are enabled.
 
@@ -111,15 +112,13 @@ burn/design chunks and detailed-ballistics post-processing flow through an order
 remains serial. Without `backend` the analysis is the scalar one, unchanged. Process pools use `spawn`; scripts that pass
 `workers > 1` must call these APIs inside an `if __name__ == "__main__":` guard.
 
-The wall conduction and throat ablation of the advanced physics (`Multiphysics.simulate_thermal_ablation`, a Radau solve per
-time step) is batched the same way: `solidpy.ensemble.run_advanced_physics_ensemble(geometries, curves, casing_material=...,
-backend="jax")` returns what `simulate_advanced_physics` returns for each design, with the thermal ablation of all of them
-as one batch (`simulate_thermal(ThermalBatch.from_objects(...))` is the thermal model alone). The batched integrator takes the
-same steps as scipy's, so the results agree with the scalar ones to 1e-12; on the GPU it runs 36x the scalar model on all
-CPU threads at 4,096 lanes. The whole advanced-physics 5.8x measurement predates the new chunk pipeline, whose GPU
-throughput has not yet been remeasured. Pass `workers > 1` to overlap thermal chunks with structural, CFD, ignition and
-flight models in a bounded process pool; the default is serial. See `docs/gpu_backend_benchmarks.md` for the measurements
-and their dates.
+The wall conduction and throat ablation of advanced physics (`Multiphysics.simulate_thermal_ablation`, a Radau solve per
+time step) are batched through `run_advanced_physics_ensemble(geometries, curves, casing_material=..., backend="jax")`.
+The same call batches general transient structural, CFD and ignition proxies when the backend supports them; flight stays
+on the CPU. The batched thermal integrator takes the same steps as scipy's and agrees with the scalar result to 1e-12.
+The earlier GPU measurements (36x for thermal and 5.8x for complete advanced physics) predate the batched proxy kernels
+and pipeline and need a new GPU run. Pass `workers > 1` to overlap thermal chunks and proxy batches with CPU flight and
+scalar fallback work; the default is serial. See `docs/gpu_backend_benchmarks.md` for measurements and dates.
 
 `StructuralMonteCarlo.run(100_000, backend="jax", device="cuda:0")` batches the structural evaluation of its sampled
 peak pressures; omitting `backend` preserves its scalar path. `compute_structural_features_vectorized(..., xp=jax.numpy)`

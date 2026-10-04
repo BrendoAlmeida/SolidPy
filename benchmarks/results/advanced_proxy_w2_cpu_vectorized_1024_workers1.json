@@ -1,0 +1,46 @@
+{
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": null,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": null
+  },
+  "results": [
+    {
+      "backend": "cpu-vectorized",
+      "device": null,
+      "kind": "advanced",
+      "lanes": 1024,
+      "workers": 1,
+      "chunk_size": null,
+      "first_call_s": 6.5257947309874,
+      "seconds": 6.402012475009542,
+      "lanes_per_s": 159.9497039403182,
+      "timings": {
+        "pack_s": 0.3632658669957891,
+        "thermal_s": 1.8838584500190336,
+        "proxy_s": 0.11339039698941633,
+        "models_s": 4.032151270832401
+      },
+      "execution": {
+        "schedule": null,
+        "chunks": 1,
+        "overlap": null,
+        "advanced_proxies": {
+          "service": "advanced_physics_proxies",
+          "lanes": 1024,
+          "accelerated_lanes": 1024,
+          "scalar_lanes": 0,
+          "backend_lanes": {
+            "cpu-vectorized": 1024
+          },
+          "fallback_errors": {}
+        }
+      }
+    }
+  ]
+}

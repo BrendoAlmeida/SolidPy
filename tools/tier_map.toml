@@ -29,8 +29,8 @@ note = "1-D wall conduction, a Radau IIA(5) solve per time step (solidpy.ensembl
 [[entry]]
 path = "solidpy.Multiphysics.simulate_structural_response"
 tier = "T1"
-batched = false
-note = "general transient curves remain scalar; StructuralMonteCarlo's synthetic peak-pressure histories use a separate lane kernel"
+batched = true
+note = "general transient curves are lanes in the advanced_physics_proxies service; StructuralMonteCarlo peak-pressure histories use their existing lane kernel"
 
 [[entry]]
 path = "solidpy.Multiphysics.StructuralMonteCarlo.run"
@@ -41,14 +41,14 @@ note = "W4 peak-pressure scenarios are lanes on cpu-vectorized or JAX; callback 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_cfd_proxies"
 tier = "T1"
-batched = false
-note = "algebraic proxies"
+batched = true
+note = "curve histories, geometry and thermal metrics run as lanes in advanced_physics_proxies"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_ignition_proxy"
 tier = "T1"
-batched = false
-note = "algebraic proxy"
+batched = true
+note = "curve histories, geometry, thermal metrics and structural summaries run as lanes in advanced_physics_proxies"
 
 [[entry]]
 path = "solidpy.Multiphysics.simulate_flight_1d"

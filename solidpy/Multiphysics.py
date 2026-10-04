@@ -2318,26 +2318,34 @@ def _scenario_thermal_inputs(curve):
     )
 
 
-def _advanced_after_thermal(geometry, curve, thermal, casing_material, flame_temp_k, r_specific, gamma_resolved):
+def _advanced_after_thermal(
+    geometry, curve, thermal, casing_material, flame_temp_k, r_specific, gamma_resolved, proxies=None,
+):
     """The structural, CFD, ignition and flight models and the metadata of ``simulate_advanced_physics``, given the
-    thermal metrics (computed by the scalar model or by a batched backend)."""
+    thermal metrics (computed by the scalar model or by a batched backend). ``proxies`` may contain the first three
+    models' already-computed per-lane mappings from a batch backend."""
     scenario_factors = curve.get("scenario_factors", {}) if isinstance(curve, dict) else {}
-    structural = simulate_structural_response(
-        geometry,
-        curve,
-        thermal,
-        casing_material=casing_material,
-        casing_strength_factor=float(scenario_factors.get("casing_strength_factor", 1.0) or 1.0),
-    )
-    cfd = simulate_cfd_proxies(
-        geometry,
-        curve,
-        thermal,
-        r_specific=r_specific,
-        flame_temp_k=flame_temp_k,
-        gamma=gamma_resolved,
-    )
-    ignition = simulate_ignition_proxy(geometry, curve, thermal, structural)
+    if proxies is None:
+        structural = simulate_structural_response(
+            geometry,
+            curve,
+            thermal,
+            casing_material=casing_material,
+            casing_strength_factor=float(scenario_factors.get("casing_strength_factor", 1.0) or 1.0),
+        )
+        cfd = simulate_cfd_proxies(
+            geometry,
+            curve,
+            thermal,
+            r_specific=r_specific,
+            flame_temp_k=flame_temp_k,
+            gamma=gamma_resolved,
+        )
+        ignition = simulate_ignition_proxy(geometry, curve, thermal, structural)
+    else:
+        structural = {key: value for key, value in proxies.items() if key.startswith("simulation.advanced.structural.")}
+        cfd = {key: value for key, value in proxies.items() if key.startswith("simulation.advanced.cfd.")}
+        ignition = {key: value for key, value in proxies.items() if key.startswith("simulation.advanced.ignition.")}
     flight = simulate_flight_1d(
         geometry,
         curve,

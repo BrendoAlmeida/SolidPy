@@ -127,20 +127,20 @@ test on 2026-10-03 (892 s).
 `python tools/profile_workloads.py` times the entry points listed in `tools/tier_map.toml` on the scalar path of three
 workloads (wall clock around the outermost call, so Python-heavy code is not inflated the way a profiler would). The
 offloaded share is the time in entry points that have a batched implementation over the whole workload
-(`docs/gpu_backend_architecture.md`, section 7.1). Measured 2026-10-03 on the machine above
-(`benchmarks/results/offloaded_share.json`, after phase 4b; before it the thermal ablation was not marked batched and W2
-read 0.757):
+(`docs/gpu_backend_architecture.md`, section 7.1). The latest profile was measured 2026-10-03 on the machine above after
+the transient proxy kernels were added (`benchmarks/results/offloaded_share_post_proxy.json`). The earlier Phase 4b
+profile is preserved as `benchmarks/results/offloaded_share.json`; before thermal batching, W2 read 0.757:
 
-| Workload | Designs | Scalar time | Burn (batched) | Thermal ablation (batched) | Other advanced + post-processing | **Offloaded share** |
-|---|---|---|---|---|---|---|
-| W1 burn only (corpus mix) | 12 | 3.5 s | 99.0 % | - | - | **0.990** |
-| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.2 s | 74.5 % | 24.3 % | 1.2 % | **0.988** |
-| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.0 s | 99.4 % | - | 0.6 % | **0.994** |
+| Workload | Designs | Scalar time | Burn (batched) | Thermal (batched) | Structural/CFD/ignition proxies (batched) | CPU and other | **Offloaded share** |
+|---|---|---|---|---|---|---|---|
+| W1 burn only (corpus mix) | 12 | 3.6 s | 98.7 % | - | - | 1.3 % | **0.987** |
+| W2 burn + detailed ballistics + advanced physics (four-grain variants) | 6 | 5.3 s | 74.9 % | 23.9 % | 0.2 % | 1.0 % | **0.990** |
+| W3 robustness (nominal + 10 default + 4 Latin-hypercube scenarios) | 2 | 19.6 s | 99.3 % | - | - | 0.7 % | **0.993** |
 
-The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with the burn alone (W3
-through `run_robustness_ensemble`); W2 needed the thermal ablation, which was 24 % of the workload and 95 % of the advanced
-physics (one scipy Radau solve per time step), and is now batched (`simulate_thermal`, `run_advanced_physics_ensemble`).
-Structural, CFD and ignition proxies and the 1-D flight together are under 1 %.
+The gate of the architecture document is 0.8 on W1 to W3, and all three pass. W1 and W3 pass with burn batching; W2
+also batches thermal ablation and transient structural, CFD and ignition proxies. Detailed ballistics, flight and the
+remaining host work together account for about 1 % of W2's scalar time. These shares measure available batched coverage;
+they do not establish that a JAX/GPU run completed, and they do not predict device throughput.
 
 ## Robustness ensembles (W3) on the GPU (Phase 4a)
 
@@ -192,7 +192,9 @@ the same Radau IIA(5) steps as scipy (tolerances version 5: the worst difference
 lanes), so the comparison is of equal work. Lane sets (`--kind`): `typical`, 13 of the 15 cases of `tests/thermal_cases.py` (without the two degenerate curves; 4 to
 11 wall cells, 50 to 200 time steps) tiled with the gas and start temperature varied; `wide`, random designs (4 to 18 cells, 30
 to 400 steps); `advanced`, the whole advanced physics of designs with real burn curves (344 points) through
-`run_advanced_physics_ensemble`, against `simulate_advanced_physics` in a pool.
+`run_advanced_physics_ensemble`, against `simulate_advanced_physics` in a pool. The `advanced` rows below predate the
+`advanced_physics_proxies` service; its updated CPU-only whole-W2 results are recorded later in this document. The GPU
+whole-W2 result needs to be rerun with the new proxy kernels.
 
 | Lane set | Path | Lanes | Warm time | Lanes/s | vs CPU, 12 processes |
 |---|---|---|---|---|---|
@@ -220,18 +222,20 @@ What the numbers say:
   typical walls, 15.7x on walls of up to 18 cells (the wall cells are a sequential recurrence, so the cost grows with
   them). One NumPy thread already beats 12 scalar processes by 3.3x, because the scalar call spends most of its time in
   scipy's per-call overhead, not in arithmetic.
-* In the serial default, the whole advanced physics is limited by what stays on the CPU. At 4,096 lanes the thermal batch
+* In the pre-proxy serial baseline, the whole advanced physics was limited by what stayed on the CPU. At 4,096 lanes the thermal batch
   takes 1.0 s and packing it 1.4 s, while the structural, CFD, ignition and flight models of the 4,096 lanes take
-  **21.8 s**, 5.3 ms per lane on one core (90 % of the run). `workers > 1` now spreads those models over worker processes;
-  the measurements below show the effect at smaller lane counts. Packing costs 0.3 to 0.4 ms per lane on the host.
+  **21.8 s**, 5.3 ms per lane on one core (90 % of the run). The structural, CFD and ignition share now runs through the
+  batched proxy service; flight remains on the CPU. The updated CPU-only W2 measurement is below. Packing costs 0.3 to
+  0.4 ms per lane on the host.
 * Below about 2,000 lanes the latency of the sequential loops dominates (1,441 lanes/s at 1,024); from 4,096 lanes the
   device is saturated and the time grows with the lanes (16,384 lanes take 3.9x the time of 4,096). The device runs float64,
   which a consumer GPU does at 1/64 of its float32 rate.
 
 ## Not covered yet
 
-Replacing finished lanes inside an active accelerator launch and general transient structural responses (W4's synthetic
-peak-pressure path is implemented) remain unimplemented. Completion rates are reported from real chunks, so a separate
+Replacing finished lanes inside an active accelerator launch and detailed-ballistics post-processing remain
+unimplemented. General transient structural, CFD and ignition proxy kernels are implemented; W4's synthetic
+peak-pressure path is implemented separately. Completion rates are reported from real chunks, so a separate
 throughput-calibration solve is not used. The heterogeneous executor and bounded W2/W3 post-processing pipeline are
 implemented, but this host has no JAX or working GPU driver, so concurrent device execution has only been checked with
 fake backends. W4's 100,000-sample harness is `benchmarks/bench_structural_monte_carlo.py`; GPU measurements remain
@@ -287,6 +291,30 @@ time, while `thermal_s` and `solve_s` are producer wall time accumulated across 
 Machine-readable results: `benchmarks/results/postpipeline_w2_cpu_vectorized_1024_workers6_chunk256.json` and
 `benchmarks/results/postpipeline_w3_cpu_vectorized_8_workers6_chunk54.json`. The CPU-vectorized W3 burn dominates this
 host run; the process pipeline does not turn that backend into an accelerator.
+
+## W2 after batching transient proxies (CPU-only)
+
+After `advanced_physics_proxies` was added, the same advanced workload was rerun at 1,024 lanes on the Ryzen 5 3600.
+The serial run used NumPy batches for the transient structural, CFD and ignition proxies; the six-worker run used four
+thermal chunks and the producer-consumer pipeline. Both rows have one warm repeat after the first call. The `models_s`
+column is worker CPU time; it is wall time in the serial row and accumulated worker time in the pipeline row.
+
+| Workers | Solve chunks | Total wall (s) | Thermal solve (s) | Proxy batch (s) | CPU models (s) | Lanes/s | Overlap |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 1 | 6.402 | 1.884 | 0.113 | 4.032 | 159.9 | no |
+| 6 | 4 | 20.086 | 3.389 | 0.099 | 4.374 | 51.0 | yes |
+
+All 1,024 lanes used the `cpu-vectorized` proxy service, with no scalar proxy fallbacks. The remaining CPU flight work and
+spawned process startup dominate the total; six workers remain slower on this host. These are CPU measurements and do not
+estimate GPU throughput. Raw results: `benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_workers1.json` and
+`benchmarks/results/advanced_proxy_w2_cpu_vectorized_1024_workers6_chunk256.json`.
+
+Reproduce with:
+
+```
+python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 1 --lanes 1024 --repeat 1
+python benchmarks/bench_thermal.py --backend cpu-vectorized --kind advanced --workers 6 --lanes 1024 --chunk-size 256 --repeat 1
+```
 
 ## Structural Monte Carlo (W4)
 

@@ -227,6 +227,7 @@ class Backend(Protocol):
     # Tier 1 services are optional and advertised through capabilities():
     def thermal_ablation(self, batch, histories, options): ...
     def structural_response(self, batch, histories, options): ...
+    def advanced_physics_proxies(self, batch, options): ...  # transient structural, CFD and ignition
     def provenance(self) -> dict: ...                   # versions, device, dtype, integrator
 ```
 
@@ -494,12 +495,13 @@ by CPU affinity, a library-wide ceiling of 16, and the configured core reservati
 
 ### 6.4 Overlapping accelerator and CPU work
 
-The advanced-physics and robustness ensemble APIs accept `workers > 1` for bounded CPU post-processing. W2 now feeds
-thermal chunks into the process window as they finish; while CPU workers process one chunk, the caller packs and solves
-the next. W3 applies the same bounded producer/consumer flow across design chunks. `workers` sets the CPU post-processing
-pool size; a concurrent reference fallback uses one worker. `pack_s`, `thermal_s`/`solve_s` and `models_s`/`postprocess_s`
-report cumulative stage times, so solve and model work may overlap. These pipelines preserve lane and design order, and
-use one spawned process pool per call.
+The advanced-physics and robustness ensemble APIs accept `workers > 1` for bounded CPU post-processing. W2 feeds thermal
+chunks through the batched structural, CFD and ignition proxies, then into the CPU process window for flight and scalar
+fallbacks; while workers process one chunk, the caller packs and solves the next. W3 applies the same bounded
+producer/consumer flow across design chunks. `workers` sets the CPU post-processing pool size; a concurrent reference
+fallback uses one worker. `pack_s`, `thermal_s`/`solve_s`, `proxy_s` and `models_s`/`postprocess_s` report cumulative
+stage times, so solve, proxy and model work may overlap. These pipelines preserve lane and design order and use one
+spawned process pool per call.
 
 ## 7. Coverage map (what runs where)
 
@@ -518,10 +520,10 @@ workloads; **T2** later or CPU-only by design.
 | `AxialFlow` (axial mass flux, diagnostics) | per-grain vector math over history | T0 | batched, memory-bound |
 | `Robustness` (`run_robustness_analysis`, Latin hypercube) | many perturbed copies of one design | T0 | scenarios become extra lanes of one batch; scenario application stays on CPU at pack time; thrust rescale is vector math |
 | `surrogate_physics` (static, structural features, vectorized variants) | NumPy vector code already | T0 | accept `xp=` and run on the device |
-| `Multiphysics.simulate_structural_response` | algebra over time series | T1 | general transient curves remain scalar; the synthetic peak-pressure history used by `StructuralMonteCarlo` is batched |
+| `Multiphysics.simulate_structural_response` | algebra over time series | T1 | general transient curves use the `advanced_physics_proxies` lane service; Monte Carlo peak histories use their existing kernel |
 | `Multiphysics.StructuralMonteCarlo` | many independent samples | T1 | W4 peak-pressure scenarios run as lanes on NumPy or JAX; callback sampling and report assembly stay on the host |
 | `Multiphysics.simulate_thermal_ablation` | 1-D conduction (banded linear system per time step) | T1 | **done (4b)**: batched Radau IIA(5) with the scipy controller, tridiagonal factorizations, ragged node counts padded (section 14.6) |
-| `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies | T1 | vectorized |
+| `Multiphysics.simulate_cfd_proxies`, `simulate_ignition_proxy` | algebraic proxies over curve histories | T1 | `advanced_physics_proxies` lane service |
 | `Multiphysics.geometry_from_components` (mass, CG, bulkheads) | vector algebra (vectorized variants exist) | T1 | `xp=` |
 | `DetailedBallistics` (`build_detailed_ballistics`, stability, nozzle ablation rate) | post-processing of histories | T1 | vectorized over lanes; interpolation of histories to uniform grids is a batched `interp` |
 | `TwoPhaseFlow` | profile algebra | T1 | vectorized |
@@ -951,14 +953,16 @@ summary of `simulate_thermal` keeps the backends' execution records; and the doc
 not finish is rerun on the reference even with `strict=True`, that a batch keeps references to its input objects, and that the
 CPU models after the thermal one run serially by default or in a process pool with `workers > 1`.
 
-Measured (`docs/gpu_backend_benchmarks.md`): offloaded share W1 0.990, **W2 0.988**, W3 0.994, so the gate of 0.8 is met on all
-three workloads. The thermal ablation alone runs 36x the scalar model on 12 threads at 4,096 lanes of typical walls (15.7x on
-walls up to 18 cells); the whole advanced physics runs 5.8x, limited by the structural, CFD, ignition and flight models that
-stay on one CPU core (5.3 ms per lane, 90 % of the batched run).
+Measured before the proxy kernels (`docs/gpu_backend_benchmarks.md`): offloaded share W1 0.990, **W2 0.988**, W3 0.994, so
+the gate of 0.8 was met on all three workloads. Thermal ablation alone ran 36x the scalar model on 12 threads at 4,096 lanes
+of typical walls (15.7x on walls up to 18 cells); the whole advanced physics ran 5.8x, then limited by structural, CFD,
+ignition and flight models left on one CPU core. Section 14.12 adds batched structural, CFD and ignition proxies; updated
+whole-workload throughput remains to be measured.
 
 The CPU post-processing of advanced physics and robustness ensembles now accepts `workers > 1` and runs in a bounded,
-ordered process pool; measurements are in `docs/gpu_backend_benchmarks.md`. The general transient structural response over
-arbitrary curves remains unimplemented. W4 peak-pressure sampling and `xp=` for `surrogate_physics` are recorded in section 14.7.
+ordered process pool; measurements are in `docs/gpu_backend_benchmarks.md`. General transient structural response and
+the CFD and ignition proxies are now batched for `cpu-vectorized` and JAX as recorded in section 14.12. W4 peak-pressure
+sampling and `xp=` for `surrogate_physics` are recorded in section 14.7.
 Couplings between the batched thermal code and the scalar model, and the 1e-3 quadrature error of the scalar heat load, are
 in `docs/pending_cpu_reference_changes.md` (items 5 and 6).
 
@@ -976,10 +980,10 @@ failures, backend fallback and the scalar reference. Optional JAX CPU and GPU te
 `benchmarks/bench_structural_monte_carlo.py` (100,000 samples per design by default); a 100,000-sample GPU result is
 still pending because the current verification host has no working NVIDIA driver or installed JAX package.
 
-This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `StructuralMonteCarlo`. General
-`simulate_structural_response` curves, including time-varying thrust and lane-specific geometry, remain CPU work, as do
-the post-thermal CFD, ignition and flight proxies and detailed-ballistics post-processing. The vectorized static
-surrogate API now accepts `xp=`; its JAX numerical kernel is separately JIT-tested when the optional dependency exists.
+This first W4 kernel covers the synthetic `[0, peak, 0]` history used by `StructuralMonteCarlo`. General transient
+structural, CFD and ignition proxies are now batched as described in section 14.12. Flight and detailed-ballistics
+post-processing remain CPU work. The vectorized static surrogate API now accepts `xp=`; its JAX numerical kernel is
+separately JIT-tested when the optional dependency exists.
 
 ### 14.8 CPU post-processing for W2 and W3 ensembles (2026-10-03)
 
@@ -1060,6 +1064,29 @@ Inter-chunk refill and the W2/W3 process pipeline are implemented. Intra-launch 
 the compiled JAX batch has a fixed lane shape. An optional manually dispatched GPU workflow is in
 `.github/workflows/gpu-backend.yml`; it requires a self-hosted Linux runner labelled `gpu`. Real multi-GPU verification
 and the W4 GPU benchmark remain hardware-dependent.
+
+### 14.12 Batched transient structural, CFD and ignition proxies (2026-10-03)
+
+The `advanced_physics_proxies` backend service packs one `AdvancedPhysicsBatch` of curve histories, geometry, casing
+properties and thermal metrics. Its NumPy and JAX kernels evaluate the general time-varying structural response, CFD
+flow/erosion proxies and ignition metrics as lanes. Curves of different lengths are padded with a per-lane point count;
+the reductions, structural pressure integral and ignition pressure ramp ignore padded samples. The CPU reference service
+calls the original scalar functions.
+
+`run_advanced_physics_ensemble` routes each proxy lane through the backend that solved its thermal lane, including
+heterogeneous engine lists. Lanes from scalar thermal fallbacks and service failures keep the existing scalar
+post-processing path. Flight simulation remains on the CPU. The public per-design mapping is unchanged; optional
+`execution` reports the proxy service's backend counts and fallbacks, and `timings` adds `proxy_s`.
+
+Parity tests compare every numeric proxy field and the optional/category fields against the scalar functions for steel and
+composite casings, varying curve lengths (including a one-point curve), thermal-wall metrics and the reference backend.
+An optional JAX CPU parity test is included. This verification host has no JAX package or working NVIDIA driver, so neither
+JAX execution nor GPU throughput has been verified here. `DetailedBallistics.build_detailed_ballistics` remains the largest
+unbatched W3 post-processing item; detailed ballistics and flight are still CPU work.
+
+The updated scalar-reference profile (`benchmarks/results/offloaded_share_post_proxy.json`) reports offloaded shares of
+0.987 for W1, 0.990 for W2 and 0.993 for W3, all above the 0.8 coverage gate. These measurements validate the coverage
+map only; JAX/GPU execution and throughput still require the configured accelerator runner.
 
 ## Appendix A. State vector and padded batch schema
 

@@ -41,7 +41,7 @@ class NumpyBackend:
 
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in self.SUPPORTED_FEATURES}, history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -124,6 +124,20 @@ class NumpyBackend:
             bolt_count=bolt_count, bolt_diameter_m=bolt_diameter_m,
             bolt_strength_mpa=bolt_strength_mpa,
             closure_bolts_applicable=closure_bolts_applicable, thermal=thermal, xp=np,
+        )
+
+    def advanced_physics_proxies(self, batch, options=None):
+        """Evaluate transient structural, CFD and ignition proxies for an advanced-physics batch."""
+        import numpy as np
+
+        from ..batch.advanced_physics import assemble_advanced_physics_proxies
+        from ..batch.kernels.advanced_physics import advanced_physics_proxies
+        from ..batch.result import BatchResult
+
+        output = advanced_physics_proxies(batch.namespace(np), np)
+        return BatchResult(
+            assemble_advanced_physics_proxies(batch, output), self.name,
+            {**self.provenance(), "service": "advanced_physics_proxies"},
         )
 
     def provenance(self) -> Dict[str, Any]:

@@ -73,7 +73,7 @@ class ReferenceBackend:
         # the result always carries the full adaptive history, which contains everything "metrics" asks for
         return Capabilities({feature: SUPPORTED for feature in FEATURES + THERMAL_FEATURES},
                             history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
 
     def devices(self) -> List[str]:
         return ["cpu"]
@@ -197,6 +197,16 @@ class ReferenceBackend:
                 values[0] if isinstance(values[0], str) else np.asarray(values, dtype=float)
             )
         return result
+
+    def advanced_physics_proxies(self, batch, options=None):
+        """Evaluate transient advanced-physics proxies through their scalar reference functions."""
+        from ..batch.advanced_physics import scalar_advanced_physics_proxies
+        from ..batch.result import BatchResult
+
+        return BatchResult(
+            scalar_advanced_physics_proxies(batch), self.name,
+            {**self.provenance(), "service": "advanced_physics_proxies"},
+        )
 
     def provenance(self) -> Dict[str, Any]:
         import numpy

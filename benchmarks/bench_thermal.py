@@ -11,7 +11,8 @@ liner, a gas and a nozzle material. Two sets of lanes:
 * ``advanced``: the whole advanced physics (thermal, structural, CFD and ignition proxies, 1-D flight) of designs whose curves
   come from the burn solver (the test motor with its throat varied, 0.01 s steps), tiled to the batch size. The scalar
   baseline is ``simulate_advanced_physics`` in a process pool and the batched run is ``run_advanced_physics_ensemble``,
-  whose thermal ablation is one batch and whose other models run on the CPU, optionally in a process pool.
+  whose thermal ablation and transient structural/CFD/ignition proxies use the selected backend; flight and scalar
+  fallback models run on the CPU, optionally in a process pool.
 
 The baseline is the scalar model in a process pool, the best static schedule the CPU has because every lane is independent.
 
@@ -190,7 +191,10 @@ def bench_advanced_backend(count, name, device, repeat, workers, chunk_size):
     return {"backend": name, "device": device, "kind": "advanced", "lanes": count, "workers": workers,
             "chunk_size": chunk_size, "first_call_s": first_call, "seconds": best, "lanes_per_s": count / best,
             "timings": best_timings,
-            "execution": {key: best_execution.get(key) for key in ("schedule", "chunks", "overlap")}}
+            "execution": {
+                **{key: best_execution.get(key) for key in ("schedule", "chunks", "overlap")},
+                "advanced_proxies": best_execution.get("advanced_proxies"),
+            }}
 
 
 def main():

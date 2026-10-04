@@ -45,7 +45,7 @@ def test_the_reference_backend_is_registered_and_is_the_default():
 
     assert description["devices"] == ["cpu"]
     assert set(description["capabilities"]) == set(FEATURES) | set(THERMAL_FEATURES)  # burn and thermal lanes
-    assert description["services"] == ["thermal_ablation", "structural_response"]
+    assert description["services"] == ["thermal_ablation", "structural_response", "advanced_physics_proxies"]
     assert set(description["capabilities"].values()) == {"supported"}
     assert description["provenance"]["backend"] == "cpu-reference"
     assert description["provenance"]["dtype"] == "float64"

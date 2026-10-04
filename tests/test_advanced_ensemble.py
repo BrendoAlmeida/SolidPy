@@ -1,4 +1,4 @@
-"""``run_advanced_physics_ensemble``: the thermal batch plus the CPU models equal ``simulate_advanced_physics`` per design."""
+"""The advanced ensemble's thermal/proxy batches plus CPU flight equal ``simulate_advanced_physics`` per design."""
 
 import pytest
 
@@ -38,7 +38,7 @@ def test_the_reference_backend_gives_exactly_what_the_scalar_function_gives(desi
     assert got == [scalar(geometry, curve, propellant, casing, NozzleMaterial()) for curve in curves]
 
 
-def test_the_numpy_backend_agrees_on_every_key_and_the_models_after_the_thermal_follow(designs):
+def test_the_numpy_backend_agrees_on_every_key_after_thermal_and_proxy_batches(designs):
     geometry, curves, propellant = designs
     casing = CasingMaterial(liner_thickness_m=0.002)
     timings, execution = {}, {}
@@ -54,10 +54,41 @@ def test_the_numpy_backend_agrees_on_every_key_and_the_models_after_the_thermal_
         assert set(got[lane]) == set(want) and len(want) == 74
         for key, value in want.items():
             assert got[lane][key] == pytest.approx(value, rel=1e-8, abs=1e-9), key
-    assert set(timings) == {"pack_s", "thermal_s", "models_s"} and all(v >= 0.0 for v in timings.values())
+    assert set(timings) == {"pack_s", "thermal_s", "proxy_s", "models_s"} and all(
+        v >= 0.0 for v in timings.values()
+    )
     assert execution["effective_backend"] == "heterogeneous" and execution["lanes"] == 2
     assert execution["schedule"] == "thermal_postprocess_pipeline" and execution["overlap"] is True
     assert set(execution["lane_backends"]) == {0, 1}
+    assert execution["advanced_proxies"]["lanes"] == 2
+
+
+def test_a_proxy_backend_error_falls_back_to_the_scalar_models(designs, monkeypatch):
+    from solidpy.backends.numpy_vectorized import NumpyBackend
+
+    geometry, curves, propellant = designs
+    casing = CasingMaterial(liner_thickness_m=0.002)
+    execution = {}
+
+    def fail_proxy_service(self, batch, options=None):
+        raise RuntimeError("proxy device failed")
+
+    monkeypatch.setattr(NumpyBackend, "advanced_physics_proxies", fail_proxy_service)
+    got = run_advanced_physics_ensemble(
+        geometry, curves, casing_material=casing, flame_temp_k=propellant.combustion_temperature,
+        r_specific=propellant.products_constant, backend="cpu-vectorized", execution=execution,
+    )
+
+    expected = [scalar(geometry, curve, propellant, casing) for curve in curves]
+    for actual_lane, expected_lane in zip(got, expected):
+        assert actual_lane.keys() == expected_lane.keys()
+        for key, value in expected_lane.items():
+            if isinstance(value, (int, float)):
+                assert actual_lane[key] == pytest.approx(value, rel=1e-8, abs=1e-9), key
+            else:
+                assert actual_lane[key] == value, key
+    assert set(execution["advanced_proxies"]["fallback_errors"]) == {0, 1}
+    assert execution["advanced_proxies"]["scalar_lanes"] == 2
 
 
 def test_the_scenario_factors_of_a_curve_change_the_thermal_metrics_like_the_scalar_function_says(designs):

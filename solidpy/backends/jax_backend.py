@@ -87,6 +87,16 @@ def _compiled_thermal():
     return jax.jit(lambda P: thermal_solver.solve_thermal(driver, P))
 
 
+@functools.lru_cache(maxsize=16)
+def _compiled_advanced_physics_proxies():
+    """Jitted transient structural, CFD and ignition kernels, cached by JAX for each array shape."""
+    import jax
+
+    from ..batch.kernels.advanced_physics import advanced_physics_proxies
+
+    return jax.jit(lambda arrays: advanced_physics_proxies(arrays, jax.numpy))
+
+
 @functools.lru_cache(maxsize=None)
 def _compiled(keep_history: bool, max_steps: int):
     """The jitted solve for one history policy and step budget (jax caches per input shape)."""
@@ -153,7 +163,7 @@ class JaxBackend:
     def capabilities(self) -> Capabilities:
         return Capabilities({f: SUPPORTED for f in NumpyBackend.SUPPORTED_FEATURES},
                             history_policies=HISTORY_POLICY_TEMPLATES,
-                            services=("thermal_ablation", "structural_response"))
+                            services=("thermal_ablation", "structural_response", "advanced_physics_proxies"))
 
     def _x64(self):
         jax = self._jax
@@ -372,6 +382,22 @@ class JaxBackend:
                 "simulation.advanced.structural.thermoelastic_margin": None,
             })
         return output
+
+    def advanced_physics_proxies(self, batch, options=None):
+        """Evaluate transient advanced-physics proxy lanes on the selected JAX device."""
+        from ..batch.advanced_physics import assemble_advanced_physics_proxies
+        from ..batch.result import BatchResult
+
+        jax = self._jax
+        jnp = jax.numpy
+        arrays = batch.namespace(jnp)
+        with self._x64(), jax.default_device(self._device):
+            placed = jax.tree_util.tree_map(lambda value: jax.device_put(value, self._device), arrays)
+            output = jax.device_get(_compiled_advanced_physics_proxies()(placed))
+        return BatchResult(
+            assemble_advanced_physics_proxies(batch, output), self.name,
+            {**self.provenance(), "service": "advanced_physics_proxies"},
+        )
 
     def provenance(self) -> Dict[str, Any]:
         from ..batch.assemble import library_versions

@@ -269,6 +269,89 @@ def _timed_advanced_after_thermal_batch(jobs):
     return results
 
 
+def _advanced_proxy_batch(
+    geometries, curves, thermals, casings, flames, specifics, *, effective_backend, device, execution,
+):
+    """Run supported advanced proxy lanes through the backend that solved their thermal lane.
+
+    Reference lanes are left as ``None`` so the existing scalar post-processor evaluates them in its worker. Backend
+    failures follow the same fallback and preserve the original result path.
+    """
+    from .batch.advanced_physics import AdvancedPhysicsBatch
+
+    count = len(geometries)
+    results: List[Optional[Dict[str, Any]]] = [None] * count
+    if not count:
+        return results, {"service": "advanced_physics_proxies", "lanes": 0, "accelerated_lanes": 0,
+                         "scalar_lanes": 0, "backend_lanes": {}, "fallback_errors": {}}
+
+    lane_backends = execution.get("lane_backends", {})
+    fallback_lanes = execution.get("fallback_lanes", {})
+    if isinstance(fallback_lanes, dict):
+        fallback_indices = {int(index) for index in fallback_lanes}
+    else:
+        fallback_indices = {int(index) for index in fallback_lanes}
+    groups: Dict[Tuple[str, Optional[str]], List[int]] = {}
+    for lane in range(count):
+        info = lane_backends.get(lane, lane_backends.get(str(lane))) if lane_backends else None
+        if info is not None:
+            name, selected_device = info.get("backend", "cpu-reference"), info.get("device")
+        elif lane in fallback_indices:
+            name, selected_device = "cpu-reference", None
+        elif effective_backend in ("heterogeneous", "auto", None):
+            name, selected_device = "cpu-reference", None
+        else:
+            name, selected_device = effective_backend, device
+        groups.setdefault((name, selected_device), []).append(lane)
+
+    backend_lanes: Dict[str, int] = {}
+    fallback_errors: Dict[int, str] = {}
+    accelerated_lanes = scalar_lanes = 0
+    for (name, selected_device), indices in groups.items():
+        backend_lanes[name] = backend_lanes.get(name, 0) + len(indices)
+        if name == "cpu-reference":
+            scalar_lanes += len(indices)
+            continue
+        try:
+            selected = backends.get_backend(name, selected_device)
+            if not selected.capabilities().provides("advanced_physics_proxies"):
+                scalar_lanes += len(indices)
+                continue
+        except Exception as exc:
+            selected = None
+            lookup_error = f"{type(exc).__name__}: {exc}"
+        else:
+            lookup_error = None
+
+        backend_limit = getattr(selected, "max_lanes", None) if selected is not None else None
+        limit = min(2048, int(backend_limit)) if backend_limit is not None else 2048
+        for start in range(0, len(indices), max(int(limit), 1)):
+            current = indices[start : start + max(int(limit), 1)]
+            batch = AdvancedPhysicsBatch.from_objects(
+                [geometries[i] for i in current], [curves[i] for i in current],
+                [thermals[i] for i in current], [casings[i] for i in current],
+                flame_temp_k=[flames[i] for i in current], r_specific=[specifics[i] for i in current],
+            )
+            try:
+                if lookup_error is not None:
+                    raise RuntimeError(lookup_error)
+                returned = selected.advanced_physics_proxies(batch, SolveOptions()).to_results()
+                if len(returned) != len(current):
+                    raise RuntimeError("backend returned an unexpected number of advanced proxy results")
+            except Exception as exc:
+                fallback_errors.update({i: f"{type(exc).__name__}: {exc}" for i in current})
+                scalar_lanes += len(current)
+                continue
+            for lane, value in zip(current, returned):
+                results[lane] = value
+            accelerated_lanes += len(current)
+
+    return results, {
+        "service": "advanced_physics_proxies", "lanes": count, "accelerated_lanes": accelerated_lanes,
+        "scalar_lanes": scalar_lanes, "backend_lanes": backend_lanes, "fallback_errors": fallback_errors,
+    }
+
+
 def _timed_detailed_ballistics_batch(jobs):
     """Build each lane's detailed ballistics and report its worker-side CPU time."""
     from .DetailedBallistics import build_detailed_ballistics
@@ -523,8 +606,8 @@ def run_advanced_physics_ensemble(
     ``geometries`` and ``curves`` are lists with one entry per lane (one geometry or curve is broadcast), and
     ``casing_material``, ``nozzle_material``, ``flame_temp_k``, ``r_specific`` and ``gamma`` are one value for every lane
     or one per lane. Returns one flat metrics mapping per lane, the one ``simulate_advanced_physics`` returns for it: the
-    wall conduction, which costs most of the advanced physics, runs through ``simulate_thermal`` on ``backend`` and the
-    structural, CFD, ignition and flight models then run on the CPU for each lane from its thermal metrics. The scenario
+    wall conduction and the transient structural, CFD and ignition proxies run through the selected backend services
+    when available; flight and scalar fallback lanes run on the CPU. The scenario
     factors in ``curve["scenario_factors"]`` are read as ``simulate_advanced_physics`` reads them. ``workers`` sets the
     CPU model process count. ``None`` or ``1`` keeps post-processing serial; values above one run it in an ordered
     process pool. While the bounded thermal pipeline is active, reference fallbacks use one process so the requested
@@ -532,10 +615,9 @@ def run_advanced_physics_ensemble(
     default the executor leaves one host core for each non-CPU feeder. At thousands of lanes, those models can dominate
     (about 5 ms per lane against 0.3 ms for batched thermal ablation on the GPU). CPU process pools use ``spawn``, so
     scripts must call this function under ``if __name__ == "__main__":`` when ``workers > 1``.
-    A dict passed as
-    ``timings`` receives cumulative seconds packing (``pack_s``), in thermal solves (``thermal_s``) and in CPU models
-    (``models_s``); solve and model times can overlap. One passed as ``execution`` receives the summary of the thermal
-    chunks.
+    A dict passed as ``timings`` receives cumulative seconds packing (``pack_s``), in thermal solves (``thermal_s``),
+    in advanced proxy batches (``proxy_s``) and in CPU models or scalar fallbacks (``models_s``); these stages can
+    overlap in the producer-consumer schedule. One passed as ``execution`` receives thermal and proxy backend summaries.
     """
     workers = _validate_workers(workers)
     from .batch.thermal import _lane_count, _per_lane
@@ -579,6 +661,7 @@ def run_advanced_physics_ensemble(
         selected_backend, selected_device, reserved_cores, count, service=THERMAL_SERVICE
     ) + (2 if pipeline else 0)
     thermal_elapsed = 0.0
+    proxy_elapsed = 0.0
     model_elapsed = 0.0
     chunk_pack_elapsed = 0.0
     final_execution: Dict[str, Any]
@@ -590,9 +673,10 @@ def run_advanced_physics_ensemble(
         fallback_errors: Dict[int, Any] = {}
         lane_backends: Dict[int, Any] = {}
         postprocess_schedule: Dict[str, int] = {}
+        proxy_execution_chunks = []
 
         def jobs():
-            nonlocal thermal_elapsed, chunk_pack_elapsed
+            nonlocal thermal_elapsed, proxy_elapsed, chunk_pack_elapsed
             for start in range(0, count, thermal_chunk_size):
                 end = min(start + thermal_chunk_size, count)
                 chunk_start = time.perf_counter()
@@ -613,9 +697,20 @@ def run_advanced_physics_ensemble(
                 for lane, backend_info in outcome.execution.get("lane_backends", {}).items():
                     lane_backends[start + int(lane)] = backend_info
                 thermal = outcome.to_results()
+                proxy_start = time.perf_counter()
+                proxies, proxy_summary = _advanced_proxy_batch(
+                    geometries[start:end], curves[start:end], thermal, casings[start:end], flames[start:end],
+                    specifics[start:end], effective_backend=outcome.backend, device=selected_device,
+                    execution=outcome.execution,
+                )
+                proxy_elapsed += time.perf_counter() - proxy_start
+                proxy_execution_chunks.append(proxy_summary)
                 for local_lane, result in enumerate(thermal):
                     i = start + local_lane
-                    yield (geometries[i], curves[i], result, casings[i], flames[i], specifics[i], gammas[i])
+                    yield (
+                        geometries[i], curves[i], result, casings[i], flames[i], specifics[i], gammas[i],
+                        proxies[local_lane],
+                    )
 
         results = []
         for _, (result, elapsed) in _bounded_process_batches(
@@ -638,6 +733,23 @@ def run_advanced_physics_ensemble(
             ],
             "schedule": "thermal_postprocess_pipeline",
             "overlap": len(execution_chunks) > 1 and postprocess_schedule["process_batches"] > 0,
+            "advanced_proxies": {
+                "service": "advanced_physics_proxies",
+                "lanes": sum(item["lanes"] for item in proxy_execution_chunks),
+                "accelerated_lanes": sum(item["accelerated_lanes"] for item in proxy_execution_chunks),
+                "scalar_lanes": sum(item["scalar_lanes"] for item in proxy_execution_chunks),
+                "backend_lanes": {
+                    name: sum(item["backend_lanes"].get(name, 0) for item in proxy_execution_chunks)
+                    for name in {name for item in proxy_execution_chunks for name in item["backend_lanes"]}
+                },
+                "fallback_errors": {
+                    start + lane: error
+                    for start, item in zip(
+                        range(0, count, thermal_chunk_size), proxy_execution_chunks
+                    )
+                    for lane, error in item["fallback_errors"].items()
+                },
+            },
         }
     else:
         outcome = simulate_thermal(
@@ -646,8 +758,14 @@ def run_advanced_physics_ensemble(
         )
         solved = time.perf_counter()
         thermal = outcome.to_results()
+        proxy_start = time.perf_counter()
+        proxies, proxy_execution = _advanced_proxy_batch(
+            geometries, curves, thermal, casings, flames, specifics, effective_backend=outcome.backend,
+            device=selected_device, execution=outcome.execution,
+        )
+        proxy_elapsed = time.perf_counter() - proxy_start
         jobs = (
-            (geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i])
+            (geometries[i], curves[i], thermal[i], casings[i], flames[i], specifics[i], gammas[i], proxies[i])
             for i in range(count)
         )
         results = []
@@ -658,11 +776,12 @@ def run_advanced_physics_ensemble(
             results.append(result)
             model_elapsed += elapsed
         thermal_elapsed = solved - packed
-        final_execution = outcome.execution
+        final_execution = dict(outcome.execution)
+        final_execution["advanced_proxies"] = proxy_execution
 
     if timings is not None:
         timings.update(pack_s=packed - mark + chunk_pack_elapsed,
-                       thermal_s=thermal_elapsed, models_s=model_elapsed)
+                       thermal_s=thermal_elapsed, proxy_s=proxy_elapsed, models_s=model_elapsed)
     if execution is not None:
         execution.update(final_execution)
     return results
