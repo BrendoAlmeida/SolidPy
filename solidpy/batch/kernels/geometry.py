@@ -3,8 +3,9 @@
 
 Every function takes the array namespace ``xp`` first and works on arrays whose last axis is the padded grain
 axis ``G``; ``P`` is the mapping of packed arrays (``ProblemBatch.namespace``). There are no Python loops over
-lanes or grains, no in-place mutation, and branches are ``xp.where`` selections, so the same code runs on
-NumPy and on ``jax.numpy`` and can be jit-compiled.
+lanes or in-place mutation. Fixed loops over the static grain axis preserve the scalar summation order where
+padding would otherwise change floating-point reductions; the same code runs on NumPy and ``jax.numpy`` and can
+be jit-compiled.
 """
 
 import math
@@ -35,6 +36,65 @@ def ordered_sum(xp, values, compensated=COMPENSATED_SUM):
     if compensated:
         total = total + xp.where(xp.isfinite(compensation), compensation, 0.0)
     return total
+
+
+def valid_prefix_sum(xp, values, counts):
+    """Sum each lane's valid grain prefix independently of padded suffix width.
+
+    Through 128 float64 elements, this follows NumPy's contiguous ``sum(axis=-1)`` order: sequential addition
+    for fewer than eight elements; eight interleaved accumulators, their fixed pairwise tree, then a sequential
+    tail for longer prefixes. Above 128 elements, use the same fixed eight-accumulator order as a deterministic
+    fallback. ``counts`` broadcasts to ``values.shape[:-1]`` and gives the valid prefix length per lane.
+
+    The loops are over static axis lengths, never over lanes. This preserves the scalar NumPy reduction when
+    zero padding changes ``values.shape[-1]``, and keeps the implementation compatible with JAX/JIT.
+    """
+    width = values.shape[-1]
+    if width == 0:
+        return xp.zeros(values.shape[:-1], dtype=values.dtype)
+
+    counts = xp.asarray(counts, dtype=xp.int32)
+    counts = xp.broadcast_to(counts, values.shape[:-1])
+    short = xp.full(values.shape[:-1], -0.0, dtype=values.dtype)
+    for i in range(min(width, 8)):
+        short = xp.where(counts > i, short + values[..., i], short)
+    short = xp.where(counts == 0, xp.zeros_like(short), short)
+    if width < 8:
+        return short
+
+    def eight_way_sum(prefix_counts, max_count):
+        """NumPy's eight-accumulator reduction for a prefix no longer than ``max_count``."""
+        accumulators = values[..., :8]
+        full_limit = min(width, max_count) // 8 * 8
+        for block_start in range(8, full_limit, 8):
+            block = values[..., block_start : block_start + 8]
+            accumulators = xp.where(
+                (prefix_counts >= block_start + 8)[..., None], accumulators + block, accumulators
+            )
+        pair_sum = (
+            (accumulators[..., 0] + accumulators[..., 1])
+            + (accumulators[..., 2] + accumulators[..., 3])
+        ) + (
+            (accumulators[..., 4] + accumulators[..., 5])
+            + (accumulators[..., 6] + accumulators[..., 7])
+        )
+        tail_start = (prefix_counts // 8) * 8
+        offsets = xp.arange(8)
+        indices = xp.clip(tail_start[..., None] + offsets, 0, width - 1)
+        tail = xp.take_along_axis(values, indices, axis=-1)
+        for i in range(8):
+            pair_sum = xp.where(prefix_counts % 8 > i, pair_sum + tail[..., i], pair_sum)
+        return xp.where(prefix_counts < 8, short, pair_sum)
+
+    exact_counts = xp.minimum(counts, 128)
+    exact = eight_way_sum(exact_counts, 128)
+    if width <= 128:
+        return exact
+
+    # NumPy switches to recursive splitting above 128. A fixed eight-way reduction here remains accurate and
+    # padding-invariant for unusually large motors without adding dynamic recursive control flow to JAX.
+    fallback = eight_way_sum(counts, width)
+    return xp.where(counts <= 128, exact, fallback)
 
 
 def port_area(xp, regression, P):

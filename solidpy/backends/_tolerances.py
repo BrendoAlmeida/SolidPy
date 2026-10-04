@@ -38,7 +38,8 @@ TOLERANCES_VERSION = "5"
 # * throat ablation 4.2e-5 and final throat diameter 1.6e-7: accumulated over the accepted points;
 # * the series the detailed ballistics interpolates from the accepted points (thrust, pressure, mass, exit state)
 #   5.5e-3 of their maximum;
-# * the mass balance residual is at rounding level (<= 8e-8 %) in both paths.
+# * the mass balance residual was <= 8e-8 % in both paths on this eight-design study; full-corpus results later
+#   established an absolute 1e-4 % floor when the scalar residual is near zero (architecture section 14.24).
 # The burn area and the generated flow drop to zero when a grain burns out, and the detailed ballistics reads them by
 # linear interpolation between accepted points, so a sample that falls inside the last accepted step before a burnout
 # reads a fraction of the jump that depends on where the solver put that step: one GPU run differed by 3.1e-1 at that
@@ -95,8 +96,8 @@ GENERATED_FLOW_PEAK_COARSE_RTOL = 3.5e-2
 #: version 4).
 FINITE_DIFFERENCE_RTOL = 6e-2
 
-#: Mass balance residual in percent. Both paths leave a rounding-level residual (<= 8e-8 %), so the comparison is
-#: absolute (version 4).
+#: Absolute tolerance in percentage points for scalar-vs-batch mass-balance residual comparisons. Residuals can be
+#: close to zero, so a relative comparison is ill-conditioned.
 MASS_BALANCE_ATOL_PCT = 1e-6
 
 #: Every metric of the batched thermal ablation against the scalar model (worst measured 1.4e-12, version 5).

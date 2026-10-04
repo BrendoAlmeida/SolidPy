@@ -16,7 +16,7 @@ return quantities of shape ``S``. ``S = (B,)`` is the solver case; ``S = (B, T)`
 (pass every packed array with a new axis inserted after the lane axis).
 """
 
-from .geometry import burn_area, ordered_sum, port_area, remaining_volume
+from .geometry import burn_area, ordered_sum, port_area, remaining_volume, valid_prefix_sum
 from .nozzle import TINY, nozzle_mass_flow, thrust_components
 from .propellant import burn_rate, exit_mach, gas_properties
 from .sources import activation as activation_factor
@@ -57,7 +57,9 @@ def state_quantities(xp, y, active, P, detail=False, time=None):
     areas = xp.where(active, burn_area(xp, clamped, P), 0.0)
 
     # the mean port area runs over every real grain, burned out or not (as np.mean does in the scalar code)
-    port_mean = xp.sum(xp.where(valid, port_area(xp, regression, P), 0.0), axis=-1) / P["n_valid_grains"]
+    port_mean = valid_prefix_sum(
+        xp, xp.where(valid, port_area(xp, regression, P), 0.0), P["n_valid_grains"]
+    ) / P["n_valid_grains"]
     source_temperature, k = gas_properties(xp, pressure, P)
     source_temperature = xp.broadcast_to(source_temperature, pressure.shape)
     nozzle = nozzle_mass_flow(xp, pressure, temperature, k, P)
@@ -71,7 +73,7 @@ def state_quantities(xp, y, active, P, detail=False, time=None):
     rates = xp.where(active, (rate * activation)[..., None], 0.0)
 
     generated_grains = P["density"][..., None] * areas * rates
-    generated = xp.sum(generated_grains, axis=-1)
+    generated = valid_prefix_sum(xp, generated_grains, P["n_valid_grains"])
     parts = thrust_components(xp, pressure, temperature, nozzle, k, exit_mach(xp, k, P), P, detail)
     ideal, momentum, pressure_thrust, thrust = parts[:4]
     quantities = {

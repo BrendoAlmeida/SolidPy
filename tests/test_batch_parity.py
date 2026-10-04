@@ -63,6 +63,17 @@ def compare(cases, results):
         for key in ("completed", "numerical_blowdown_completed", "burnout_completed"):
             if got["status"][key] != stored["status"][key]:
                 failures.append((case["id"], key))
+        if stored["status"]["completed"] and got["status"]["completed"]:
+            mass_balance = m["mass_flow_balance_error_pct"]
+            reference_mass_balance = s["mass_flow_balance_error_pct"]
+            # Match the established corpus envelope: small scalar residuals are dominated by integration rounding.
+            mass_balance_limit = max(2.0 * reference_mass_balance, 1e-4)
+            if (
+                not np.isfinite(mass_balance)
+                or not np.isfinite(reference_mass_balance)
+                or mass_balance > mass_balance_limit
+            ):
+                failures.append((case["id"], "mass balance", mass_balance, mass_balance_limit))
     return deltas, wrong, failures
 
 
