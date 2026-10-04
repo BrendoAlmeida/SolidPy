@@ -506,6 +506,39 @@ python benchmarks/bench_structural_monte_carlo.py --backend cpu-vectorized --ite
 XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/bench_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 1000000 --designs 4 --repeat 2 --out benchmarks/results/w4_jax_cuda0_1m_4designs.json
 ```
 
+### W4 host and backend stage profile
+
+Profiled on 2026-10-04 on the Ryzen 5 3600 / RTX 4060 host with one design and 100,000 samples, after one warm-up
+call and three measured repetitions. Table values come from the repeat closest to the median total `run()` time, so
+the stage rows add to the total. The JSON also records each repeat and component-wise medians. The stages are parameter
+sampling, the structural-batch host remainder, the backend service call, and the remaining report/provenance work.
+The batch host remainder is the structural-batch time minus the service call. The service call includes array
+conversion, dispatch, transfers, synchronization and result conversion; the JAX device region does not split transfer
+time from device execution.
+
+| Stage | CPU vectorized | JAX, RTX 4060 |
+|---|---:|---:|
+| Total `run()` | 0.989 s | 1.020 s |
+| Parameter sampling | 0.073 s (7.4%) | 0.074 s (7.2%) |
+| Structural-batch host remainder | 0.622 s (62.9%) | 0.589 s (57.8%) |
+| Backend service call | 0.003 s (0.3%) | 0.017 s (1.7%) |
+| Post-batch run remainder | 0.290 s (29.4%) | 0.340 s (33.4%) |
+
+Both backends evaluated all 100,000 samples without fallback. More than 98% of the GPU end-to-end time is outside the
+backend service call, so this W4 path is limited mainly by host sampling, lane preparation/validation and report
+construction. The profile does not isolate the JAX kernel from transfers and conversion, and it does not show which
+host operation dominates within those remainders. Process peak RSS, including warm-up, was 370 MiB for CPU and
+1,084 MiB for JAX; this is host memory, not GPU VRAM. Raw results:
+`benchmarks/results/w4_profile_cpu_vectorized_100k.json` and
+`benchmarks/results/w4_profile_jax_cuda0_100k.json`.
+
+Reproduce with:
+
+```
+python benchmarks/profile_structural_monte_carlo.py --backend cpu-vectorized --iterations 100000 --designs 1 --repeat 3 --out benchmarks/results/w4_profile_cpu_vectorized_100k.json
+XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/profile_structural_monte_carlo.py --backend jax --device cuda:0 --iterations 100000 --designs 1 --repeat 3 --out benchmarks/results/w4_profile_jax_cuda0_100k.json
+```
+
 ## Flight dispersion (W5; CPU reference, reported and non-gating)
 
 Measured on 2026-10-04 with `benchmarks/bench_flight_dispersion.py`. The benchmark exercises the public

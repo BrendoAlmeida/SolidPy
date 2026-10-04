@@ -1,0 +1,110 @@
+{
+  "schema_version": "w4-stage-profile-v3",
+  "backend": "jax",
+  "device": "cuda:0",
+  "backend_provenance": {
+    "backend": "jax",
+    "backend_api_version": 1,
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 4060",
+    "dtype": "float64",
+    "library_versions": {
+      "python": "3.12.13",
+      "numpy": "2.4.4",
+      "scipy": "1.17.1",
+      "jax": "0.11.2",
+      "jaxlib": "0.11.2"
+    }
+  },
+  "service": "structural_response",
+  "workload": "W4",
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 4060, 8188 MiB, 610.57.04"
+  },
+  "iterations_per_design": 100000,
+  "designs": 1,
+  "warmups": 1,
+  "repeat": 3,
+  "timing_notes": {
+    "median": "Component-wise medians; values from different repeats may not add to median total_s.",
+    "median_total_run": "Repeat closest to median total_s; its stage values add to its total_s.",
+    "structural_batch_s": "Includes backend_service_wall_s.",
+    "structural_batch_host_remainder_s": "Structural batch time minus backend service call time.",
+    "post_batch_run_remainder_s": "Remaining run time after sampling and structural batch stages.",
+    "jax_device_region_s": "Internal JAX timer for device_put, compiled invocation, synchronization and device_get.",
+    "process_peak_rss_mib_including_warmup": "Process high-water RSS, including the warm-up call."
+  },
+  "results": [
+    {
+      "design": 0,
+      "iterations": 100000,
+      "repeat": 3,
+      "median": {
+        "total_s": 1.0195256799925119,
+        "sample_parameters_s": 0.07365341199329123,
+        "structural_batch_s": 0.6762608669814654,
+        "backend_service_wall_s": 0.01692872098647058,
+        "structural_batch_host_remainder_s": 0.6577335229667369,
+        "post_batch_run_remainder_s": 0.261713863001205,
+        "jax_device_region_s": 0.016882330004591495,
+        "process_peak_rss_mib_including_warmup": 1083.57421875
+      },
+      "median_total_run": {
+        "total_s": 1.0195256799925119,
+        "sample_parameters_s": 0.07365341199329123,
+        "structural_batch_s": 0.6057285470014904,
+        "backend_service_wall_s": 0.01692872098647058,
+        "structural_batch_host_remainder_s": 0.5887998260150198,
+        "post_batch_run_remainder_s": 0.34014372099773027,
+        "jax_device_region_s": 0.016882330004591495,
+        "n_evaluated": 100000,
+        "n_fallback": 0,
+        "process_peak_rss_mib_including_warmup": 1083.57421875
+      },
+      "measurements": [
+        {
+          "total_s": 1.0195256799925119,
+          "sample_parameters_s": 0.07365341199329123,
+          "structural_batch_s": 0.6057285470014904,
+          "backend_service_wall_s": 0.01692872098647058,
+          "structural_batch_host_remainder_s": 0.5887998260150198,
+          "post_batch_run_remainder_s": 0.34014372099773027,
+          "jax_device_region_s": 0.016882330004591495,
+          "n_evaluated": 100000,
+          "n_fallback": 0,
+          "process_peak_rss_mib_including_warmup": 1083.57421875
+        },
+        {
+          "total_s": 1.0798370180127677,
+          "sample_parameters_s": 0.07624185099848546,
+          "structural_batch_s": 0.7418813040130772,
+          "backend_service_wall_s": 0.00922549600363709,
+          "structural_batch_host_remainder_s": 0.7326558080094401,
+          "post_batch_run_remainder_s": 0.261713863001205,
+          "jax_device_region_s": 0.00917202400160022,
+          "n_evaluated": 100000,
+          "n_fallback": 0,
+          "process_peak_rss_mib_including_warmup": 1083.57421875
+        },
+        {
+          "total_s": 0.9923623880022205,
+          "sample_parameters_s": 0.07355457998346537,
+          "structural_batch_s": 0.6762608669814654,
+          "backend_service_wall_s": 0.018527344014728442,
+          "structural_batch_host_remainder_s": 0.6577335229667369,
+          "post_batch_run_remainder_s": 0.2425469410372898,
+          "jax_device_region_s": 0.01847965200431645,
+          "n_evaluated": 100000,
+          "n_fallback": 0,
+          "process_peak_rss_mib_including_warmup": 1083.98828125
+        }
+      ]
+    }
+  ]
+}

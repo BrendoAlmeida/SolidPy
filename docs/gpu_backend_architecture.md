@@ -1294,6 +1294,18 @@ samples per design does not reveal a GPU throughput advantage. The measurement i
 and full report assembly; it does not isolate kernel performance. Raw results and reproduction commands are in
 `docs/gpu_backend_benchmarks.md`.
 
+### 14.19 W4 host and backend stage profile (2026-10-04)
+
+A warmed 100,000-sample, single-design profile used three measured repetitions; reported stage values are from the
+repeat closest to the median total `run()` time. It separated parameter sampling, structural-batch host work, backend
+service time and post-batch report/provenance work. The CPU vectorized path spent 0.003 s in its backend service call
+and 0.622 s in the remaining structural-batch host work; JAX spent 0.017 s in its service call and 0.589 s in that
+host remainder. Parameter sampling took about 0.073 s and post-batch work took 0.290-0.340 s. More than 98% of the
+JAX end-to-end time was outside the backend service call. The service timing includes transfer, synchronization and
+result conversion, so it is not a measurement of kernel time alone. This profile identifies host-side work as the
+limiting area for W4 on this host, but does not yet separate the pressure callback, per-lane validation and report
+construction costs. The reusable profiling harness and raw results are in `docs/gpu_backend_benchmarks.md`.
+
 ## Appendix A. State vector and padded batch schema
 
 State per lane (size `G + 7`):
