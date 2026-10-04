@@ -1,6 +1,6 @@
 # SolidPy accelerator backends: architecture and implementation plan
 
-Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.19). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
+Status: Phases 0 to 4 and the Phase 5 software work are implemented (sections 14.4-14.20). The Phase 3 throughput gate and the W1-W3 CPU-reference coverage gate pass. Single-GPU parity and updated W2-W4 throughput have been measured on the RTX 4060. Section 12 defines the Phase 5 exit criterion as published benchmark results and complete documentation; separate validation of concurrent execution on real multi-GPU hardware remains open under section 6.2. W2's bounded CPU pipeline compacts accelerated-lane curve payloads before process dispatch. Intra-launch refill stays deferred unless profiling shows that chunk-level scheduling leaves material device capacity unused. Audience: SolidPy maintainers and whoever implements this.
 Scope: add GPU execution to SolidPy **without replacing or changing the existing CPU code path**.
 
 ## 0. Summary
@@ -198,12 +198,14 @@ solidpy/                         # existing flat modules: unchanged
       propellant.py              # burn rate (power law, table), erosive term, thermo tables
       nozzle.py                  # mass flow, exit Mach (batched root find), exit state, thrust components
       rhs.py                     # conservative right-hand side for the burn and blowdown stages
-      metrics.py                 # peaks, integrals, flow intervals, mass balance
+      axial_flow.py              # batched axial mass-flux metrics for uniform histories
       structural.py, thermal.py  # Tier 1, see section 7
     integrators/
       dop853.py                  # Butcher tableau, per-lane step control, dense output
       events.py                  # per-lane terminal events, restart policy
       stages.py                  # source breakpoints, burn stage, blowdown stage
+      solver.py                  # stage driver and device-side running peak/flow-interval reductions
+    assemble.py                  # canonical metrics, status, provenance and output histories
     _xp.py                       # array-namespace helpers (array-api-compat), dtype policy
   ensemble.py                    # public high-level API (section 4.5)
   executor.py                    # heterogeneous CPU+GPU executor (section 6)
@@ -428,7 +430,10 @@ computed **on the native adaptive grid**: the time of the thrust maximum, the ma
 maximum, its time and its grain (the per-time, per-grain flux series is optional and large). `"uniform:N"`
 therefore derives (c) from the native accepted-step buffer, resamples (b) with the same linear
 interpolation, and returns only the uniform curves and the diagnostics. The current implementation copies the retained
-accepted-step buffer to the host and computes the pressure derivative and axial-flow diagnostic there.
+accepted-step buffer to the host for curve resampling and the pressure-derivative diagnostic. Axial mass-flux metrics
+use the array kernel in `batch/kernels/axial_flow.py`: NumPy runs it during assembly, while JAX runs it on the selected
+device before copying results to the host. The scalar `AxialFlow` evaluator remains the oracle and handles a lane the
+batched kernel marks unsupported.
 
 Two consequences: the device must keep the accepted-step buffer *transiently* (about `max_steps x
 (7 + G)` values per lane, around 1 MB per lane in float64, so a 4,096-lane chunk needs ~4 GB; the output
@@ -442,11 +447,11 @@ lanes x 4,000 steps x 40 values x 8 B = about 5.2 GB for `"full"`; the same batc
 needs only the running reductions (a few hundred bytes per lane). The executor chunks batches to fit device
 memory (section 6.3). A per-lane `step_overflow` flag is raised if `max_steps` is hit.
 
-Metrics that the scalar code derives from the history (peaks, integrals, flow start/end brackets,
-mass-balance residual, burn duration, `grain_burnout_times_s`) are computed on device with running
-reductions where possible; the few that need the whole history (`_flow_interval` brackets) use a
-two-pass or masked-scan formulation. The kernel for each metric is listed in `kernels/metrics.py` with a
-unit test against the scalar function.
+The solve produces peak metrics and flow start/end brackets as device-side running reductions, integral metrics as
+state variables and burnout times as event outputs. The running peak and flow-interval reductions are part of the
+accepted-step recorder in `batch/integrators/solver.py`; `batch/assemble.py` derives mass-balance residuals, durations
+and canonical result mappings on the host. The axial-flow reduction is isolated in `batch/kernels/axial_flow.py` and
+compared with the scalar function in tests.
 
 ## 6. Running on CPU and GPU together
 
@@ -762,8 +767,8 @@ JAX's NumPy-compatible namespace. The loop driver is the only backend-specific p
 | Phase | Deliverables | Exit criterion | Effort |
 |---|---|---|---|
 | 0. Baseline | profiling harness, reference workloads W1-W5, tier map, golden corpus, `ProblemBatch` schema, empty backend registry and extras, CI skeleton | baseline numbers recorded; corpus frozen | 1-2 wk |
-| 1. Kernels + `cpu-vectorized` | geometry, propellant, nozzle kernels; fixed-step RK4 prototype to validate the right-hand side; kernel parity tests | kernel parity 1e-12 on the property tests | 2-3 wk |
-| 2. Batched DOP853 + events + stages | per-lane controller port, dense output, burnout and cutoff events, stage plan, metrics kernels, `BatchResult.to_results()`; routing, capabilities, provenance | whole-simulation parity (8.1.3) on golden corpus and W1 ensembles with `cpu-vectorized` | 3-5 wk |
+| 1. Kernels + `cpu-vectorized` | geometry, propellant and nozzle kernels; direct scalar parity tests for the conservative RHS (the temporary fixed-step RK4 prototype was superseded by these tests) | kernel parity 1e-12 on the property tests | 2-3 wk |
+| 2. Batched DOP853 + events + stages | per-lane controller port, dense output, burnout and cutoff events, stage plan, device-side running metric reductions, `BatchResult.to_results()`; routing, capabilities, provenance | whole-simulation parity (8.1.3) on golden corpus and W1 ensembles with `cpu-vectorized` | 3-5 wk |
 | 3. JAX backend and **go/no-go** | jit/`while_loop` driver, x64, device selection, memory chunking, bucketing; first benchmark | parity on GPU **and** >= 5x vs all CPU cores at B >= 4,096 (else stop and keep phases 0-2 as a CPU-vectorized improvement) | 2-3 wk |
 | 4. Tier 1 coverage | robustness as lanes, axial flux, structural/thermal/cfd/ignition/detailed-ballistics batching, `xp=` for surrogate physics, structural Monte Carlo | `offloaded_share >= 0.8` on W1-W3 | 4-6 wk |
 | 5. Heterogeneous executor and polish | CPU+GPU executor, multi-GPU, refill batching, overlap pipeline, docs, install guides, optional GPU CI | benchmark suite results published; documentation complete | 3-4 wk |
@@ -1305,6 +1310,20 @@ JAX end-to-end time was outside the backend service call. The service timing inc
 result conversion, so it is not a measurement of kernel time alone. This profile identifies host-side work as the
 limiting area for W4 on this host, but does not yet separate the pressure callback, per-lane validation and report
 construction costs. The reusable profiling harness and raw results are in `docs/gpu_backend_benchmarks.md`.
+
+### 14.20 Axial-flow metrics on uniform histories (2026-10-04)
+
+`uniform:N` now computes the axial mass-flux maximum and its time, grain, station and position in one batched
+array-namespace kernel. NumPy evaluates the kernel during result assembly; JAX evaluates it on the selected device
+before `device_get`, so it transfers only the diagnostic metrics instead of assembling a per-time, per-station flow
+profile on the host. The scalar evaluator remains the reference and is used for a lane the kernel marks unsupported.
+`full` and `decimated:N` retain their previous scalar axial diagnostic path.
+
+Parity tests use histories from mixed batches containing one, two and three tubular/star grains. The metric keys and
+discrete maximum indices match the scalar evaluator exactly; numeric values passed at `1e-12` on NumPy and `1e-10`
+on JAX CPU and the RTX 4060. The GPU test completed in 79.15 s. Pressure-rise derivatives and uniform-curve
+resampling still run on the host. The test and implementation are in `tests/test_axial_flow.py` and
+`solidpy/batch/kernels/axial_flow.py`.
 
 ## Appendix A. State vector and padded batch schema
 

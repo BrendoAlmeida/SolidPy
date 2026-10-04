@@ -4,9 +4,11 @@ import numpy as np
 import pytest
 
 from solidpy import (
-    BurnSimulation, Environment, Grain, Motor, Propellant,
+    BurnSimulation, Environment, Grain, Motor, Propellant, backends,
     compare_axial_diagnostics, evaluate_axial_mass_flux,
 )
+from solidpy.backends import SolveOptions
+from solidpy.batch import ProblemBatch
 
 
 def make_motor(grains):
@@ -25,6 +27,50 @@ def make_history(regression, generated, igniter=None, time=None):
         "regression_m": regression, "mdot_generated_grains_kg_s": generated,
         "mdot_igniter_kg_s": np.zeros(count) if igniter is None else np.asarray(igniter),
     }
+
+
+def make_uniform_history_batch():
+    propellant = Propellant(
+        1.1308, 0.04197, 1720.0, density=1879.0, burn_rate_a=7.36, burn_rate_n=0.32,
+    )
+    motors = [
+        make_motor([Grain(0.035, 0.015, initial_height=0.12)]),
+        make_motor([
+            Grain(0.035, 0.015, initial_height=0.12, geometry="star", n_points=5, epsilon=0.1),
+            Grain(0.034, 0.014, initial_height=0.10),
+        ]),
+        make_motor([
+            Grain(0.035, 0.015, initial_height=0.12),
+            Grain(0.034, 0.014, initial_height=0.10, geometry="star", n_points=5, epsilon=0.1),
+            Grain(0.033, 0.013, initial_height=0.09),
+        ]),
+    ]
+    settings = {"max_step_size": 0.04, "rtol": 1e-6, "atol": 1e-9}
+    batch = ProblemBatch.from_objects(
+        motors, propellant, [Environment() for _ in motors], settings=settings,
+    )
+    return batch, motors
+
+
+def assert_uniform_axial_matches_scalar_history(backend, device=None, *, rtol):
+    batch, motors = make_uniform_history_batch()
+    runner = backends.get_backend(backend, device=device)
+    full = runner.solve_burn(batch, SolveOptions(history="full", max_steps=900, tiers=())).to_results()
+    uniform = runner.solve_burn(batch, SolveOptions(history="uniform:24", max_steps=900, tiers=())).to_results()
+
+    for motor, native, result in zip(motors, full, uniform):
+        expected = evaluate_axial_mass_flux(motor, native["history"])["metrics"]
+        actual = result["history"]["diagnostics"]["axial_mass_flux"]
+        assert tuple(actual) == tuple(expected)
+        for key in (
+            "max_axial_mass_flux_grain_index", "max_axial_mass_flux_station_id",
+            "max_axial_mass_flux_time_index", "max_axial_mass_flux_station_index",
+        ):
+            assert actual[key] == expected[key], key
+        for key in (
+            "max_axial_mass_flux_kg_m2_s", "max_axial_mass_flux_time_s", "max_axial_mass_flux_position_m",
+        ):
+            np.testing.assert_allclose(actual[key], expected[key], rtol=rtol, atol=0.0, err_msg=key)
 
 
 @pytest.mark.parametrize("direction", ["negative", "positive"])
@@ -212,3 +258,22 @@ def test_comparison_rejects_different_geometry_orientation_and_nonoverlap():
     history["time_s"] = np.array([2, 3])
     with pytest.raises(ValueError, match="common time"):
         compare_axial_diagnostics(reference, evaluate_axial_mass_flux(motor, history))
+
+
+def test_cpu_vectorized_uniform_axial_metrics_match_scalar_with_mixed_grain_counts():
+    assert_uniform_axial_matches_scalar_history("cpu-vectorized", rtol=1e-12)
+
+
+def test_jax_cpu_uniform_axial_metrics_match_scalar_with_mixed_grain_counts():
+    pytest.importorskip("jax")
+    from solidpy.backends import _tolerances
+
+    assert_uniform_axial_matches_scalar_history("jax", device="cpu", rtol=_tolerances.KERNEL_RTOL_GPU)
+
+
+@pytest.mark.gpu
+def test_jax_gpu_uniform_axial_metrics_match_scalar_with_mixed_grain_counts():
+    pytest.importorskip("jax")
+    from solidpy.backends import _tolerances
+
+    assert_uniform_axial_matches_scalar_history("jax", device="cuda:0", rtol=_tolerances.KERNEL_RTOL_GPU)

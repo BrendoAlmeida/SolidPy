@@ -87,6 +87,22 @@ def _compiled_thermal():
     return jax.jit(lambda P: thermal_solver.solve_thermal(driver, P))
 
 
+@functools.lru_cache(maxsize=1)
+def _compiled_axial_history_metrics():
+    """JIT the uniform-history axial diagnostic so accepted histories stay on the selected device."""
+    import jax
+
+    from ..batch.kernels.axial_flow import axial_mass_flux_metrics_from_states
+
+    def evaluate(P, time_s, state, n_points, grain_order, grain_starts, chamber_area, n_grains, geometry_supported):
+        return axial_mass_flux_metrics_from_states(
+            jax.numpy, P, time_s, state, n_points, grain_order, grain_starts, chamber_area, n_grains,
+            geometry_supported,
+        )
+
+    return jax.jit(evaluate)
+
+
 @functools.lru_cache(maxsize=16)
 def _compiled_advanced_physics_proxies():
     """Jitted transient structural, CFD and ignition kernels, cached by JAX for each array shape."""
@@ -196,7 +212,10 @@ class JaxBackend:
         per_lane = 2 * (max_steps + 1) * (grains + 9) * 8
         return _floor_lanes(min(self.max_lanes, max(HISTORY_BUDGET_BYTES // per_lane, 1)))  # may be below 64
 
-    def _run(self, sub, full: bool, max_steps: int, cap: Optional[int], floor: int = MIN_LANE_BUCKET):
+    def _run(
+        self, sub, full: bool, max_steps: int, cap: Optional[int], floor: int = MIN_LANE_BUCKET,
+        axial_metrics: bool = False,
+    ):
         """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
 
         ``sub`` already has its grain axis padded to a bucket; the lane axis is padded here.
@@ -212,7 +231,24 @@ class JaxBackend:
             P = {name: jax.device_put(jnp.asarray(array), self._device) for name, array in padded.arrays.items()}
             y0 = jax.device_put(jnp.asarray(padded.initial_state()), self._device)
             limit = jnp.asarray(np.iinfo(np.int64).max if cap is None else cap)
-            out = jax.device_get(_compiled(full, max_steps)(P, y0, limit))
+            device_out = _compiled(full, max_steps)(P, y0, limit)
+            if axial_metrics:
+                from ..batch.assemble import _axial_flow_layout
+
+                order, starts, chamber_area, n_grains, geometry_supported = _axial_flow_layout(padded)
+                axial_layout = (
+                    jax.device_put(jnp.asarray(order), self._device),
+                    jax.device_put(jnp.asarray(starts), self._device),
+                    jax.device_put(jnp.asarray(chamber_area), self._device),
+                    jax.device_put(jnp.asarray(n_grains), self._device),
+                    jax.device_put(jnp.asarray(geometry_supported), self._device),
+                )
+                axial = _compiled_axial_history_metrics()(
+                    P, device_out["ht"], device_out["hy"], device_out["n_points"], *axial_layout,
+                )
+                device_out = dict(device_out)
+                device_out.update({f"_axial_flow_{name}": value for name, value in axial.items()})
+            out = jax.device_get(device_out)
         self._device_s += time.perf_counter() - started
         return {name: np.asarray(v)[:lanes] for name, v in out.items() if np.ndim(v)}
 
@@ -231,6 +267,7 @@ class JaxBackend:
         batch = batch.with_table_buckets()  # table widths are part of the compiled shapes
         history_kind, _ = parse_history_policy(options.history)
         stores_history = history_kind != "metrics"
+        axial_metrics = history_kind == "uniform"
         max_steps = options.max_steps or DEFAULT_MAX_STEPS[history_kind]
         # Output policies need accepted points; capped tiers would allocate and discard those buffers.
         tiers = options.tiers if options.tiers is not None else (() if stores_history else DEFAULT_TIERS)
@@ -244,7 +281,9 @@ class JaxBackend:
             chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_g_max(grains)
             floor = min(MIN_LANE_BUCKET, per_launch)  # a launch the budget keeps small is not padded back up
             out, info = solve_in_tiers(
-                chunk, lambda sub, cap: self._run(sub, stores_history, max_steps, cap, floor), tiers
+                chunk, lambda sub, cap: self._run(
+                    sub, stores_history, max_steps, cap, floor, axial_metrics=axial_metrics,
+                ), tiers
             )
             begin = time.perf_counter()
             results.extend(assemble(chunk, out, options.history, provenance))

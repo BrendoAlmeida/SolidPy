@@ -50,6 +50,11 @@ HISTORY_CHANNELS = (
 _GIT_TTL_S = 5.0
 _git_cache: Dict[str, Any] = {"stamp": None, "at": -1e9, "value": None}
 _git_lock = threading.Lock()
+_AXIAL_METRIC_FIELDS = (
+    "max_flux", "time_s", "grain_index", "station_index", "position_m", "valid", "time_index",
+)
+_AXIAL_METRIC_PREFIX = "_axial_flow_"
+_AXIAL_STATIONS_PER_GRAIN = 5
 
 
 def _source_stamp(paths) -> tuple:
@@ -266,7 +271,66 @@ def _sample_history(history, sample_times):
     return sampled
 
 
-def _history_for_policy(history, motor, policy):
+def _axial_flow_layout(batch):
+    """Pack each motor's negative-nozzle grain order and fixed axial geometry."""
+    lanes, grains = len(batch), batch.g_max
+    order = np.zeros((lanes, grains), dtype=np.int32)
+    starts = np.zeros((lanes, grains), dtype=float)
+    chamber_area = np.empty(lanes, dtype=float)
+    geometry_supported = np.ones(lanes, dtype=bool)
+    for lane, motor in enumerate(batch.motors):
+        count = int(batch.n_grains[lane])
+        axial_positions = np.asarray(motor.grain_axial_positions_m, dtype=float)
+        grain_order = np.argsort(axial_positions)[::-1]
+        order[lane, :count] = grain_order
+        starts[lane, :count] = axial_positions[grain_order]
+        chamber_area[lane] = motor.chamber_area
+        geometry_supported[lane] = all(grain.geometry in {"tubular", "star"} for grain in motor.grains)
+    return order, starts, chamber_area, np.asarray(batch.n_grains), geometry_supported
+
+
+def _uniform_axial_metric_rows(batch, out):
+    """Compute or unpack the uniform-history axial metrics for every lane.
+
+    JAX supplies these arrays from its device-side reduction. The NumPy backend runs the same xp kernel here,
+    over the padded accepted histories. A lane the kernel flags invalid is left to the scalar oracle so its
+    existing unsupported-input result and reason are preserved exactly.
+    """
+    prefix = _AXIAL_METRIC_PREFIX
+    if all(prefix + name in out for name in _AXIAL_METRIC_FIELDS):
+        values = {name: out[prefix + name] for name in _AXIAL_METRIC_FIELDS}
+    else:
+        from .kernels.axial_flow import axial_mass_flux_metrics_from_states
+
+        order, starts, chamber_area, n_grains, geometry_supported = _axial_flow_layout(batch)
+        history_length = max(1, int(np.max(out["n_points"])))
+        P = batch.namespace(np)
+        values = axial_mass_flux_metrics_from_states(
+            np, P, out["ht"][:, :history_length], out["hy"][:, :history_length], out["n_points"],
+            order, starts, chamber_area, n_grains, geometry_supported,
+        )
+
+    rows = []
+    for lane in range(len(batch)):
+        if not bool(values["valid"][lane]):
+            rows.append(None)
+            continue
+        grain_index = int(values["grain_index"][lane])
+        station_index = int(values["station_index"][lane])
+        rows.append({
+            "max_axial_mass_flux_kg_m2_s": float(values["max_flux"][lane]),
+            "max_axial_mass_flux_time_s": float(values["time_s"][lane]),
+            "max_axial_mass_flux_grain_index": grain_index,
+            "max_axial_mass_flux_station_id":
+                f"grain:{grain_index}:station:{station_index % _AXIAL_STATIONS_PER_GRAIN}",
+            "max_axial_mass_flux_position_m": float(values["position_m"][lane]),
+            "max_axial_mass_flux_time_index": int(values["time_index"][lane]),
+            "max_axial_mass_flux_station_index": station_index,
+        })
+    return rows
+
+
+def _history_for_policy(history, motor, policy, axial_metrics=None):
     """Apply the requested output history policy to an already assembled adaptive history."""
     kind, count = parse_history_policy(policy)
     if kind == "metrics":
@@ -292,12 +356,15 @@ def _history_for_policy(history, motor, policy):
         "max_abs_pressure_derivative_pa_s": float(np.max(np.abs(pressure_gradient))),
         "max_abs_pressure_derivative_time_s": float(time[pressure_gradient_index]),
     }
-    try:
-        from ..AxialFlow import evaluate_axial_mass_flux
+    if axial_metrics is None:
+        try:
+            from ..AxialFlow import evaluate_axial_mass_flux
 
-        diagnostics["axial_mass_flux"] = evaluate_axial_mass_flux(motor, history)["metrics"]
-    except (TypeError, ValueError) as exc:
-        diagnostics["axial_mass_flux"] = {"status": "unsupported", "reason": str(exc)}
+            diagnostics["axial_mass_flux"] = evaluate_axial_mass_flux(motor, history)["metrics"]
+        except (TypeError, ValueError) as exc:
+            diagnostics["axial_mass_flux"] = {"status": "unsupported", "reason": str(exc)}
+    else:
+        diagnostics["axial_mass_flux"] = axial_metrics
 
     channels = (
         "time_s", "chamber_pressure_pa", "thrust_n", "mdot_generated_kg_s", "mdot_nozzle_kg_s",
@@ -323,6 +390,7 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
     y, y0 = out["y"], out["y0"]
     P = batch.namespace(np)
     tail_off = a["tail_off_evaluation"] > 0.5
+    axial_metric_rows = _uniform_axial_metric_rows(batch, out) if history_kind == "uniform" else None
 
     solid_remaining = geometry.ordered_sum(np, geometry.remaining_volume(np, y[:, 2 : 2 + G], P))
     consumed = a["density"] * (a["propellant_volume"] - solid_remaining)
@@ -423,9 +491,12 @@ def assemble(batch, out, history: str = "metrics", execution: Optional[Dict[str,
                 "scenario_inputs": {"burn_rate_factor": float(a["burn_rate_factor"][lane])},
             },
         }
+        native_history = _history(batch, out, lane, P) if history_kind != "metrics" else None
         results.append({
-            "history": _history_for_policy(_history(batch, out, lane, P), batch.motors[lane], history)
-            if history_kind != "metrics" else None,
+            "history": _history_for_policy(
+                native_history, motor, history,
+                axial_metrics=None if axial_metric_rows is None else axial_metric_rows[lane],
+            ) if history_kind != "metrics" else None,
             "metrics": metrics, "status": status,
             "efficiencies": {**applied, "efficiency_semantics": "native_split"}, "provenance": provenance,
         })
