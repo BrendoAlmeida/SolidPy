@@ -344,8 +344,20 @@ JAX installation, so the comparison is the scalar reference and NumPy vectorizat
 | CPU vectorized | 100,000 | 5.16 s | 19,398 | 0 |
 
 The NumPy path is 2.8x faster in this single-process measurement. It does not establish a GPU speedup or compare against
-the scalar model spread over all CPU cores. Raw results are in `benchmarks/results/w4_cpu_reference_100k.json` and
-`benchmarks/results/w4_cpu_vectorized_100k.json`; the GPU and four-design run remain to be measured on an available JAX
+the scalar model spread over all CPU cores. The one-design raw results are in
+`benchmarks/results/w4_cpu_reference_100k.json` and `benchmarks/results/w4_cpu_vectorized_100k.json`.
+
+The plan-shaped CPU baseline was also measured with four designs, each running 100,000 samples. The benchmark processes
+designs sequentially and includes report assembly; throughput below uses total elapsed warm time across all four:
+
+| Path | Total samples | Warm elapsed (s) | Aggregate samples/s | Fallback lanes |
+|---|---:|---:|---:|---:|
+| CPU scalar reference | 400,000 | 53.56 | 7,468 | 0 |
+| CPU vectorized | 400,000 | 17.98 | 22,248 | 0 |
+
+The vectorized CPU run is 2.98x faster for this workload. Raw results are in
+`benchmarks/results/w4_cpu_reference_100k_4designs.json` and
+`benchmarks/results/w4_cpu_vectorized_100k_4designs.json`. The four-design GPU run remains pending on a compatible JAX
 CUDA host.
 
 ## Reproducing

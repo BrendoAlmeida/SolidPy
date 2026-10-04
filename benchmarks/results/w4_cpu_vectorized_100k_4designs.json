@@ -1,0 +1,84 @@
+{
+  "backend": "cpu-vectorized",
+  "device": null,
+  "backend_provenance": {
+    "backend": "cpu-vectorized",
+    "backend_api_version": 1,
+    "device": "cpu",
+    "dtype": "float64",
+    "library_versions": {
+      "python": "3.12.13",
+      "numpy": "2.4.4",
+      "scipy": "1.17.1"
+    }
+  },
+  "service": "structural_response",
+  "workload": "W4",
+  "machine": {
+    "python": "3.12.13",
+    "platform": "Linux-7.2.2-1-cachyos-x86_64-with-glibc2.44",
+    "cpu_count": 12,
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "gpu": null,
+    "numpy": "2.4.4",
+    "scipy": "1.17.1",
+    "jax": null
+  },
+  "iterations_per_design": 100000,
+  "designs": 4,
+  "repeat": 1,
+  "results": [
+    {
+      "design": 0,
+      "iterations": 100000,
+      "first_call_s": 4.591607334004948,
+      "first_samples_per_s": 21778.865814463446,
+      "warm_times_s": [
+        4.507411088008666
+      ],
+      "best_warm_s": 4.507411088008666,
+      "warm_samples_per_s": 22185.684431144065,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 1,
+      "iterations": 100000,
+      "first_call_s": 4.498328562011011,
+      "first_samples_per_s": 22230.479303916,
+      "warm_times_s": [
+        4.492389221995836
+      ],
+      "best_warm_s": 4.492389221995836,
+      "warm_samples_per_s": 22259.869984189158,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 2,
+      "iterations": 100000,
+      "first_call_s": 4.5113094320113305,
+      "first_samples_per_s": 22166.513183604835,
+      "warm_times_s": [
+        4.488462667010026
+      ],
+      "best_warm_s": 4.488462667010026,
+      "warm_samples_per_s": 22279.343155730123,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    },
+    {
+      "design": 3,
+      "iterations": 100000,
+      "first_call_s": 4.618891532009002,
+      "first_samples_per_s": 21650.21614103691,
+      "warm_times_s": [
+        4.4906785849889275
+      ],
+      "best_warm_s": 4.4906785849889275,
+      "warm_samples_per_s": 22268.349450408634,
+      "n_evaluated": 100000,
+      "n_fallback": 0
+    }
+  ]
+}
