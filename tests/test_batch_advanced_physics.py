@@ -131,3 +131,21 @@ def test_jax_service_matches_the_reference_when_jax_is_installed(advanced_inputs
         for key, value in expected_lane.items():
             if isinstance(value, (int, float, np.number)):
                 assert actual_lane[key] == pytest.approx(value, rel=2e-12, abs=1e-12), key
+
+
+@pytest.mark.gpu
+def test_jax_gpu_service_matches_the_reference(advanced_inputs):
+    pytest.importorskip("jax")
+    geometries, curves, thermals, casings, flames, specifics = advanced_inputs
+    batch = AdvancedPhysicsBatch.from_objects(
+        geometries, curves, thermals, casings, flame_temp_k=flames, r_specific=specifics,
+    )
+
+    actual = get_backend("jax", device="cuda:0").advanced_physics_proxies(batch).to_results()
+    expected = get_backend("cpu-reference").advanced_physics_proxies(batch).to_results()
+
+    for actual_lane, expected_lane in zip(actual, expected):
+        assert actual_lane.keys() == expected_lane.keys()
+        for key, value in expected_lane.items():
+            if isinstance(value, (int, float, np.number)):
+                assert actual_lane[key] == pytest.approx(value, rel=2e-12, abs=1e-12), key

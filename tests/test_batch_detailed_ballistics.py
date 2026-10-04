@@ -114,3 +114,14 @@ def test_jax_backend_service_matches_numpy_when_jax_is_installed():
     actual = get_backend("jax", device="cpu").detailed_ballistics(batch).to_results()
     for got, want in zip(actual, expected):
         _assert_detailed_equal(got, want)
+
+
+@pytest.mark.gpu
+def test_jax_gpu_backend_service_matches_numpy():
+    pytest.importorskip("jax")
+    views = [_solved_view(0.03), _solved_view(0.02, star=True)]
+    batch = DetailedBallisticsBatch.from_views(views, {"resample_step": 0.03, "max_time_points": 40})
+    expected = get_backend("cpu-vectorized").detailed_ballistics(batch).to_results()
+    actual = get_backend("jax", device="cuda:0").detailed_ballistics(batch).to_results()
+    for got, want in zip(actual, expected):
+        _assert_detailed_equal(got, want)
