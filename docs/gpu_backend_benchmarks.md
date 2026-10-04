@@ -149,6 +149,26 @@ and the generated-flow maximum is above that margin on both backends. The comple
 comparison, not an Acceptance API evaluation on each record. See section 14.22 of the architecture document for
 the open release decision. No tolerance was changed by this rerun.
 
+After adding opt-in dense-step peak diagnostics, the CPU full-corpus parity test passed again in 762.67 s and the
+RTX 4060 JAX run passed in 262.09 s. Focused refined-oracle tests also passed on both backends for `ratetable-006`,
+`guard-thinweb-002` and `ends-tubular-005`; each checks generated flow, chamber pressure, thrust and nozzle flow
+against a scalar DOP853 dense solution refined with `max_step_size=0.002` and `rtol=1e-11`, at a 2e-4 relative
+limit. The full-corpus runs test canonical accepted-point metrics only, so they do not establish this refined-peak
+margin across all 323 designs.
+
+Reproduction commands:
+
+```bash
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  .venv/bin/python -m pytest --runslow -q tests/test_batch_parity.py::test_the_numpy_backend_matches_the_stored_reference_on_the_whole_supported_corpus
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false SOLIDPY_REQUIRE_GPU=1 \
+  .venv/bin/python -m pytest --runslow -q tests/test_batch_parity.py::test_jax_matches_the_stored_reference_on_the_whole_supported_corpus
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  .venv/bin/python -m pytest --runslow -q tests/test_batch_continuous_peaks.py -m 'not gpu'
+MPLCONFIGDIR=/tmp/solidpy-mpl XLA_PYTHON_CLIENT_PREALLOCATE=false SOLIDPY_REQUIRE_GPU=1 \
+  .venv/bin/python -m pytest --runslow -q tests/test_batch_continuous_peaks.py -m gpu
+```
+
 ## Offloaded share of the scalar reference (Phase 4)
 
 `python tools/profile_workloads.py` times the entry points listed in `tools/tier_map.toml` on the scalar path of three

@@ -1368,6 +1368,27 @@ or revise that criterion explicitly for grid-sensitive peaks while retaining it 
 acceptance limit was changed for this review. Full-corpus test details and reproduction commands are in
 `docs/gpu_backend_benchmarks.md`.
 
+### 14.23 Dense-step peak diagnostics (2026-10-04)
+
+The 100x margin remains the release criterion; no Acceptance limit or version-5 parity tolerance changed. The batch
+solver now offers `simulate_burn(..., continuous_peak_diagnostics=True)` on `cpu-vectorized` and `jax`. It samples
+three interior points from each accepted DOP853 dense step, includes both step endpoints, and estimates local maxima
+with a parabola only when adjacent curvature remains consistent. The event endpoint is evaluated before burnout
+snapping and on the source's left limit. These diagnostics are recorded at
+`provenance["execution"]["continuous_peaks"]`; canonical peak metrics remain the accepted-point results. The extra
+dense evaluations are disabled by default.
+
+The refined scalar oracle uses SciPy DOP853 dense output with `max_step_size=0.002`, `rtol=1e-11`, and bounded
+minimization inside each accepted interval. CPU-vectorized and RTX 4060 JAX each passed the 2e-4 peak margin on
+`ratetable-006`, `guard-thinweb-002`, and `ends-tubular-005` for generated flow, pressure, thrust and nozzle flow.
+These cover the corpus cases previously identified as most sensitive to sampled peaks and branch transitions. A
+separate test confirms diagnostics are opt-in and leave all canonical metrics identical.
+
+The CPU and RTX 4060 JAX full-corpus parity tests also passed after this change. They validate the canonical
+accepted-point metrics against the stored references across 323 supported designs, not the refined dense peaks for
+all 323. The 100x criterion therefore remains unproven for the entire corpus; completing that measurement is still
+required before closing this release gate. Full commands and runtimes are in `docs/gpu_backend_benchmarks.md`.
+
 ## Appendix A. State vector and padded batch schema
 
 State per lane (size `G + 7`):
