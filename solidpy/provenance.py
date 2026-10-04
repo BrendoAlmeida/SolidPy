@@ -24,6 +24,10 @@ _CERTIFIED_KERNELS = frozenset({
         "5",
         "71abd85263f2220daff15577211fccff0870f85425885cd29fb4830c6c5a623b",
     ),
+    (
+        "5",
+        "b351bb70d9ca4046950154528d1bffb750493f53c7efd52aefd8d4642c28d1c1",
+    ),
 })
 
 
