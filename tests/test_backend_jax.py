@@ -9,6 +9,7 @@ from solidpy import backends
 from solidpy.backends import BackendUnavailable, SolveOptions, UnsupportedLane
 from solidpy.backends import _tolerances as tol
 from solidpy.batch import ProblemBatch
+from solidpy.provenance import REFERENCE_PHYSICS_EQUIVALENCE_CLASS
 
 PLAIN_TAGS = {"scalar_thermo", "power_law", "igniter_none", "activation_none", "tail_off_numerical"}
 ROUNDING_DECIDED = ("solver-failure",)  # see tests/test_batch_solver.py
@@ -257,8 +258,12 @@ def test_on_the_accelerator_the_corpus_subset_matches_the_reference(subset):
 
     assert backend.device == "cuda:0"
     assert compare_with_the_reference(cases, reference, results) == []
-    assert results[0]["provenance"]["execution"]["device"] == "cuda:0"
-    assert results[0]["provenance"]["execution"]["device_name"]
+    execution = results[0]["provenance"]["execution"]
+    assert execution["device"] == "cuda:0"
+    assert execution["device_name"]
+    assert execution["physics_equivalence_class"] == REFERENCE_PHYSICS_EQUIVALENCE_CLASS
+    assert execution["parity_certificate"]["kernel_source_hash"] == execution["kernel_source_hash"]
+    assert execution["parity_certificate"]["tolerances_version"] == execution["tolerances_version"]
 
 
 @pytest.mark.gpu
