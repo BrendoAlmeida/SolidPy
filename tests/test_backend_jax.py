@@ -157,6 +157,34 @@ def test_history_full_returns_the_canonical_channels_and_the_step_budget_flags_f
     assert short["provenance"]["execution"]["step_overflow"] is True and not short["status"]["completed"]
 
 
+def test_device_result_stream_materializes_the_same_canonical_lanes(subset):
+    cases, reference, batch = subset
+    one = batch.select([0])
+    backend = backends.get_backend("jax", device="cpu")
+
+    expected = backend.solve_burn(one, SolveOptions(history="full", max_steps=600)).to_results()
+    streamed = backend.solve_burn_device(one, SolveOptions(history="full", max_steps=600))
+    got = streamed.to_results()
+
+    assert len(streamed) == len(got) == 1
+    assert list(got[0]["history"]) == list(expected[0]["history"])
+    assert got[0]["status"] == expected[0]["status"]
+    for key in ("total_impulse_ns", "peak_chamber_pressure_pa", "generated_mass_integral_kg"):
+        assert got[0]["metrics"][key] == pytest.approx(expected[0]["metrics"][key])
+    assert streamed.execution["chunks"] == 1
+
+
+def test_device_result_can_materialize_metrics_without_returning_host_history(subset):
+    cases, reference, batch = subset
+    streamed = backends.get_backend("jax", device="cpu").solve_burn_device(
+        batch.select([0]), SolveOptions(history="full", max_steps=600)
+    )
+    rows = list(streamed.iter_results(history="metrics"))
+
+    assert len(rows) == 1 and rows[0]["history"] is None
+    assert rows[0]["metrics"]["total_impulse_ns"] > 0.0
+
+
 def test_history_policies_retain_then_format_jax_accepted_points(subset):
     cases, reference, batch = subset
     one = batch.select([0])

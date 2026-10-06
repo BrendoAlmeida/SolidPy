@@ -87,6 +87,121 @@ def _compiled_thermal():
     return jax.jit(lambda P: thermal_solver.solve_thermal(driver, P))
 
 
+@functools.lru_cache(maxsize=None)
+def _compiled_thermal_dynamic_coefficients():
+    """Build thermal interval coefficients and derived lane scalars from raw curves on device."""
+    import jax
+    import jax.numpy as jnp
+    from ..Multiphysics import OUTER_WALL_H_W_M2K
+
+    @jax.jit
+    def prepare(P):
+        time_s = P["raw_time"]
+        point_count = P["raw_point_count"].astype(jnp.int32)
+        n_intervals = P["n_intervals"].astype(jnp.int32)
+        time_steps = time_s.shape[1] - 1
+        index = jnp.arange(time_steps)[None, :]
+        dt = jnp.maximum(jnp.diff(time_s, axis=1), 1e-5)
+        active = index < n_intervals[:, None]
+        dt = jnp.where(active, dt, 1.0)
+
+        radius = jnp.maximum(P["raw_throat"][:, 1:] * 0.5, 1e-6)
+        area = jnp.pi * radius**2
+        pressure = jnp.maximum(P["raw_pressure"][:, 1:], 0.0)
+        pressure = jnp.where(
+            pressure <= 0.0,
+            jnp.maximum(P["raw_thrust"][:, 1:], 0.0) / jnp.maximum(area, 1e-9),
+            pressure,
+        )
+        mass_flow = jnp.maximum(P["raw_mass_flow"][:, 1:], 0.0)
+        flame = P["flame_temp_k"]
+        gamma = P["stagnation"] * 2.0 - 1.0
+        recovery = flame * (1.0 + 0.89 * (gamma - 1.0) / 2.0) / jnp.maximum(
+            1.0 + (gamma - 1.0) / 2.0, 1e-9
+        )
+        cp_gas = (gamma * P["r_specific"] / jnp.maximum(gamma - 1.0, 1e-9))[:, None]
+        mass_flux = mass_flow / jnp.maximum(area, 1e-9)
+        temp = jnp.maximum(flame, 100.0)
+        viscosity = (
+            1.716e-5 * (temp / 273.15) ** 1.5 * (273.15 + 110.4) / (temp + 110.4)
+        )[:, None]
+        bartz = (
+            0.026
+            / jnp.maximum((2.0 * radius) ** 0.2, 1e-4)
+            * (viscosity**0.2 * cp_gas / jnp.maximum(0.82**0.6, 1e-9))
+            * jnp.maximum(mass_flux, 1e-9) ** 0.8
+        )
+        bartz = jnp.where(active, bartz, 0.0)
+
+        ablation_values = P["raw_ablation"][:, 1:]
+        given = ~jnp.isnan(ablation_values)
+        last_given = jnp.max(jnp.where(given & active, index, -1), axis=1)
+        gather_index = jnp.maximum(last_given, 0)
+        base_values = jnp.take_along_axis(ablation_values, gather_index[:, None], axis=1)[:, 0]
+        base = jnp.where(last_given >= 0, jnp.maximum(base_values, 0.0), 0.0)
+        rate = (
+            1.8e-8
+            * P["ablation_scale"][:, None]
+            * jnp.maximum(pressure, 1.0) ** P["pressure_exponent"][:, None]
+            * jnp.maximum(mass_flow, 1e-9) ** P["mass_flux_exponent"][:, None]
+        )
+        increments = jnp.where(active & (index > last_given[:, None]), rate * dt, 0.0)
+        throat_ablation = base + jnp.sum(increments, axis=1)
+        last_time_index = jnp.maximum(point_count - 1, 0)
+        first_time = time_s[:, 0]
+        last_time = jnp.take_along_axis(time_s, last_time_index[:, None], axis=1)[:, 0]
+        burn_duration = jnp.maximum(last_time - first_time, 1e-6)
+        max_recovery = jnp.where(n_intervals > 0, jnp.maximum(P["initial_temp_k"], recovery), P["initial_temp_k"])
+        node_count = P["n_nodes"].astype(jnp.int32)
+        node_index = jnp.arange(P["wall_dx"].shape[1])[None, :]
+        valid_node = node_index < node_count[:, None]
+        dx, conductivity, volumetric_capacity = P["wall_dx"], P["wall_k"], P["wall_rho_cp"]
+        thermal_mass = jnp.maximum(volumetric_capacity * dx, 1e-9)
+        k_face = 2.0 * conductivity[:, :-1] * conductivity[:, 1:] / jnp.maximum(
+            conductivity[:, :-1] + conductivity[:, 1:], 1e-9
+        )
+        distance = 0.5 * (dx[:, :-1] + dx[:, 1:])
+        conductance = k_face / jnp.maximum(distance, 1e-9)
+        edge_index = jnp.arange(conductance.shape[1])[None, :]
+        valid_edge = edge_index < (node_count[:, None] - 1)
+        conductance = jnp.where(valid_edge, conductance, 0.0)
+        upper = jnp.where(
+            valid_edge, conductance / thermal_mass[:, :-1], 0.0
+        )
+        lower = jnp.where(
+            valid_edge, conductance / thermal_mass[:, 1:], 0.0
+        )
+        left = jnp.concatenate((jnp.zeros((time_s.shape[0], 1)), conductance), axis=1)
+        right = jnp.concatenate((conductance, jnp.zeros((time_s.shape[0], 1))), axis=1)
+        outer = jnp.where(node_index == (node_count[:, None] - 1), OUTER_WALL_H_W_M2K, 0.0)
+        diagonal = -(left + right + outer) / thermal_mass
+        diagonal = jnp.where(valid_node, diagonal, 0.0)
+        source = jnp.where(
+            node_index == (node_count[:, None] - 1),
+            OUTER_WALL_H_W_M2K * P["initial_temp_k"][:, None] / thermal_mass,
+            0.0,
+        )
+        source = jnp.where(valid_node, source, 0.0)
+        y0 = jnp.where(valid_node, jnp.maximum(P["initial_temp_k"][:, None], 150.0), 0.0)
+        e0 = 1.0 / thermal_mass[:, 0]
+        return {
+            "dt": dt,
+            "bartz": bartz,
+            "recovery_temp_k": recovery,
+            "throat_ablation_m": throat_ablation,
+            "max_recovery_temp_k": max_recovery,
+            "burn_duration_s": burn_duration,
+            "lower": lower,
+            "diag": diagonal,
+            "upper": upper,
+            "source": source,
+            "y0": y0,
+            "e0": e0,
+        }
+
+    return prepare
+
+
 @functools.lru_cache(maxsize=1)
 def _compiled_axial_history_metrics():
     """JIT the uniform-history axial diagnostic so accepted histories stay on the selected device."""
@@ -218,6 +333,7 @@ class JaxBackend:
     def _run(
         self, sub, full: bool, max_steps: int, cap: Optional[int], floor: int = MIN_LANE_BUCKET,
         axial_metrics: bool = False, continuous_peak_diagnostics: bool = False,
+        return_device: bool = False,
     ):
         """Solve one padded launch and return the outputs as NumPy arrays for the real lanes only.
 
@@ -251,8 +367,14 @@ class JaxBackend:
                 )
                 device_out = dict(device_out)
                 device_out.update({f"_axial_flow_{name}": value for name, value in axial.items()})
-            out = jax.device_get(device_out)
+            if return_device:
+                jax.block_until_ready(device_out)
+                out = device_out
+            else:
+                out = jax.device_get(device_out)
         self._device_s += time.perf_counter() - started
+        if return_device:
+            return {name: value[:lanes] for name, value in out.items() if getattr(value, "ndim", 0)}
         return {name: np.asarray(v)[:lanes] for name, v in out.items() if np.ndim(v)}
 
     def solve_burn(self, batch, options=None):
@@ -296,6 +418,107 @@ class JaxBackend:
         self.last_timings = {"device_s": self._device_s, "assemble_s": assemble_s}
         return BatchResult(results, self.name, {**provenance, "tiers": launches})
 
+    def solve_burn_device(self, batch, options=None):
+        """Solve on JAX and stream each bounded output chunk while its histories remain on device.
+
+        Unlike :meth:`solve_burn`, this does not assemble every lane into host NumPy arrays up
+        front. Consumers can fuse downstream JAX work using ``iter_device_batches`` or cross the
+        compatibility boundary one chunk at a time using ``iter_results``/``to_results``.
+        """
+        from ..batch.assemble import assemble
+        from ..batch.result import DeviceBatchResult
+        from ..batch.tiers import DEFAULT_TIERS
+
+        options = SolveOptions() if options is None else options
+        if not isinstance(options, SolveOptions):
+            raise TypeError(f"options must be a SolveOptions, got {type(options).__name__}")
+        refused = refused_lanes(batch, self.capabilities())
+        if refused:
+            raise unsupported_lane_error(self.name, refused)
+        batch = batch.with_table_buckets()
+        history_kind, _ = parse_history_policy(options.history)
+        stores_history = history_kind != "metrics"
+        axial_metrics = history_kind == "uniform"
+        max_steps = options.max_steps or DEFAULT_MAX_STEPS[history_kind]
+        tiers = options.tiers if options.tiers is not None else (() if stores_history else DEFAULT_TIERS)
+        grains = _bucket_grains(batch.g_max)
+        per_launch = self._lanes_per_launch(grains, stores_history, max_steps)
+        provenance = self.provenance()
+        execution: Dict[str, Any] = {**provenance, "tiers": [], "chunks": 0}
+        self._device_s = 0.0
+
+        def device_chunks():
+            for start in range(0, len(batch), per_launch):
+                chunk = batch.select(np.arange(start, min(start + per_launch, len(batch)))).with_g_max(grains)
+                floor = min(MIN_LANE_BUCKET, per_launch)
+                remaining = np.arange(len(chunk))
+                merged = None
+                tier_info = []
+                for cap in (*tiers, None):
+                    sub = chunk.select(remaining)
+                    out = self._run(
+                        sub, stores_history, max_steps, cap, floor,
+                        axial_metrics=axial_metrics,
+                        continuous_peak_diagnostics=options.continuous_peak_diagnostics,
+                        return_device=True,
+                    )
+                    unfinished = np.asarray(self._jax.device_get(out["unfinished"]), dtype=bool)
+                    if merged is None:
+                        # Merging can outlive _run's scoped x64 context. Creating float64
+                        # buffers outside it silently truncates to float32 when a caller's
+                        # global JAX configuration has x64 disabled.
+                        with self._x64(), self._jax.default_device(self._device):
+                            merged = {
+                                name: self._jax.numpy.zeros(
+                                    (len(chunk),) + tuple(value.shape[1:]), dtype=value.dtype
+                                )
+                                for name, value in out.items()
+                                if value.ndim >= 1 and value.shape[0] == len(sub)
+                            }
+                    done = ~unfinished
+                    for name in merged:
+                        merged[name] = merged[name].at[remaining[done]].set(out[name][done])
+                    tier_info.append((cap, len(sub), int(unfinished.sum())))
+                    remaining = remaining[unfinished]
+                    del out
+                    if not len(remaining):
+                        break
+                if merged is None:
+                    continue
+                execution["tiers"].append(tier_info)
+                execution["chunks"] += 1
+                yield chunk, merged
+
+        def materialize(chunk, output, history_override=None):
+            from ..backends import get_backend
+
+            # Full adaptive buffers are padded to max_steps on device. Transfer only a few lanes
+            # at a time so the host never holds the whole padded history tensor.
+            lane_block = 16 if stores_history else max(len(chunk), 1)
+            for first in range(0, len(chunk), lane_block):
+                last = min(first + lane_block, len(chunk))
+                sub = chunk.select(np.arange(first, last))
+                host_output = self._jax.device_get(
+                    {name: value[first:last] for name, value in output.items()}
+                )
+                rows = assemble(sub, host_output, history_override or options.history, provenance)
+                for local, row in enumerate(rows):
+                    if row.get("provenance", {}).get("execution", {}).get("step_overflow"):
+                        lane = first + local
+                        reference = get_backend("cpu-reference")
+                        fallback = reference.solve_burn(
+                            chunk.select(np.asarray([lane])), options
+                        ).to_results()[0]
+                        fallback_execution = dict(reference.provenance())
+                        fallback_execution["fallback"] = {
+                            "lane_reason": ["step_overflow"], "ran_on": "cpu-reference"
+                        }
+                        fallback["provenance"]["execution"] = fallback_execution
+                        row = fallback
+                    yield row
+
+        return DeviceBatchResult(len(batch), self.name, execution, device_chunks(), materialize)
+
     # -- thermal ablation ------------------------------------------------------------------------------------
     def _thermal_lanes_per_launch(self, nodes: int, steps: int) -> int:
         """Lanes per thermal launch: the per-step series dominate the memory (four copies of two doubles per step), the
@@ -311,7 +534,17 @@ class JaxBackend:
             if jnp.zeros(1).dtype != np.float64:
                 raise RuntimeError("float64 is not available in this JAX build; the jax backend needs it")
             P = {name: jax.device_put(jnp.asarray(array), self._device) for name, array in padded.arrays.items()}
-            out = jax.device_get(_compiled_thermal()(P))
+            dynamic = _compiled_thermal_dynamic_coefficients()(P) if padded.deferred_coefficients else None
+            if dynamic is not None:
+                P.update(dynamic)
+            device_out = _compiled_thermal()(P)
+            if dynamic is not None:
+                device_out = {
+                    **device_out,
+                    **{f"_dynamic_{name}": value for name, value in dynamic.items()
+                       if name in {"throat_ablation_m", "max_recovery_temp_k", "burn_duration_s"}},
+                }
+            out = jax.device_get(device_out)
         self._device_s += time.perf_counter() - started
         return {name: np.asarray(v) for name, v in out.items() if np.ndim(v)}
 

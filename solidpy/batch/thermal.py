@@ -126,6 +126,7 @@ class ThermalBatch:
     arrays: Dict[str, np.ndarray]
     lanes: List[Dict[str, Any]]
     features: List[FrozenSet[str]] = field(default_factory=list)
+    deferred_coefficients: bool = False
 
     def __len__(self) -> int:
         return len(self.lanes)
@@ -149,7 +150,7 @@ class ThermalBatch:
     def select(self, indices: Sequence[int], trim: bool = True) -> "ThermalBatch":
         """The lanes ``indices`` in that order (an index may repeat), the padded axes trimmed to what they need unless ``trim`` is false."""
         index = np.asarray(indices, dtype=int)
-        arrays = {name: self.arrays[name][index] for name in LANE_ARRAYS}
+        arrays = {name: value[index] for name, value in self.arrays.items()}
         if trim:
             n = int(arrays["n_nodes"].max()) if len(index) else 1
             t = max(int(arrays["n_intervals"].max()) if len(index) else 1, 1)
@@ -159,7 +160,13 @@ class ThermalBatch:
                 arrays[name] = arrays[name][:, :n]
             for name in ("dt", "bartz"):
                 arrays[name] = arrays[name][:, :t]
-        return ThermalBatch(arrays, [self.lanes[i] for i in index], [self.features[i] for i in index])
+            if self.deferred_coefficients:
+                for name in ("raw_time", "raw_thrust", "raw_mass_flow", "raw_pressure", "raw_throat", "raw_ablation"):
+                    arrays[name] = arrays[name][:, : t + 1]
+        return ThermalBatch(
+            arrays, [self.lanes[i] for i in index], [self.features[i] for i in index],
+            self.deferred_coefficients,
+        )
 
     def with_padding(self, nodes: int, steps: int) -> "ThermalBatch":
         """The same lanes with the node axis padded to ``nodes`` and the step axis to ``steps`` (no smaller than now)."""
@@ -177,7 +184,18 @@ class ThermalBatch:
         for name in ("dt", "bartz"):
             arrays[name] = np.full((count, steps), 1.0 if name == "dt" else 0.0)
             arrays[name][:, : self.t_max] = a[name]
-        return ThermalBatch(arrays, self.lanes, self.features)
+        if self.deferred_coefficients:
+            for name in ("raw_time", "raw_thrust", "raw_mass_flow", "raw_pressure", "raw_throat", "raw_ablation"):
+                fill = np.nan if name == "raw_ablation" else 0.0
+                arrays[name] = np.full((count, steps + 1), fill, dtype=float)
+                old = a[name]
+                arrays[name][:, : old.shape[1]] = old
+                if name != "raw_ablation" and old.shape[1]:
+                    arrays[name][:, old.shape[1] :] = old[:, -1:]
+            for name in ("wall_dx", "wall_k", "wall_rho_cp"):
+                arrays[name] = np.zeros((count, nodes), dtype=float)
+                arrays[name][:, : self.n_max] = a[name]
+        return ThermalBatch(arrays, self.lanes, self.features, self.deferred_coefficients)
 
     @classmethod
     def from_objects(
@@ -192,6 +210,7 @@ class ThermalBatch:
         gamma=None,
         initial_temperature_k=298.15,
         liner_thickness_factor=1.0,
+        defer_dynamic_coefficients: bool = False,
     ) -> "ThermalBatch":
         """Pack lanes with the arguments of ``simulate_thermal_ablation``; each may be one value for all lanes or one per lane.
 
@@ -218,7 +237,7 @@ class ThermalBatch:
             lane = dict(geometry=geometries[i], curve=curves[i], casing_material=casings[i], nozzle_material=nozzles[i],
                         flame_temp_k=flames[i], r_specific=specifics[i], gamma=gamma_i,
                         initial_temperature_k=float(starts[i]), liner_thickness_factor=liners[i])
-            part, lane_features = _pack_lane(lane)
+            part, lane_features = _pack_lane(lane, defer_dynamic_coefficients=defer_dynamic_coefficients)
             lanes.append(lane)
             features.append(lane_features)
             parts.append(part)
@@ -242,10 +261,29 @@ class ThermalBatch:
             arrays["y0"][i, :n] = p["y0"]
             arrays["dt"][i, :m] = p["dt"]
             arrays["bartz"][i, :m] = p["bartz"]
-        return cls(arrays, lanes, features)
+        if defer_dynamic_coefficients:
+            point_count = max(max((p["raw_point_count"] for p in parts), default=1), 1)
+            for name in ("raw_time", "raw_thrust", "raw_mass_flow", "raw_pressure", "raw_throat", "raw_ablation"):
+                fill = np.nan if name == "raw_ablation" else 0.0
+                arrays[name] = np.full((count, point_count), fill, dtype=float)
+                for i, p in enumerate(parts):
+                    values = p[name]
+                    arrays[name][i, : len(values)] = values
+                    if name != "raw_ablation" and len(values):
+                        arrays[name][i, len(values) :] = values[-1]
+            for name in (
+                "raw_point_count", "ablation_scale", "pressure_exponent", "mass_flux_exponent", "r_specific",
+            ):
+                arrays[name] = np.asarray([p[name] for p in parts], dtype=np.float64)
+            for name in ("wall_dx", "wall_k", "wall_rho_cp"):
+                arrays[name] = np.zeros((count, nodes), dtype=np.float64)
+                for i, p in enumerate(parts):
+                    values = p[name]
+                    arrays[name][i, : len(values)] = values
+        return cls(arrays, lanes, features, bool(defer_dynamic_coefficients))
 
 
-def _pack_lane(lane: Dict[str, Any]):
+def _pack_lane(lane: Dict[str, Any], *, defer_dynamic_coefficients: bool = False):
     """The arrays of one lane and its features; a lane the batched solve cannot take gets harmless placeholder arrays."""
     geometry, curve = lane["geometry"], lane["curve"]
     casing, nozzle = lane["casing_material"], lane["nozzle_material"]
@@ -283,23 +321,56 @@ def _pack_lane(lane: Dict[str, Any]):
         burn_duration = 1e-6
     else:
         dx, k, rho_cp, inner, interface, liner_m, wall_m = _wall_layers(geometry, casing, lane["liner_thickness_factor"])
-        dt, bartz, recovery, ablated = interval_coefficients(
-            time_s, thrust, mass_flow, pressure, throat, ablation, flame, float(lane["r_specific"]), gamma,
-            nozzle.ablation_rate_scale, nozzle.ablation_pressure_exponent, nozzle.ablation_mass_flux_exponent,
-        )
+        if defer_dynamic_coefficients:
+            dt = np.ones(max(len(time_s) - 1, 0), dtype=float)
+            bartz = np.zeros_like(dt)
+            recovery, ablated = flame, 0.0
+        else:
+            dt, bartz, recovery, ablated = interval_coefficients(
+                time_s, thrust, mass_flow, pressure, throat, ablation, flame, float(lane["r_specific"]), gamma,
+                nozzle.ablation_rate_scale, nozzle.ablation_pressure_exponent, nozzle.ablation_mass_flux_exponent,
+            )
         burn_duration = max(float(time_s[-1] - time_s[0]), 1e-6) if len(time_s) else 1e-6
-    jacobian, source, heat_flux_source = _build_wall_conduction_operator(dx, k, rho_cp, OUTER_WALL_H_W_M2K, start)
     nodes = len(dx)
     intervals = len(dt)
+    if defer_dynamic_coefficients:
+        lower = np.zeros(max(nodes - 1, 0), dtype=float)
+        diagonal = np.zeros(nodes, dtype=float)
+        upper = np.zeros(max(nodes - 1, 0), dtype=float)
+        source = np.zeros(nodes, dtype=float)
+        e0 = 0.0
+    else:
+        jacobian, source, heat_flux_source = _build_wall_conduction_operator(
+            dx, k, rho_cp, OUTER_WALL_H_W_M2K, start
+        )
+        lower, diagonal, upper = jacobian.diagonal(-1), jacobian.diagonal(0), jacobian.diagonal(1)
+        e0 = float(heat_flux_source[0])
     part = {
-        "lower": jacobian.diagonal(-1), "diag": jacobian.diagonal(0), "upper": jacobian.diagonal(1), "source": source, "y0": np.full(nodes, max(start, 150.0)),
-        "e0": float(heat_flux_source[0]), "dt": dt, "bartz": bartz,
+        "lower": lower, "diag": diagonal, "upper": upper, "source": source, "y0": np.full(nodes, max(start, 150.0)),
+        "e0": e0, "dt": dt, "bartz": bartz,
         "n_nodes": nodes, "n_intervals": intervals, "inner_node": inner, "interface_node": interface,
         "has_liner": liner_m > 1e-4, "thickness_m": liner_m + wall_m, "flame_temp_k": flame,
         "stagnation": (gamma + 1.0) / 2.0, "recovery_temp_k": recovery, "throat_ablation_m": ablated,
         "max_recovery_temp_k": max(start, recovery) if intervals else start, "burn_duration_s": burn_duration,
         "wall_thickness_m": wall_m, "initial_temp_k": start,
     }
+    if defer_dynamic_coefficients:
+        part.update(
+            wall_dx=np.asarray(dx, dtype=float),
+            wall_k=np.asarray(k, dtype=float),
+            wall_rho_cp=np.asarray(rho_cp, dtype=float),
+            raw_time=time_s,
+            raw_thrust=thrust,
+            raw_mass_flow=mass_flow,
+            raw_pressure=pressure,
+            raw_throat=throat,
+            raw_ablation=ablation,
+            raw_point_count=len(time_s),
+            ablation_scale=float(nozzle.ablation_rate_scale),
+            pressure_exponent=float(nozzle.ablation_pressure_exponent),
+            mass_flux_exponent=float(nozzle.ablation_mass_flux_exponent),
+            r_specific=float(lane["r_specific"]),
+        )
     return part, frozenset(features)
 
 
@@ -308,7 +379,11 @@ def assemble(batch: ThermalBatch, out: Dict[str, np.ndarray]) -> List[Optional[D
 
     A lane whose integration failed or whose extremes are not finite gives ``None``: the router reruns it on the scalar code.
     """
-    a = batch.arrays
+    a = dict(batch.arrays)
+    for field in ("throat_ablation_m", "max_recovery_temp_k", "burn_duration_s"):
+        dynamic = f"_dynamic_{field}"
+        if dynamic in out:
+            a[field] = out[dynamic]
     results: List[Optional[Dict[str, float]]] = []
     for lane, spec in enumerate(batch.lanes):
         values = {name: float(out[name][lane]) for name in

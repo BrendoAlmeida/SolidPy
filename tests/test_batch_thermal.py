@@ -263,6 +263,33 @@ def test_options_are_checked_and_the_execution_describes_the_integration(fixed_b
     assert execution["radau_attempts"] >= execution["radau_steps"] > 0 and set(numpy_backend.last_timings) == {"solve_s", "assemble_s"}
 
 
+def test_jax_deferred_thermal_preparation_matches_eager_preparation():
+    pytest.importorskip("jax")
+    lanes = [case_lane("steel"), case_lane("steel_liner")]
+    eager = pack_lanes(lanes)
+    deferred = ThermalBatch.from_objects(
+        [lane["geometry"] for lane in lanes],
+        [lane["curve"] for lane in lanes],
+        [lane["casing_material"] for lane in lanes],
+        [lane["nozzle_material"] for lane in lanes],
+        flame_temp_k=[lane["flame_temp_k"] for lane in lanes],
+        r_specific=[lane["r_specific"] for lane in lanes],
+        gamma=[lane["gamma"] for lane in lanes],
+        initial_temperature_k=[lane["initial_temperature_k"] for lane in lanes],
+        liner_thickness_factor=[lane["liner_thickness_factor"] for lane in lanes],
+        defer_dynamic_coefficients=True,
+    )
+    assert not any(deferred.features)
+    assert deferred.deferred_coefficients
+
+    backend = backends.get_backend("jax", device="cpu")
+    expected = backend.thermal_ablation(eager).to_results()
+    got = backend.thermal_ablation(deferred).to_results()
+
+    for actual, reference in zip(got, expected, strict=True):
+        close(actual, reference, rtol=1e-8)
+
+
 def test_the_backends_advertise_the_thermal_service():
     assert backends.get_backend("cpu-reference").capabilities().provides("thermal_ablation")
     assert backends.get_backend("cpu-vectorized").capabilities().provides("thermal_ablation")

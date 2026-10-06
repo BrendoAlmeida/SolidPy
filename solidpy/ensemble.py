@@ -28,7 +28,7 @@ from .backends import SolveOptions, UnsupportedLane
 from .backends._protocol import refused_lanes, unsupported_lane_error
 from .batch import ProblemBatch
 from .batch.kernels.tables import evaluate as evaluate_table
-from .batch.result import BatchResult
+from .batch.result import BatchResult, DeviceBatchResult
 from .batch.thermal import ThermalBatch
 from ._parallel import (
     available_cpu_count, process_worker_count, process_worker_initializer, safe_process_context, spawn_pickle_safe,
@@ -37,6 +37,7 @@ from ._parallel import (
 __all__ = [
     "ProblemBatch", "SolveOptions", "ThermalBatch", "UnsupportedLane", "lane_cost", "run_advanced_physics_ensemble",
     "run_robustness_ensemble", "simulate_burn", "simulate_thermal",
+    "simulate_burn_device",
 ]
 
 #: Backends ``backend="auto"`` may pick, best first, and the smallest batch worth sending to one.
@@ -627,6 +628,38 @@ def simulate_burn(
     return BatchResult(results, backend, summary)
 
 
+def simulate_burn_device(
+    batch: ProblemBatch,
+    backend: str = "jax",
+    device: Optional[str] = None,
+    *,
+    history: str = "full",
+    max_steps: Optional[int] = None,
+    tiers: Optional[tuple] = None,
+    continuous_peak_diagnostics: bool = False,
+) -> DeviceBatchResult:
+    """Solve a fully supported JAX batch and stream its device-resident output chunks.
+
+    This lower-level entry point requires JAX and refuses unsupported lanes instead of silently
+    switching them to the CPU reference. Use ``iter_device_batches`` for fused accelerator work,
+    ``iter_results`` to materialize bounded host chunks, or ``to_results`` for the regular API.
+    Step-overflow lanes are rerun on the CPU reference during host materialization, matching
+    ``simulate_burn``'s recovery behavior.
+    """
+    if not isinstance(batch, ProblemBatch):
+        raise TypeError("simulate_burn_device needs a ProblemBatch")
+    if backend != "jax":
+        raise ValueError("simulate_burn_device currently requires backend='jax'")
+    chosen = backends.get_backend(backend, device)
+    options = SolveOptions(
+        history=history,
+        max_steps=max_steps,
+        tiers=tiers,
+        continuous_peak_diagnostics=continuous_peak_diagnostics,
+    )
+    return chosen.solve_burn_device(batch, options)
+
+
 THERMAL_SERVICE = "thermal_ablation"
 
 
@@ -784,6 +817,7 @@ def run_advanced_physics_ensemble(
         geometries, curves, casings, nozzle_material, flame_temp_k=flames, r_specific=specifics, gamma=gammas,
         initial_temperature_k=[temperature for _, temperature in scenario],
         liner_thickness_factor=[liner for liner, _ in scenario],
+        defer_dynamic_coefficients=(backend == "jax"),
     )
     packed = time.perf_counter()
     requested_backend = backend
